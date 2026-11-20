@@ -45,7 +45,9 @@ export type JukeboxState = {
 // "intro" is the show's first seconds, before the host speaks: loud, on its own, like a theme. (The organiser,
 // 2026-11-20: "start with loud music, then get quiet as the host speaks. The music can be louder in the background
 // when the host is talking or between questions." Until then the first song faded in and reached its peak just as
-// the host started, so there was no loud start at all.)
+// the host started, so there was no loud start at all.) It plays well above the level every song is evened out to -
+// "music still not loud enough at beginning of the game before host" - about 5 dB above it, where most modern songs
+// sit by themselves; a limiter (see LIMIT_DB) keeps the loudest moments from breaking up.
 // After an answer: "gap" while the result is shown and the host reacts, then "wait" - up - once he has finished
 // and the player is deciding when to tap Next. (The organiser, 2026-11-20: "make the music what is now at the end
 // of the question, but raise it while the user is waiting to push next.") If the player stays on the answer, the
@@ -53,9 +55,9 @@ export type JukeboxState = {
 // A round's title card is the loudest moment after the opening: louder than the wait for Next (a game-show producer's
 // review, 2026-11-20: "a round's title should be louder than the wait between questions"). A streak swells a little less.
 const LEVELS: Record<JukeboxVolume, { think: number; gap: number; wait: number; swell: number; title: number; intro: number }> = {
-  quiet: { think: 0.05, gap: 0.26, wait: 0.5, swell: 0.48, title: 0.6, intro: 0.6 },
-  medium: { think: 0.08, gap: 0.42, wait: 0.8, swell: 0.7, title: 0.85, intro: 0.85 },
-  loud: { think: 0.13, gap: 0.6, wait: 1, swell: 0.92, title: 1, intro: 1 },
+  quiet: { think: 0.05, gap: 0.26, wait: 0.5, swell: 0.48, title: 0.6, intro: 1 },
+  medium: { think: 0.08, gap: 0.42, wait: 0.8, swell: 0.7, title: 0.85, intro: 1.5 },
+  loud: { think: 0.13, gap: 0.6, wait: 1, swell: 0.92, title: 1, intro: 2 },
 }
 const PARTY = 0.45 // a bed to read your results by, not a performance
 // Under the host's voice the music dips, but stays audible: the organiser asked for it "a little louder ... not so
@@ -91,6 +93,13 @@ const CARVE_Q = 0.8
 const CARVE_DB = -8
 const TARGET_RMS = 0.16 // every song is brought to about this loudness, so an old recording is not lost behind a new one
 const PEAK_ROOM = 0.98 // ...but never so far that its loudest moment would clip
+// The music's last stage: a limiter that holds its peaks just under full scale, so the opening can play above the
+// evened-out level without the loudest moments breaking up. Below LIMIT_DB it changes nothing - the trim in front of
+// it takes back the make-up gain a compressor adds by itself (the Web Audio rule: the full-range gain to the 0.6).
+const LIMIT_DB = -3
+const LIMIT_RATIO = 20
+const LIMIT_TRIM = (10 ** ((LIMIT_DB * (1 - 1 / LIMIT_RATIO)) / 20)) ** 0.6
+const MAX_GAIN = 2.5 // the highest the music's own gain goes (the opening at "loud", or ♫ turned up)
 // After his last word the music waits a moment before coming back up: whatever the game does next (a question,
 // silence for a clip, the title's button) decides where it goes, so it never starts up only to be pulled down again.
 const RELEASE_HOLD_MS = 150
@@ -236,9 +245,9 @@ function goal(): number {
         ? levels[level]
         : levels.gap // 'gap' and 'linger'
   const scale = playerScale()
-  if (!voiceIsOver()) return Math.min(1, base * scale)
+  if (!voiceIsOver()) return Math.min(MAX_GAIN, base * scale)
   const duck = level === 'intro' ? UNDER_HOST_INTRO : level === 'swell' || level === 'title' ? UNDER_HOST_BIG : UNDER_HOST
-  return Math.min(1, base * scale, duck * Math.min(scale, UNDER_HOST_PLAYER_MAX))
+  return Math.min(MAX_GAIN, base * scale, duck * Math.min(scale, UNDER_HOST_PLAYER_MAX))
 }
 
 /** Seconds to cover about two thirds of the way to a new level. Each kind of move has its own speed. */
@@ -389,8 +398,18 @@ function begin(track: PartyTrack, song: Decoded, fadeSec: number, notBefore = 0)
     carve.Q.value = CARVE_Q
     carve.gain.value = 0
     carved = false
+    const trim = context.createGain()
+    trim.gain.value = LIMIT_TRIM
+    const limiter = context.createDynamicsCompressor()
+    limiter.threshold.value = LIMIT_DB
+    limiter.knee.value = 0
+    limiter.ratio.value = LIMIT_RATIO
+    limiter.attack.value = 0.001
+    limiter.release.value = 0.08
     master.connect(carve)
-    carve.connect(context.destination)
+    carve.connect(trim)
+    trim.connect(limiter)
+    limiter.connect(context.destination)
     riding = 0
   }
   const at = Math.max(context.currentTime + 0.06, notBefore)
