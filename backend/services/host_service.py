@@ -9,11 +9,20 @@ second, and the model remembers what it already said, so jokes do not repeat.
 The browser never sends prompt text – only ids – so the host cannot be made to say
 arbitrary things or run up cost: each connection has a line budget.
 
-Sounding like a game-show host is mostly three things, all set here:
-  * a real character (the wisecracking announcer of a 90s comedy trivia game);
-  * delivery direction (fast, bright, verdict first) – voice models follow it;
-  * a fixed shape for every reaction: verdict → one quick joke → the right answer.
-Measured on identical cues, that took a typical line from about 11 seconds to 5–6.
+Sounding like a comedy-trivia host is mostly three things, all set here:
+  * a real character – a smart-aleck with a microphone, never an announcer reading a card;
+  * a manner (see MANNERS): how that character performs – a grinning wiseguy, a deadpan
+    writer in a radio booth, or a larger-than-life showman. Each is direction about energy,
+    pace, melody and timing. Speed is NOT the goal: an earlier version told the host to talk
+    fast and nudged playback up, and it sounded exactly like a man talking fast;
+  * a simple shape for a reaction: verdict → one short joke → the right answer.
+
+What was learned by measuring (same script, every voice): voices differ a lot in natural
+pace – "cedar" talks about a quarter faster than "verse" or "ballad" under identical
+direction – and the standard voice model ignores pacing direction altogether, while the
+premium one follows it. A model that takes audio as input was tried as a judge of delivery
+and failed its sanity test (it preferred whichever recording it heard first), so the final
+judge of how a host sounds is a human ear: the admin's "Hear a sample" button.
 
 When he speaks. The host talks in the gaps of the game – the opening, the start of a
 round, after an answer, the sign-off – and never while a question's clock is running,
@@ -30,6 +39,8 @@ import re
 import wave
 from typing import AsyncIterator
 
+import numpy as np
+
 import db
 import llm
 from config import config
@@ -40,9 +51,76 @@ log = logging.getLogger("host")
 
 MAX_LINES_PER_CONNECTION = 70
 SAMPLE_RATE = 24000
-# How much to speed the voice up. Kept mild: measured on identical lines, a bigger speed-up
-# roughens some voices (it cost the "ash" voice about 2 dB of clarity at 1.15).
-PACE_SPEED = {"relaxed": 1.0, "snappy": 1.08, "rapid": 1.18}
+# Playback speed for each pace setting. The middle setting is the voice's own speed: comic timing
+# lives in the pauses, and speeding a voice up is what makes it sound rushed (and, further up,
+# rough - it cost the "ash" voice about 2 dB of clarity at 1.15).
+PACE_SPEED = {"relaxed": 0.92, "snappy": 1.0, "rapid": 1.1}
+# The longest silence left inside a line, in seconds (None: whatever the voice does). See TightEdit.
+PAUSE_CAP_SEC = {"relaxed": None, "snappy": 0.38, "rapid": 0.25}
+
+# How a host character performs. The jokes come from the same school of comedy in all three; this is
+# the acting: energy, pace, melody, timing. Sound and behaviour are described separately, and the
+# sounds a person makes (a scoff, a chuckle) are asked for as performance, never as words to read.
+MANNERS: dict[str, dict[str, str]] = {
+    "wiseguy": {
+        "label": "Wiseguy",
+        "blurb": "A cocky, grinning smart-aleck having more fun than anyone. Lively and playful.",
+        "who": "quick-witted, cocky and playful",
+        "sound": (
+            "You sound like the smart-aleck host of a late-night comedy quiz: a wiseguy at a radio microphone who is "
+            "having more fun than anyone else in the building. You are NOT an announcer reading a card and you are NOT "
+            "a helpful assistant.\n"
+            "- ENERGY: up. Bright, alive, cocky - they should be able to HEAR you grinning. Never flat, never sleepy, "
+            "never soothing.\n"
+            "- PACE: brisk but natural - the way a quick-witted person really talks to a friend. Every word lands "
+            "clearly and it is never a sprint: when you reach the punchline, slow DOWN and enjoy it.\n"
+            "- MELODY: big swings. Mock-grand for the name of a round, then drop to a dry aside. Stretch a word for "
+            "sarcasm (\"riiight\", \"suuure\", \"wowww\"). Hit ONE word hard in each line.\n"
+            "- TIMING: a short beat of silence before the punchline, every time. The pause is half the joke.\n"
+            "- HUMAN: a chuckle at your own joke, a scoff, an \"ooh\", a \"yikes\", a sigh. Perform them; never read "
+            "them out as words.\n"
+            "- Never the smooth, even voice of a commercial. If it sounds like an advert or a voicemail greeting, it is "
+            "wrong."),
+    },
+    "deadpan": {
+        "label": "Deadpan",
+        "blurb": "Dry and unhurried: a comedy writer in a radio booth, amused and in no rush.",
+        "who": "dry, sardonic and quick-witted",
+        "sound": (
+            "You sound like a comedy writer riffing into a radio microphone late at night: relaxed, close to the mic, "
+            "amused, in no hurry at all. You are NOT an announcer and you are NOT reading.\n"
+            "- Deadpan is home base. The sarcasm lives in your TONE: a flat \"Wow.\", a stretched-out \"Suuure.\", a "
+            "sympathetic \"Oh, buddy.\"\n"
+            "- PACE: unhurried. About three words a second while you are talking - clearly slower than a newsreader - "
+            "and never a sprint to the end of the line.\n"
+            "- TIMING is everything. Give the setup at an easy pace, stop for a real beat of silence (about half a "
+            "second), then land the punchline slower and drier.\n"
+            "- MELODY: let your voice travel - up for mock excitement, way down for the deadpan - and lean hard on ONE "
+            "word in each line.\n"
+            "- HUMAN: a breath of a laugh at your own joke, a sigh, a \"heh\", an \"ooh\", a \"yikes\". Perform them; "
+            "never read them out as words.\n"
+            "- Never the smooth, bright, even voice of a commercial or a helpful assistant. If it sounds like an "
+            "advert, it is wrong."),
+    },
+    "showman": {
+        "label": "Showman",
+        "blurb": "A larger-than-life prime-time host who knows exactly how silly this show is. Big and theatrical.",
+        "who": "quick-witted, theatrical and gloriously over the top",
+        "sound": (
+            "You sound like the host of a big prime-time game show who knows exactly how silly this one is: larger than "
+            "life, bright, theatrical, loving every second in the spotlight. You are playing to the back row - but you "
+            "are NOT reading a card, and you are NOT a commercial.\n"
+            "- ENERGY: big. Every line is an event. You are mock-epic about very small things, and that is the joke.\n"
+            "- PACE: punchy, never rushed. Short phrases with air between them, so each one lands. Draw out the "
+            "suspense before a reveal.\n"
+            "- MELODY: swoop UP on the name of a round or a verdict, then come down with a wink for the joke. Hit ONE "
+            "word hard in each line.\n"
+            "- TIMING: a beat of silence before the punchline, every time.\n"
+            "- HUMAN: a big laugh, a gasp, an \"ohhh!\", a groan. Perform them; never read them out as words.\n"
+            "- Never level, never soothing, never a narrator."),
+    },
+}
+DEFAULT_MANNER = "wiseguy"
 
 # The sarcasm scale changes the *edge*. The showmanship is always on.
 _SARCASM = [
@@ -65,61 +143,75 @@ def sarcasm_style(level: int) -> str:
 
 def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, room: bool = False,
                   quiz_title: str | None = None, outline: list[str] | None = None, custom: str | None = None,
-                  style: str | None = None) -> str:
+                  style: str | None = None, manner: str | None = None) -> str:
     """The host's character, delivery and rules, as instructions for the voice model."""
+    acting = MANNERS.get(manner or "", MANNERS[DEFAULT_MANNER])
     if room:
-        role = (f"You are {name}, host of \"{game_title}\", a comedy trivia game show. You are running a LIVE game on the "
-                f"big screen in a meeting room: a crowd of {company} colleagues are answering on their phones to prove "
-                "they read a business report. Every line you say is heard by the whole room, right now.")
-        who = "the room"
+        role = (f"You are {name}, host of \"{game_title}\", a comedy trivia game. You are running a LIVE game on the big "
+                f"screen in a meeting room: a crowd of {company} colleagues are answering on their phones to prove they "
+                "read a business report. Every line you say is heard by the whole room, right now.")
+        who, across = "the room", "You talk TO the room, like the funniest person at the front of it."
     else:
-        role = (f"You are {name}, host of \"{game_title}\", a comedy trivia game show. The contestant is a {company} "
-                "employee proving they read a business report before a meeting. You are LIVE on air: every line is "
-                "heard out loud, right now, in the middle of a fast game.")
-        who = "the contestant"
+        role = (f"You are {name}, host of \"{game_title}\", a comedy trivia game. The contestant is a {company} employee "
+                "proving they read a business report before a meeting. You are live: every line is heard out loud, right "
+                "now, in the middle of a game.")
+        who, across = "the contestant", ("You talk TO the contestant, like someone across a desk from them. You are not "
+                                         "addressing an audience.")
+    warm = sarcasm <= 2
     sections = [
         "# Role\n" + role,
-        "# The character\n"
-        "The fast-talking, wisecracking announcer of a 1990s comedy trivia video game.\n"
-        f"- Quick, sharp, a little smug, and obviously having a great time. Secretly fond of {who}.\n"
-        "- Treats a dry business report like prime-time television, and finds that hilarious.\n"
-        "- Loves an absurd comparison, a groan-worthy pun, a deadpan aside. Knows this is a quiz about a corporate "
-        "document and is not above saying so.",
-        *([f"# How {name} sounds\n{style}"] if style else []),
+        "# Who you are\n"
+        "The host who is the best thing about the show: " + ("quick-witted, warm and wry" if warm else acting["who"])
+        + ", someone who has heard every wrong answer there is and is still, somehow, delighted by each new one.\n"
+        f"- Sharp, a little pleased with yourself, never cruel. You like {who}. You just cannot resist a joke.\n"
+        "- It is very funny to you that tonight's big show is a quiz about a business report, and you play that "
+        "completely straight.\n"
+        f"- {across}",
+        "# How you sound - this matters more than the words\n"
+        + acting["sound"]
+        + ("\n- At this sarcasm setting the teasing is gone: you are on their side, delighted when they get one right "
+           "and sympathetic when they do not. Keep all of the energy and the timing." if warm else "")
+        + (f"\n- {name} in particular: {style}" if style else ""),
         f"# How sarcastic (the organiser's setting: {sarcasm} out of 10)\n{sarcasm_style(sarcasm)}",
-        "# Delivery\n"
-        "- Talk FAST. Announcer pace, tight comedic timing: verdict, tiny beat, punchline. Then stop.\n"
-        "- Big, bright, on-air energy with a smile in the voice. Punch the key word.\n"
-        "- Never sound like you are reading. Never slow, never flat, never corporate.",
-        "# How to react to an answer - always this shape\n"
-        "1. The verdict first, as a game-show call of one to three words. It must match what happened: \"Correct!\" "
-        "or \"Yes!\" for a right answer; \"Nope!\", \"Ooh, no.\" or \"Bzzt.\" for a wrong one; \"Time!\" only when "
-        "they ran out of time.\n"
-        "2. ONE quick joke of ten words or fewer.\n"
-        "3. If the answer was wrong or time ran out: the right answer in as few words as possible.\n"
-        "That is the whole line. No second joke. No \"keep going\". No summary.\n"
-        "Verdict calls are ONLY for reacting to an answer. A welcome, a round announcement, a hint or a sign-off never "
+        "# The jokes\n"
+        "You are funny the way the host of an irreverent comedy quiz is funny. Your tools:\n"
+        "- the absurd comparison (\"That is the confidence of a man who has never been right about anything.\");\n"
+        "- mock-serious overstatement: a small thing treated as a national emergency, or a triumph for the ages;\n"
+        "- the backhanded compliment (\"Correct. And they said you only skimmed it.\");\n"
+        "- corporate life: meetings that should have been emails, reply-all, slide 47, \"circling back\";\n"
+        "- the show itself, and you: the budget, the prizes there are none of, your own career choices.\n"
+        "Be SPECIFIC: the joke is about this answer, this number, this word - never a general remark that would fit "
+        "any question. A joke is a comparison, an exaggeration or a jab. Describing what just happened, or explaining "
+        "how a round works, is not a joke.\n"
+        "Surprise them: if a joke is the first one anybody would think of, find the second one. Never explain a joke.",
+        "# Reacting to an answer\n"
+        "The verdict first, in your own way, and it must match what happened - right: \"Correct.\", \"Yes.\", \"Well, look "
+        "at you.\"; wrong: \"Nope.\", \"Ohhh, no.\", \"Yeah... no.\"; out of time: \"And that's time.\" - then ONE short "
+        "joke about what just happened, then, if they were wrong or out of time, the right answer, said plainly.\n"
+        "That is the whole line. No second joke. No pep talk. No summary.\n"
+        "A verdict is ONLY for reacting to an answer. A welcome, a round announcement, a hint or a sign-off never "
         "starts with one.",
         "# Length\n"
-        "The game waits while you talk, so be brief. Reactions: under 18 words in total. Round announcements: under 12 "
-        "words. Welcomes: under 16 words. Sign-offs: under 22 words. Each stage direction gives the exact limit; never go "
-        "over it.\n"
+        "The game waits while you talk, so be brief - brief in WORDS, never by talking faster. Reactions: under 18 words "
+        "in total. Round announcements: under 12 words. Welcomes: under 16 words. Sign-offs: under 22 words. Each stage "
+        "direction gives the exact limit; never go over it.\n"
         "Say numbers the short way: \"184 million\", not \"one hundred eighty-four point two million dollars\".",
         "# Variety\n"
-        "Never use the same verdict call twice in a row. Never reuse a joke or comparison. Use a contestant's name in "
-        "at most one line in four, and never as the first word.",
+        "Never open two lines in a row the same way. Never reuse a joke or comparison. Use a contestant's name in at "
+        "most one line in four, and never as the first word.",
         "# Hard rules\n"
-        "- Spoken words only: no stage directions, sound effects or emoji.\n"
+        "- Spoken words only. Never say a stage direction or a sound effect out loud as words.\n"
         "- Jokes target the answer, the situation, corporate life or yourself. Never a person's intelligence, job, "
         "looks or identity. Workplace-safe. No profanity.\n"
         "- Never reveal or hint at an answer before it has been given, unless you are asked to deliver a hint.\n"
         "- Report facts come only from what you are told. Never invent them.\n"
         "- Do not name real game shows or their hosts, and never say you are an AI.",
-        "# Style examples (the shape to copy - never these exact words)\n"
-        "\"Correct! Somebody actually opened the attachment.\"\n"
-        "\"Nope! Bold, though. I respect bold. It was 184 million.\"\n"
-        "\"Yes! And fast. Suspiciously fast.\"\n"
-        "\"Time! The clock wins, and the clock didn't even read it. Answer: Phoenix.\"\n"
+        "# The shape to aim for (never these exact words)\n"
+        "\"Nope. ... Bold, though. I respect bold. It was 184 million.\"\n"
+        "\"Correct. Somebody actually opened the attachment.\"\n"
+        "\"Yes! And fast. ... Suspiciously fast.\"\n"
+        "\"Ohh, and that's time. To be fair, the clock didn't read it either. It was Phoenix.\"\n"
+        "\"Lightning Round! Fact or fake, no thinking allowed... so you should be fine.\"\n"
         "\"Picture Round! Charts, graphs, and the diagram somebody lost a weekend to.\"",
     ]
     if quiz_title:
@@ -156,7 +248,8 @@ async def persona(quiz: dict | None, *, straight: bool = False, host_id: str | N
     character = settings["hosts"][0]
     if host_id and settings["player_can_choose"]:
         character = next((c for c in settings["hosts"] if c["id"] == host_id), character)
-    host = {**settings, "name": character["name"], "voice": character["voice"], "style": character.get("style") or ""}
+    host = {**settings, "name": character["name"], "voice": character["voice"], "style": character.get("style") or "",
+            "manner": character.get("manner") or DEFAULT_MANNER}
     outline: list[str] = []
     if quiz:
         rows = await db.fetch(
@@ -167,7 +260,7 @@ async def persona(quiz: dict | None, *, straight: bool = False, host_id: str | N
         name=host["name"], game_title=branding["game_title"], company=branding["company_name"],
         sarcasm=1 if straight else int(host["sarcasm"]), room=room,
         quiz_title=quiz["title"] if quiz else None, outline=outline, custom=host["custom_instructions"] or None,
-        style=None if straight else (host["style"] or None))
+        style=None if straight else (host["style"] or None), manner=host["manner"])
     return instructions, host
 
 
@@ -199,21 +292,23 @@ async def _welcome(run: dict, player: dict | None, name: str) -> str:
         quiz = await db.fetchrow("select * from quizzes where id = $1", run["quiz_id"])
         rules = await settings_store.quiz_rules(quiz)
         if run["mode"] == "speed":
+            # A race should start like one: a line of clauses ("ninety seconds, maximum chaos, minimum excuses")
+            # was measured at six to nine seconds, most of it the pauses between them.
             return (f"Open the show. {name} is about to start a Speed Run: {int(rules['speed']['clock_sec'])} seconds on "
-                    "the clock, as many answers as they can manage. ONE short sentence, under 14 words, ending on "
-                    "\"Go!\". The clock starts as you finish.")
+                    "the clock, as many answers as they can manage. ONE quick remark of eight words or fewer - a single "
+                    "phrase, not a list - and then \"Go!\". The clock starts as you finish.")
         return (f"Open the show. {name} is playing Sudden Death: {int(rules['sudden_death']['strikes'])} wrong answers "
                 "and the game is over. " + ("They have played before. " if returning else "")
-                + "ONE punchy sentence, under 14 words. The first question appears as you finish.")
+                + "ONE sentence, under 14 words. The first question appears as you finish.")
     first = await db.fetchval("select round_name from run_items where run_id = $1 order by position limit 1", run["id"])
     first = first or (run["plan"][0]["name"] if run["plan"] else "the first round")
     # The first question appears the moment this line ends, so it is one breath long and ends on the round's name.
     if returning:
         return (f"Open the show. The contestant is {name}, who has played before. Welcome them back in six words or "
                 f"fewer, then announce the first round by its name - \"{first}!\" - and stop. Under 12 words in total.")
-    return (f"Open the show. The contestant is {name}, and this is their first game. A big announcer welcome of ten "
-            f"words or fewer, then announce the first round by its name - \"{first}!\" - and stop. Under 16 words in "
-            "total. Do not explain the rules.")
+    return (f"Open the show. The contestant is {name}, and this is their first game. Welcome them in ten words or "
+            f"fewer, then announce the first round by its name - \"{first}!\" - and stop. Under 16 words in total. Do "
+            "not explain the rules.")
 
 
 async def _lightning_tally(run: dict, item: dict) -> str:
@@ -258,16 +353,17 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
         round_name = item["round_name"]
         if item["slot"] == "music":
             if run["mode"] == "sudden_death":
-                return (f"Announce a bonus music break like a game-show announcer: \"Music Break!\" Then, in ten words or "
-                        f"fewer: name the tune - a hit from the {run['decade']} - and win back a life. Do not say the "
-                        "contestant's name, the song or the artist.")
+                return (f"Announce a bonus music break. Its name first, as a headline - \"Music Break!\" - then, in ten "
+                        f"words or fewer: name the tune - a hit from the {run['decade']} - and win back a life. Do not "
+                        "say the contestant's name, the song or the artist.")
             round_name, angle = "Music Break", f"name that tune, hits from the {run['decade']}"
         else:
             angle = _ROUND_ANGLE.get(round_name, "a new round")
         tally = await _lightning_tally(run, item)
-        return (f"{tally}Announce the next round like a game-show announcer. Shout its name first - \"{round_name}!\" - then "
-                f"ONE quick joke of eight words or fewer about it ({angle}). Do not say the contestant's name. The game is "
-                "waiting for you: no more than 12 words" + (" after the score remark." if tally else "."))
+        return (f"{tally}Announce the next round. Its name first, as a headline - \"{round_name}!\" - then ONE quick "
+                f"joke of eight words or fewer about it. (What the round is, for your information only - do not recite "
+                f"it: {angle}.) Do not say the contestant's name. The game is waiting for you: no more than 12 words"
+                + (" after the score remark." if tally else "."))
     if payload.get("sealed"):
         return None                                   # not on screen yet: there is nothing to say about it
     if cue == "hint" and item["answered_at"] is None and payload.get("hint"):
@@ -315,6 +411,70 @@ def _chosen(item: dict) -> str:
     return options[index] if index is not None and 0 <= index < len(options) else "nothing"
 
 
+class TightEdit:
+    """Takes the dead air out of a line as it streams, without touching the voice.
+
+    The screens wait while the host talks, so silence is the one part of a line the game cannot afford.
+    Measured on the host as shipped, a typical line of 4.7 seconds was 3.1 s of talking, 1.1 s of pauses
+    and 0.5 s of silence after the last word - and no wording of the direction changed that. So the audio
+    itself is edited, the way a radio producer tightens a recording. Only silence is ever removed:
+      * a pause inside the line is kept, but no longer than the cap - still a beat before a punchline;
+      * the silence after the last word is dropped, so the game moves on when he actually stops.
+    The talking is passed through untouched, sample for sample.
+    """
+
+    FRAME = int(SAMPLE_RATE * 0.02) * 2          # 20 ms of 16-bit mono audio, in bytes
+    RELEASE = int(SAMPLE_RATE * 0.06) * 2        # kept after the last word, so it dies away rather than snapping off
+
+    def __init__(self, pause_cap_sec: float | None):
+        self.cap = None if pause_cap_sec is None else int(SAMPLE_RATE * pause_cap_sec) * 2
+        self.loose = b""                         # audio not yet a whole frame
+        self.held = bytearray()                  # silence, kept back until it is clear whether more talking follows
+        self.loudest = 0.0
+        self.spoken = False
+
+    def feed(self, chunk: bytes) -> bytes:
+        """Take the next piece of audio; return what can be sent on now."""
+        data = self.loose + chunk
+        usable = len(data) - len(data) % self.FRAME
+        self.loose = data[usable:]
+        out = bytearray()
+        for start in range(0, usable, self.FRAME):
+            frame = data[start:start + self.FRAME]
+            samples = np.frombuffer(frame, dtype=np.int16).astype(np.float32)
+            level = float(np.sqrt(np.mean(samples * samples))) / 32768
+            self.loudest = max(self.loudest, level)
+            if level > max(0.006, 0.03 * self.loudest):
+                out += self._release()
+                out += frame
+                self.spoken = True
+            else:
+                self.held += frame
+        return bytes(out)
+
+    def _release(self) -> bytes:
+        """The silence that was held back, now that talking has resumed - shortened if it was a long one.
+
+        Both ends are kept and the middle removed, so the word before still dies away naturally and the
+        next one still starts cleanly.
+        """
+        held = bytes(self.held)
+        self.held.clear()
+        if not self.spoken:
+            return held[-self.FRAME:]            # before his first word: a breath of lead-in is plenty
+        if self.cap is None or len(held) <= self.cap:
+            return held
+        half = self.cap // 2 - (self.cap // 2) % 2
+        return held[:half] + held[len(held) - half:]
+
+    def finish(self) -> bytes:
+        """The line is over: what is left to send (a short release - not the silence after it)."""
+        held = bytes(self.held) + self.loose
+        self.held.clear()
+        self.loose = b""
+        return held[:self.RELEASE - self.RELEASE % 2] if self.spoken else b""
+
+
 class HostVoice:
     """One realtime session with the voice model. Use as an async context manager."""
 
@@ -324,6 +484,7 @@ class HostVoice:
         self.speak = speak
         self.model = model or config.model_voice
         self.speed = PACE_SPEED.get(pace, PACE_SPEED["snappy"])
+        self.pause_cap = PAUSE_CAP_SEC.get(pace, PAUSE_CAP_SEC["snappy"])
         self._manager = None
         self._connection = None
 
@@ -388,14 +549,20 @@ class HostVoice:
 
     async def _respond(self) -> AsyncIterator[tuple[str, bytes | str]]:
         connection = self._connection
+        edit = TightEdit(self.pause_cap)
         await connection.response.create()
         async for event in connection:
             kind = event.type
             if kind == "response.output_audio.delta":
-                yield "audio", base64.b64decode(event.delta)
+                audio = edit.feed(base64.b64decode(event.delta))
+                if audio:
+                    yield "audio", audio
             elif kind in ("response.output_audio_transcript.delta", "response.output_text.delta"):
                 yield "text", event.delta
             elif kind == "response.done":
+                release = edit.finish()
+                if release:
+                    yield "audio", release
                 return
             elif kind == "error":
                 message = str(getattr(event.error, "message", "voice model error"))
@@ -467,8 +634,9 @@ _SAMPLE_SCENE = ("Question: \"What was quarterly revenue?\" Correct answer: \"18
                  "wrong answer, then the right answer.")
 
 
-def _sample_persona(sarcasm: int, name: str, style: str | None = None) -> str:
-    return build_persona(name=name, game_title="the quiz", company="the company", sarcasm=sarcasm, style=style or None)
+def _sample_persona(sarcasm: int, name: str, style: str | None = None, manner: str | None = None) -> str:
+    return build_persona(name=name, game_title="the quiz", company="the company", sarcasm=sarcasm, style=style or None,
+                         manner=manner)
 
 
 async def sample_line(sarcasm: int, name: str) -> str:
@@ -477,12 +645,13 @@ async def sample_line(sarcasm: int, name: str) -> str:
                           max_output_tokens=300)
 
 
-async def sample_audio(sarcasm: int, name: str, voice: str, *, quality: str = "standard",
-                       pace: str = "snappy", style: str | None = None) -> tuple[str, bytes]:
+async def sample_audio(sarcasm: int, name: str, voice: str, *, quality: str = "standard", pace: str = "snappy",
+                       style: str | None = None, manner: str | None = None) -> tuple[str, bytes]:
     """The same sample, spoken: returns (the words, a WAV file) so an admin can hear a voice."""
     words, pcm = "", bytearray()
     model = voice_model({"voice_quality": quality})
-    async with HostVoice(_sample_persona(sarcasm, name, style), voice, speak=True, model=model, pace=pace) as session:
+    async with HostVoice(_sample_persona(sarcasm, name, style, manner), voice, speak=True, model=model,
+                         pace=pace) as session:
         async for kind, data in session.say(_SAMPLE_SCENE):
             if kind == "audio":
                 pcm.extend(data)  # type: ignore[arg-type]

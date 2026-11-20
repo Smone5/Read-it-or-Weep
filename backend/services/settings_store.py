@@ -61,17 +61,21 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "sarcasm": 6,                     # 0 (warm) .. 10 (full roast)
         "voice_enabled": True,
         "custom_instructions": "",
-        # One to three host characters. Players may pick between them in the lobby. "style" is an
-        # optional line of direction for how that character comes across.
+        # One to three host characters. Players may pick between them in the lobby. "manner" is how the
+        # character performs (see HOST_MANNERS); "style" is an optional extra line about that character.
         "hosts": [
-            {"id": "max", "name": "Max", "voice": "cedar", "style": ""},    # lower voice
+            {"id": "max", "name": "Max", "voice": "cedar", "manner": "wiseguy", "style": ""},    # lower voice
             # Measured on identical lines, "coral" sits about a quarter higher than "marin" and has the cleanest
-            # tone of any voice - brighter and more television than the calmer "marin" it replaced.
-            {"id": "roxy", "name": "Roxy", "voice": "coral", "style": "A prime-time game-show host at full sparkle: bright, bubbly and quick, a laugh never far away. Swoop up on the verdict call, punch the punchline, land the answer with a wink. Never level, never soothing, never a narrator."},
+            # tone of any voice.
+            {"id": "roxy", "name": "Roxy", "voice": "coral", "manner": "wiseguy",
+             "style": "Razor-sharp and amused, a little exasperated: the funniest person in any meeting, finally "
+                      "handed a microphone. A laugh is never far away."},
         ],
         "player_can_choose": True,
-        "voice_quality": "standard",      # standard (cheaper) | premium (sharper jokes, about 3x the cost)
-        "pace": "snappy",                 # relaxed | snappy | rapid
+        # standard is cheaper; premium is the default because, measured on identical scenes, only the premium
+        # model follows direction about pace and timing, and it writes the sharper jokes (about 3x the cost).
+        "voice_quality": "premium",
+        "pace": "snappy",                 # relaxed (slower) | snappy (the voice's own speed) | rapid (faster)
         "talk_enabled": True,             # players may hold a button and talk to the host
         # The first character, repeated for convenience (kept in step with hosts[0]).
         "name": "Max",
@@ -84,6 +88,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "question_sources": "all",        # all | manual | ai
         "music_enabled": True,
         "after_party": True,              # hits from the game's decade play on the results screen
+        "soundtrack": True,               # ...and quietly behind the questions, from the first one to the last
+        "soundtrack_volume": "medium",    # quiet | medium | loud
         "decades": ["60s", "70s", "80s", "90s", "00s", "10s", "20s"],
         "picture_mode": "auto",           # auto | show | memory
         "ready_threshold": 80,            # % of sections cleared to count as "ready"
@@ -110,6 +116,8 @@ VOICE_FACTS = {
     "alloy": (183, 6.3), "marin": (187, 7.0), "ballad": (191, 5.9), "coral": (260, 9.2), "sage": (273, 8.0),
 }
 VOICES = sorted(VOICE_FACTS)
+# How a host character performs. The direction for each lives in host_service.MANNERS.
+HOST_MANNERS = ("wiseguy", "deadpan", "showman")
 
 
 def voice_register(voice: str) -> str:
@@ -203,11 +211,14 @@ def _clean_host(value: dict) -> dict:
             host_id, n = f"{base}-{n}", n + 1
         taken.add(host_id)
         voice = raw.get("voice") if raw.get("voice") in VOICES else DEFAULTS["host"]["hosts"][0]["voice"]
-        hosts.append({"id": host_id, "name": name, "voice": voice, "style": str(raw.get("style") or "").strip()[:300]})
+        manner = raw.get("manner") if raw.get("manner") in HOST_MANNERS else HOST_MANNERS[0]
+        hosts.append({"id": host_id, "name": name, "voice": voice, "manner": manner,
+                      "style": str(raw.get("style") or "").strip()[:300]})
     value["hosts"] = hosts or copy.deepcopy(DEFAULTS["host"]["hosts"][:1])
     value["name"], value["voice"] = value["hosts"][0]["name"], value["hosts"][0]["voice"]
     value["player_can_choose"] = bool(value.get("player_can_choose", True))
-    value["voice_quality"] = value.get("voice_quality") if value.get("voice_quality") in ("standard", "premium") else "standard"
+    value["voice_quality"] = (value.get("voice_quality") if value.get("voice_quality") in ("standard", "premium")
+                              else DEFAULTS["host"]["voice_quality"])
     value["pace"] = value.get("pace") if value.get("pace") in ("relaxed", "snappy", "rapid") else "snappy"
     value["voice_enabled"] = bool(value.get("voice_enabled", True))
     value["talk_enabled"] = bool(value.get("talk_enabled", True))
@@ -224,6 +235,8 @@ def clean_game(value: dict) -> dict:
         value["question_sources"] = "all"
     if value.get("picture_mode") not in ("auto", "show", "memory"):
         value["picture_mode"] = "auto"
+    if value.get("soundtrack_volume") not in ("quiet", "medium", "loud"):
+        value["soundtrack_volume"] = "medium"
     return value
 
 

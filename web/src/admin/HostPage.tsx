@@ -5,6 +5,7 @@ import { ChoiceGroup, ErrorBlock, Field, LoadingBlock, Note, PageHeader, Panel, 
 import { useNotify, usePageTitle } from './context'
 import { useLoad, useMeta } from './hooks'
 import type {
+  HostManner,
   HostPace,
   HostSample,
   HostSampleRequest,
@@ -12,6 +13,7 @@ import type {
   HostSettingsWrite,
   SettingsRead,
   SettingsWritten,
+  MannerMeta,
   VoiceInfo,
   VoiceQuality,
   VoiceRegister,
@@ -38,7 +40,13 @@ export default function HostPage() {
         />
       )}
       {settings.data && meta && (
-        <HostForm initial={settings.data.value} voices={meta.voices} voiceInfo={meta.voiceInfo ?? {}} aiConfigured={meta.aiConfigured} />
+        <HostForm
+          initial={settings.data.value}
+          voices={meta.voices}
+          voiceInfo={meta.voiceInfo ?? {}}
+          manners={meta.manners?.length ? meta.manners : FALLBACK_MANNERS}
+          aiConfigured={meta.aiConfigured}
+        />
       )}
     </>
   )
@@ -75,20 +83,35 @@ function voiceLabel(voice: string, info: VoiceInfo): string {
 }
 
 const QUALITIES: { value: VoiceQuality; label: string; description: string }[] = [
-  { value: 'standard', label: 'Standard', description: 'Fast and inexpensive (about 5 cents of AI cost per game).' },
-  { value: 'premium', label: 'Premium', description: 'Sharper, funnier jokes (about 17 cents per game).' },
+  {
+    value: 'premium',
+    label: 'Premium (recommended)',
+    description: 'Acts the part: follows direction about pace and timing, and writes the sharper jokes (about 17 cents of AI cost per game).',
+  },
+  {
+    value: 'standard',
+    label: 'Standard',
+    description: 'About 5 cents per game. Tends to talk at one speed whatever the direction, and the jokes are weaker.',
+  },
 ]
 
 const PACES: { value: HostPace; label: string }[] = [
-  { value: 'relaxed', label: 'Relaxed' },
-  { value: 'snappy', label: 'Snappy (recommended)' },
-  { value: 'rapid', label: 'Rapid-fire' },
+  { value: 'relaxed', label: 'Slower' },
+  { value: 'snappy', label: 'Natural (recommended)' },
+  { value: 'rapid', label: 'Faster' },
+]
+
+/** Used only if the server is older than this page and does not list the manners itself. */
+const FALLBACK_MANNERS: MannerMeta[] = [
+  { id: 'wiseguy', label: 'Wiseguy', blurb: 'A cocky, grinning smart-aleck having more fun than anyone. Lively and playful.' },
+  { id: 'deadpan', label: 'Deadpan', blurb: 'Dry and unhurried: a comedy writer in a radio booth, amused and in no rush.' },
+  { id: 'showman', label: 'Showman', blurb: 'A larger-than-life prime-time host who knows exactly how silly this show is. Big and theatrical.' },
 ]
 
 // ---- the form's working copy -------------------------------------------------------------
 
 /** `key` only tells the rows apart on screen; the server gives each character its real id on saving. */
-type Character = { key: number; name: string; voice: string; style: string }
+type Character = { key: number; name: string; voice: string; style: string; manner: HostManner }
 
 type Draft = Omit<HostSettingsWrite, 'hosts'> & { hosts: Character[] }
 
@@ -96,7 +119,7 @@ let nextKey = 1
 
 function draftOf(value: HostSettings, fallbackVoice: string): Draft {
   // An install saved before characters existed has only the single `name` and `voice`.
-  const hosts: { name: string; voice: string; style?: string }[] = value.hosts?.length
+  const hosts: { name: string; voice: string; style?: string; manner?: HostManner }[] = value.hosts?.length
     ? value.hosts
     : [{ name: value.name || 'Max', voice: value.voice || fallbackVoice }]
   return {
@@ -107,7 +130,9 @@ function draftOf(value: HostSettings, fallbackVoice: string): Draft {
     player_can_choose: value.player_can_choose ?? true,
     voice_quality: value.voice_quality ?? 'standard',
     pace: value.pace ?? 'snappy',
-    hosts: hosts.slice(0, MAX_CHARACTERS).map((host) => ({ key: nextKey++, name: host.name, voice: host.voice, style: host.style ?? '' })),
+    hosts: hosts
+      .slice(0, MAX_CHARACTERS)
+      .map((host) => ({ key: nextKey++, name: host.name, voice: host.voice, style: host.style ?? '', manner: host.manner ?? 'wiseguy' })),
   }
 }
 
@@ -120,7 +145,7 @@ const bodyOf = (draft: Draft): HostSettingsWrite => ({
   player_can_choose: draft.player_can_choose,
   voice_quality: draft.voice_quality,
   pace: draft.pace,
-  hosts: draft.hosts.map((host) => ({ name: host.name.trim(), voice: host.voice, style: host.style.trim() })),
+  hosts: draft.hosts.map((host) => ({ name: host.name.trim(), voice: host.voice, style: host.style.trim(), manner: host.manner })),
 })
 
 function problemWith(draft: Draft): string | null {
@@ -147,11 +172,13 @@ function HostForm({
   initial,
   voices,
   voiceInfo,
+  manners,
   aiConfigured,
 }: {
   initial: HostSettings
   voices: string[]
   voiceInfo: VoiceInfo
+  manners: MannerMeta[]
   aiConfigured: boolean
 }) {
   const notify = useNotify()
@@ -242,6 +269,7 @@ function HostForm({
       quality: draft.voice_quality,
       pace: draft.pace,
       style: character.style.trim() || undefined,
+      manner: character.manner,
     }
     setSamples((current) => {
       const next: Record<number, Sample> = {}
@@ -294,7 +322,7 @@ function HostForm({
     change(patch)
   }
 
-  const changeCharacter = (key: number, patch: Partial<Pick<Character, 'name' | 'voice' | 'style'>>) => {
+  const changeCharacter = (key: number, patch: Partial<Pick<Character, 'name' | 'voice' | 'style' | 'manner'>>) => {
     cancelSample()
     forgetSample(key)
     change({ hosts: draft.hosts.map((host) => (host.key === key ? { ...host, ...patch } : host)) })
@@ -303,7 +331,7 @@ function HostForm({
   const addCharacter = () => {
     const used = new Set(draft.hosts.map((host) => host.voice))
     const voice = voiceOptions.find((option) => !used.has(option)) ?? fallbackVoice
-    change({ hosts: [...draft.hosts, { key: nextKey++, name: '', voice, style: '' }] })
+    change({ hosts: [...draft.hosts, { key: nextKey++, name: '', voice, style: '', manner: 'wiseguy' }] })
   }
 
   const removeCharacter = (key: number) => {
@@ -392,9 +420,28 @@ function HostForm({
                 </div>
 
                 <div className="mt-3">
+                  <Field label="How they perform" hint={manners.find((manner) => manner.id === character.manner)?.blurb}>
+                    {(props) => (
+                      <select
+                        className="field"
+                        {...props}
+                        value={character.manner}
+                        onChange={(event) => changeCharacter(character.key, { manner: event.target.value as HostManner })}
+                      >
+                        {manners.map((manner) => (
+                          <option key={manner.id} value={manner.id}>
+                            {manner.label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </Field>
+                </div>
+
+                <div className="mt-3">
                   <Field
-                    label="How they come across (optional)"
-                    hint="A line of direction for this character's delivery. Leave it empty for the standard wisecracking announcer."
+                    label="Anything particular about this character (optional)"
+                    hint="One extra line of direction, on top of the manner above. Use Hear a sample to judge any change by ear."
                   >
                     {(props) => (
                       <input
@@ -404,7 +451,7 @@ function HostForm({
                         onChange={(event) => changeCharacter(character.key, { style: event.target.value })}
                         maxLength={300}
                         autoComplete="off"
-                        placeholder="For example: bright, bubbly and quick, a laugh never far away"
+                        placeholder="For example: a little exasperated, a laugh never far away"
                       />
                     )}
                   </Field>

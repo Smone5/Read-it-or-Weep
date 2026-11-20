@@ -127,9 +127,11 @@ export type Reveal = {
   strikeRestored?: boolean
 }
 
-/** One song of the playlist that plays behind the results. */
+/** One song of the music that plays behind a game and its results. */
 export type PartyTrack = { title: string; artist: string; previewUrl: string; artworkUrl: string | null; trackUrl: string | null }
 export type AfterParty = { decade: string; tracks: PartyTrack[] }
+/** The songs that play quietly behind a game (an empty list when it has no music). */
+export type Soundtrack = { decade: string | null; tracks: PartyTrack[]; volume?: 'quiet' | 'medium' | 'loud' }
 
 export type Summary = {
   /** Music for the results screen: hits from the game's decade (null when music is off). */

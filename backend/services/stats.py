@@ -4,7 +4,6 @@ from __future__ import annotations
 import csv
 import io
 import math
-import random
 from typing import Any
 
 import db
@@ -68,7 +67,7 @@ async def _after_party(run: dict, rules: dict, items: list[dict]) -> dict | None
     """Music for the results screen: the game's decade, starting with the songs from its own music breaks."""
     if not (rules["music_enabled"] and rules.get("after_party", True)) or run["mode"] == "straight":
         return None
-    decade = run["decade"] or (random.choice(rules["decades"]) if rules["decades"] else None)
+    decade = music_service.game_decade(run, rules)     # the same decade the game's soundtrack came from
     if not decade:
         return None
     heard = [item["music_track_id"] for item in items if item["music_track_id"]]

@@ -210,6 +210,43 @@ export function play(name: Sfx) {
   void ready.then(() => (buffer ? go(buffer) : load(name).then(go)))
 }
 
+// --------------------------------------------------------------------------- arcade blips
+// Tiny synthesised sounds for the moments between the big ones – a question arriving, a streak
+// building. They are made on the spot rather than loaded, so they are never late, and they go
+// through the same bus as the recorded effects, so they too drop under the host.
+
+export type Blip = 'question' | 'streak' | 'bigstreak'
+
+const BLIPS: Record<Blip, { notes: number[]; stepSec: number; lengthSec: number; volume: number }> = {
+  question: { notes: [523.25, 783.99], stepSec: 0.07, lengthSec: 0.09, volume: 0.1 }, // C5 G5: "here it comes"
+  streak: { notes: [523.25, 659.25, 783.99, 1046.5], stepSec: 0.075, lengthSec: 0.12, volume: 0.12 }, // a rising chord
+  bigstreak: { notes: [523.25, 659.25, 783.99, 1046.5, 1318.51, 1567.98], stepSec: 0.07, lengthSec: 0.15, volume: 0.13 },
+}
+
+export function blip(name: Blip) {
+  if (!enabled) return
+  const ctx = audioContext()
+  if (ctx.state !== 'running') return // never queue a sound for later: a late blip is worse than none
+  const { notes, stepSec, lengthSec, volume } = BLIPS[name]
+  const start = ctx.currentTime + 0.01
+  notes.forEach((frequency, i) => {
+    const at = start + i * stepSec
+    const tone = ctx.createOscillator()
+    tone.type = 'square'
+    tone.frequency.value = frequency
+    const gain = ctx.createGain()
+    gain.gain.setValueAtTime(0, at)
+    gain.gain.linearRampToValueAtTime(volume, at + 0.008)
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + lengthSec)
+    tone.connect(gain)
+    gain.connect(effectsBus(ctx))
+    tone.onended = () => gain.disconnect()
+    tone.start(at)
+    tone.stop(at + lengthSec + 0.02)
+  })
+  trace('sfx', { name })
+}
+
 /** The host has started (or stopped) speaking: effects drop to a bed, then come back. */
 export function duckEffects(on: boolean) {
   ducked = on

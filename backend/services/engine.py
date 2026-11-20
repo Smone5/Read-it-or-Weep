@@ -181,7 +181,11 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
         avoid = {i["music_track_id"] for i in items if i["music_track_id"]}
         past = await db.fetch("select distinct music_track_id from run_items where player_id = $1 and quiz_id = $2"
                               " and music_track_id is not null", run["player_id"], run["quiz_id"])
-        built = await music_service.build_question(run["decade"], avoid | {r["music_track_id"] for r in past})
+        avoid |= {r["music_track_id"] for r in past}
+        if rules.get("soundtrack", True):
+            # The songs playing behind this game are not asked about: the player has just been listening to them.
+            avoid |= {t["id"] for t in await music_service.soundtrack_rows(run["decade"], run["id"])}
+        built = await music_service.build_question(run["decade"], avoid)
         if built is None:
             return None
         track = built["track"]

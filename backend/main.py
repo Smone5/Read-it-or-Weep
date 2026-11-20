@@ -78,7 +78,7 @@ app = FastAPI(title="Read It or Weep", version="1.0.0", lifespan=lifespan,
 _CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob: https://*.mzstatic.com; "
         "media-src 'self' data: blob: https://*.itunes.apple.com https://*.mzstatic.com; "
-        "font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:; "
+        "font-src 'self' data:; connect-src 'self' ws: wss: https://*.itunes.apple.com https://*.mzstatic.com; worker-src 'self' blob:; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'")
 _SECURITY_HEADERS = {
     b"x-content-type-options": b"nosniff",

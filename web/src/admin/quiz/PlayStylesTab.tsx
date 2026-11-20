@@ -1,11 +1,11 @@
 import { useId, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { errorText } from '../api'
-import { Badge, ChoiceGroup, Note, NumberField, numberError, Panel, SaveBar, Switch } from '../components'
+import { Badge, ChoiceGroup, Note, NumberField, numberError, Panel, SaveBar, Segmented, Switch } from '../components'
 import { useNotify } from '../context'
 import { decadeLabel } from '../format'
 import { paths } from '../paths'
-import type { DeepPartial, GameRules, ModeId, PictureMode } from '../types'
+import type { DeepPartial, GameRules, ModeId, PictureMode, SoundtrackVolume } from '../types'
 import { useQuiz } from './context'
 
 // ---- the numbers ----------------------------------------------------------------------
@@ -153,6 +153,12 @@ const PICTURE_MODES: { value: PictureMode; label: string; description: string }[
 ]
 
 // ---- helpers --------------------------------------------------------------------------
+
+const SOUNDTRACK_VOLUMES: { value: SoundtrackVolume; label: string }[] = [
+  { value: 'quiet', label: 'Quiet' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'loud', label: 'Loud' },
+]
 
 const clone = (rules: GameRules): GameRules => structuredClone(rules)
 
@@ -357,10 +363,29 @@ export default function PlayStylesTab() {
         />
         {draft.music_enabled && (
           <Switch
+            checked={draft.soundtrack ?? true}
+            onChange={(checked) => change((current) => ({ ...current, soundtrack: checked }))}
+            label="Music behind the questions"
+            description="Hits from the game's decade keep playing through the whole game: low while a question is being read, up in the gaps, down under the host, and silent for a name-that-tune clip. Players can switch it off for themselves."
+          />
+        )}
+        {draft.music_enabled && (draft.soundtrack ?? true) && (
+          <div className="mb-3 ml-1">
+            <span className="label">How loud it plays behind the questions</span>
+            <Segmented
+              label="How loud the music plays behind the questions"
+              options={SOUNDTRACK_VOLUMES}
+              value={draft.soundtrack_volume ?? 'medium'}
+              onChange={(volume) => change((current) => ({ ...current, soundtrack_volume: volume }))}
+            />
+          </div>
+        )}
+        {draft.music_enabled && (
+          <Switch
             checked={draft.after_party}
             onChange={(checked) => change((current) => ({ ...current, after_party: checked }))}
             label="Music on the results screen"
-            description="When a game ends, hits from its decade play quietly behind the results, one fading into the next. It starts after the host has signed off, and players can pause or skip it."
+            description="When a game ends, hits from its decade play behind the results, one fading into the next, with the song's name on screen. Players can pause or skip it."
           />
         )}
         {draft.music_enabled && (

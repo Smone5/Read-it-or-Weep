@@ -3,13 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { ErrorNote, FullScreenMessage, Logo, Modal, SoundToggle, Spinner, Stage, untilText } from '../components/ui'
-import { startAfterParty, stopAfterParty } from '../lib/afterParty'
 import { api, ApiError, session } from '../lib/api'
 import { HostVoice, type TalkState } from '../lib/hostVoice'
+import { setJukeboxLevel, startJukebox, startParty, stopJukebox } from '../lib/jukebox'
 import { unlockMusic } from '../lib/music'
 import { play, preloadSounds, unlockAudio } from '../lib/sound'
 import { applyBranding, applyDecade, DECADE_FLAVOUR, DECADE_LABEL } from '../lib/theme'
-import type { Leaderboard, ModeId, PlayerView, QuizInfo, Summary as SummaryData, Turn } from '../lib/types'
+import type { Leaderboard, ModeId, PlayerView, QuizInfo, Soundtrack, Summary as SummaryData, Turn } from '../lib/types'
 import { HighScores, ReadinessMap, type TalkControl } from './parts'
 import Play from './Play'
 import Summary from './Summary'
@@ -37,6 +37,7 @@ export default function QuizPage() {
   const [hostSpeaking, setHostSpeaking] = useState(false)
   const hostRef = useRef<HostVoice | null>(null)
   const partyFor = useRef<string | null>(null) // the game whose results-screen music is due (or playing)
+  const soundtrackFor = useRef<string | null>(null) // the game being played, while its soundtrack is wanted
   const [resumed, setResumed] = useState(false)
   const [talkState, setTalkState] = useState<TalkState>('idle')
   const [talkAvailable, setTalkAvailable] = useState(false)
@@ -69,7 +70,8 @@ export default function QuizPage() {
     return () => {
       hostRef.current?.close()
       partyFor.current = null
-      stopAfterParty(0)
+      soundtrackFor.current = null
+      stopJukebox(0)
       applyDecade(null)
     }
   }, [load])
@@ -85,7 +87,7 @@ export default function QuizPage() {
 
   const begin = (first: Turn, isResume = false) => {
     partyFor.current = null
-    stopAfterParty()
+    stopJukebox()
     closeHost()
     setResumed(isResume)
     applyDecade(first.state.decade)
@@ -110,6 +112,22 @@ export default function QuizPage() {
     setTurn(first)
     setSummary(null)
     setScreen('play')
+    // The soundtrack: hits from the game's decade, from the opening to the results. The game tells it
+    // where it is (a question, a gap, a music break); a game that cannot have music simply plays without.
+    const runId = first.state.runId
+    soundtrackFor.current = runId
+    setJukeboxLevel('gap')
+    if (first.state.mode !== 'straight') {
+      api<Soundtrack>(`/api/runs/${runId}/soundtrack`, { retry: 2 }).then(
+        (music) => {
+          if (soundtrackFor.current !== runId || !music.tracks.length) return
+          // A game picked back up does not start its music from the top again.
+          const from = isResume ? Math.floor(Math.random() * music.tracks.length) : 0
+          startJukebox([...music.tracks.slice(from), ...music.tracks.slice(0, from)], { volume: music.volume })
+        },
+        () => undefined,
+      )
+    }
   }
 
   const start = async (mode: ModeId, decade: string | null) => {
@@ -135,11 +153,15 @@ export default function QuizPage() {
     setScreen('summary')
     void load()
     // The ending, in order: the game-over sting, then the host's sign-off (applause can run under
-    // him), and only then the music – hits from the game's decade, swelling in behind the results.
+    // him), and then the results playlist. A game that had a soundtrack never goes quiet: the song
+    // that is playing carries on under all of it, and the playlist picks up when that song ends.
     const party = result.afterParty
     partyFor.current = result.runId
+    soundtrackFor.current = null
+    if (party) setJukeboxLevel('party')
+    else stopJukebox(1200) // no music on this quiz's results screen
     const music = () => {
-      if (party && partyFor.current === result.runId) startAfterParty(party.tracks)
+      if (party && partyFor.current === result.runId) startParty(party.tracks)
     }
     const host = hostRef.current
     if (result.status !== 'completed' || !host) {
@@ -155,7 +177,8 @@ export default function QuizPage() {
 
   const backToLobby = () => {
     partyFor.current = null
-    stopAfterParty()
+    soundtrackFor.current = null
+    stopJukebox()
     closeHost()
     applyDecade(null)
     setScreen('lobby')

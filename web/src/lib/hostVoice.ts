@@ -11,7 +11,7 @@
 // anything still on its way is discarded, and the server is told not to bother with the rest.
 
 import { Mic, micSupported } from './mic'
-import { duckMusic } from './music'
+import { duckMusic, setVoiceOver } from './music'
 import { audioMode, duckEffects, hostAudioContext, soundOn } from './sound'
 import { trace } from './trace'
 
@@ -239,6 +239,7 @@ export class HostVoice {
     }
     this.replyId = this.request({ type: 'talk.end' }, 'talk')
     this.listener.onTalk?.('thinking', true)
+    this.mix() // the microphone is closed: the soundtrack may come back up while he thinks
   }
 
   /** Try the connection again after a pause that grows with each failure; give up after a handful. */
@@ -405,6 +406,7 @@ export class HostVoice {
       this.listener.onSpeaking(true)
       duckEffects(true)
       trace('host.audio', { id: line.id })
+      this.mix() // his voice is about to sound: the soundtrack dips now, not before
     }
     source.onended = () => {
       line.sources.delete(source)
@@ -470,9 +472,16 @@ export class HostVoice {
     if (!this.busy) this.quiet.splice(0).forEach((resolve) => resolve())
   }
 
-  /** Music stays down for as long as the host (or the player, on the microphone) has the floor. */
+  /**
+   * A "name that tune" clip stays down for as long as the host (or the player, on the microphone) has
+   * the floor, including while his line is on its way. The soundtrack is what fills that wait, so it
+   * dips only while a voice can actually be heard.
+   */
   private mix() {
     duckMusic(this.busy)
+    let heard = this.talking
+    for (const line of this.sounding) if (line.heard && !line.dropped) heard = true
+    setVoiceOver(heard)
   }
 
   private setLine(text: string) {

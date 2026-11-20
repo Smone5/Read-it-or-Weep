@@ -15,15 +15,21 @@
 //   reveal       the result, then the host's reaction. "Next" is there from the start: tapping it
 //                while he is talking cuts him off cleanly rather than letting him run on.
 //
+// Behind all of it the jukebox plays hits from the game's decade – low while a question is being
+// read, up in the gaps, down under the host – and goes silent for a "name that tune" clip, which
+// has the stage to itself.
+//
 // To make that possible the server deals the first item of a round *sealed*: we learn which round
 // is coming, show its card, and only then ask for the question to be opened.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { MusicToggle } from '../components/NowPlaying'
 import { ErrorNote, Modal, SoundToggle } from '../components/ui'
 import { api, ApiError, onConnectionTrouble } from '../lib/api'
 import type { HostVoice } from '../lib/hostVoice'
+import { setJukeboxLevel } from '../lib/jukebox'
 import { fadeOutMusic, preloadClip, stopMusic } from '../lib/music'
-import { buzz, play } from '../lib/sound'
+import { blip, buzz, play } from '../lib/sound'
 import { trace } from '../lib/trace'
 import type { Item, ModeId, Reveal, RunState, Summary, Turn } from '../lib/types'
 import { AnswerList, FactFakeButtons, HostBox, Hud, MusicPlayer, PictureView, TimerBar, useDeadline, type TalkControl } from './parts'
@@ -52,6 +58,7 @@ const MAX_INTRO_MS = 11000 // ...and the host never holds the game up longer tha
 const HOST_LATE_MS = 3200 // if he has not started speaking by now, the game goes on without the introduction
 const HOST_LATE_OPENING_MS = 4800 // (the opening allows for him still connecting)
 const CLIP_WAIT_MS = 2500 // a music clip that has not started by now: start the clock anyway
+const STREAKS_WORTH_SHOUTING = [3, 5, 7, 10, 15, 20] // right answers in a row that get a fanfare
 
 const ROUND_BLURB: Record<string, string> = {
   'Warm-Up': 'Easy ones first',
@@ -128,6 +135,14 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
 
   useEffect(() => onConnectionTrouble(setReconnecting), [])
 
+  // The soundtrack follows the game. Lightning statements and speed runs keep it up throughout: they
+  // move too fast for it to keep dipping, and they are the loud part of the show anyway.
+  useEffect(() => {
+    if (item?.slot === 'music') setJukeboxLevel('out')
+    else if ((phase === 'question' || phase === 'wager') && !quick) setJukeboxLevel('think')
+    else setJukeboxLevel('gap')
+  }, [phase, item?.slot, quick])
+
   // On a phone the explanation lands below the answers: bring it into view, and return to the
   // top for each new question.
   useEffect(() => {
@@ -176,6 +191,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       window.setTimeout(() => setBanner(''), 1800)
     }
     setPhase(next.needsWager ? 'wager' : 'question')
+    if (next.slot !== 'music') blip('question') // a clip is its own arrival
     trace('show', { slot: next.slot, round: next.round.name, wager: Boolean(next.needsWager) })
   }, [])
 
@@ -328,6 +344,12 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         play(result.correct ? 'correct' : 'wrong')
         buzz(result.correct ? 30 : [60, 40, 60])
         if (result.strikeRestored) play('cheer')
+        if (result.correct && STREAKS_WORTH_SHOUTING.includes(result.state.streak)) {
+          const streak = result.state.streak
+          setBanner(`${streak} in a row!`)
+          window.setTimeout(() => blip(streak >= 5 ? 'bigstreak' : 'streak'), 300) // just after the "correct" sound
+          window.setTimeout(() => setBanner((current) => (current === `${streak} in a row!` ? '' : current)), 2400)
+        }
         if (hostReacts && item.slot !== 'fact_fake') host?.cue('result', item.id)
       } catch (caught) {
         if (caught instanceof ApiError && caught.status === 409) await finish()
@@ -478,6 +500,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         <div className="flex-1">
           <Hud state={state} clockMs={speedClock} position={position} />
         </div>
+        <MusicToggle />
         <SoundToggle />
         <button className="btn btn-ghost btn-sm" onClick={() => setQuitting(true)} aria-label="Quit this game">✕</button>
       </header>
@@ -560,7 +583,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
 
             {/* The clip keeps playing through the reveal (dipping under the host) and fades out on Next. */}
             {item.music && (
-              <MusicPlayer key={item.id} src={item.music.previewUrl} active={phase === 'question'} onBroken={() => void musicBroken()} onPlaying={() => setClipStarted(true)} />
+              <MusicPlayer key={`clip:${item.id}`} src={item.music.previewUrl} active={phase === 'question'} onBroken={() => void musicBroken()} onPlaying={() => setClipStarted(true)} />
             )}
 
             {phase === 'question' && item.timeLimitSec > 0 && (

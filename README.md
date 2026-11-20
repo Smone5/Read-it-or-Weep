@@ -17,12 +17,14 @@ different songs.
 - Four styles of play: **Game Show** (themed rounds, picture round, lightning round, music
   breaks, a final wager), **Sudden Death** (three strikes, getting faster), **Speed Run**
   (beat the clock) and **Straight Quiz** (no jokes, every section, a pass mark).
-- A talking host who reacts to every answer. His sarcasm is set by the organiser, players can
-  choose between host characters, and they can hold a button to talk back to him.
+- A talking host who reacts to every answer. His sarcasm and his manner (a grinning wiseguy, a
+  deadpan, or a big showman) are set by the organiser, players can choose between host
+  characters, and they can hold a button to talk back to him.
 - Lifelines (50/50, a peek at the passage, a hint), streaks, badges, a readiness map of the
   report's sections, and high scores by player and by team.
-- Music breaks ("name that tune") from a chosen decade, and a playlist from that decade behind
-  the results when the game ends.
+- Music all the way through: hits from a chosen decade play quietly behind the questions (up in
+  the gaps, down under the host), stop for the "name that tune" breaks, and carry on as a
+  playlist behind the results. Players can switch the background music off for themselves.
 - Pictures from the report can be pinched larger in place or opened full screen.
 
 **For the room** – a live game on the big screen, everyone answering on their own phone, with
@@ -69,7 +71,9 @@ and upload a report. A sample report can be generated with
 `backend/.venv/bin/python samples/make_sample_report.py`.
 
 Running costs when testing locally are only the AI calls: a few cents to turn a report into a
-question bank, and roughly five cents per game for the host's voice.
+question bank, and for the host's voice roughly 17 cents per game on the premium voice model
+(the default: it is the one that follows direction about pace and timing) or 5 cents on the
+standard one. The choice is on the admin's Host page.
 
 ## Let other people try it – no domain, no cloud
 
@@ -86,6 +90,23 @@ and clear out your own practice games so their results start clean:
 ```bash
 cd backend && .venv/bin/python -m scripts.reset_play_data --all        # shows what would go; add --yes to do it
 ```
+
+The link keeps its address for as long as it stays open. When you change something, leave it
+running and, in another window:
+
+```bash
+./scripts/share.sh update
+```
+
+This builds your changes and swaps the game behind the same link. Anyone in the middle of a
+game carries on after a pause of a few seconds; if the changes do not build, nothing is
+swapped. `./scripts/share.sh status` shows the address, and `./scripts/share.sh stop` (or
+Ctrl-C in its window) closes the link.
+
+Closing the link and opening it again gives a new address, unless you give it a fixed one.
+ngrok gives a free account one fixed address (see <https://dashboard.ngrok.com/domains>); put
+it in `backend/.env` as `NGROK_DOMAIN=your-name.ngrok-free.app` and the link is the same every
+time.
 
 On your own Wi-Fi you can also start the server with `--host 0.0.0.0` and open
 `http://<this-computer's-address>:8100` from a phone, but phones only allow the microphone over
@@ -158,6 +179,17 @@ cd ../web && npm run build                    # type-check and production build
 
 The game's sequencing can be inspected in a browser: add `?trace` to the address and read
 `window.__quizTrace` in the console – every host line, question, clip and sound, timestamped.
+
+How the host *sounds* cannot be tested by a program – only by ear. To choose a voice, record
+the candidates side by side and listen:
+
+```bash
+cd backend
+.venv/bin/python -m scripts.host_audition              # Max: three manners, five voices
+.venv/bin/python -m scripts.host_audition --host roxy  # the second character
+```
+
+It writes `samples/out/host-audition.html`, one page with every clip in it.
 
 ## Layout
 

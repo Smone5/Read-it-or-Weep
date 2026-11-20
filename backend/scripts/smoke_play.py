@@ -152,12 +152,20 @@ async def main() -> None:
 
             print("== joining ==")
             tag = uuid.uuid4().hex[:6]
-            r = await client.post(f"/api/quiz/{slug}/join", json={"name": "Dana Reyes", "email": f"dana.{tag}@example.com"})
+            # A quiz may be behind an access code (it is while testers are invited). The code is read here
+            # and sent with each join; it is never printed.
+            access = await db.fetchval("select access_code from quizzes where id = $1", quiz_id)
+            entry = {"accessCode": access} if access else {}
+            if access:
+                r = await client.post(f"/api/quiz/{slug}/join", json={
+                    "name": "Dana Reyes", "email": f"dana.{tag}@example.com", "team": "Sales", "accessCode": "not-the-code"})
+                check(r.status_code == 403, "joining with the wrong access code is refused")
+            r = await client.post(f"/api/quiz/{slug}/join", json={"name": "Dana Reyes", "email": f"dana.{tag}@example.com", **entry})
             check(r.status_code == 422, "joining without a team is refused when teams are set")
             players = {}
             for name, team in (("Dana Reyes", "Sales"), ("Omar Haddad", "Operations"), ("Li Wei", "Sales")):
                 r = await client.post(f"/api/quiz/{slug}/join", json={
-                    "name": name, "email": f"{name.split()[0].lower()}.{tag}@example.com", "team": team})
+                    "name": name, "email": f"{name.split()[0].lower()}.{tag}@example.com", "team": team, **entry})
                 assert r.status_code == 200, r.text
                 players[name] = {"Authorization": f"Bearer {r.json()['token']}"}
             check(len(players) == 3, "three players joined with name + email only")
@@ -181,6 +189,17 @@ async def main() -> None:
                   f"the playlist opens with the songs from this game's music breaks: {heard}")
             check(len({t["artist"].lower() for t in party["tracks"]}) == len(party["tracks"]) and all(
                 t["previewUrl"].startswith("https://") for t in party["tracks"]), "playlist: one song per artist, all playable")
+            # The soundtrack that played behind that game: the same list every time it is asked for, in the game's
+            # decade, and never a song the game went on to ask about.
+            music = (await client.get(f"/api/runs/{show['run_id']}/soundtrack", headers=players["Dana Reyes"])).json()
+            again = (await client.get(f"/api/runs/{show['run_id']}/soundtrack", headers=players["Dana Reyes"])).json()
+            behind = [t["title"] for t in music["tracks"]]
+            check(music["decade"] == "80s" and len(behind) >= 10 and music["volume"] in ("quiet", "medium", "loud"),
+                  f"the game has a soundtrack of {len(behind)} hits from its decade")
+            check(music == again, "the soundtrack is the same list every time it is asked for")
+            check(not set(behind) & set(heard), "no song from the soundtrack was used as a name-that-tune question")
+            check((await client.get(f"/api/runs/{show['run_id']}/soundtrack", headers=players["Omar Haddad"])).status_code == 404,
+                  "another player cannot ask for this game's soundtrack")
             await play(client, slug, players["Omar Haddad"], "show", 0.4, label="show/Omar")
             second = await play(client, slug, players["Dana Reyes"], "show", 0.9, label="show/Dana again")
             first_ids = {r["question_id"] for r in await db.fetch(
@@ -203,6 +222,8 @@ async def main() -> None:
             check(straight["summary"]["passed"] is not None, f"straight quiz reports pass/fail (passed={straight['summary']['passed']})")
             check(straight["sealed"] == ["The Quiz"], "straight quiz has one title card, at the start")
             check(straight["summary"]["afterParty"] is None, "straight quiz ends without music")
+            quiet = (await client.get(f"/api/runs/{straight['run_id']}/soundtrack", headers=players["Omar Haddad"])).json()
+            check(quiet["tracks"] == [], "straight quiz has no soundtrack either")
 
             print("== Speed Run ==")
             r = await client.post(f"/api/quiz/{slug}/runs", json={"mode": "speed"}, headers=players["Li Wei"])
@@ -225,6 +246,10 @@ async def main() -> None:
             await db.execute("update runs set deadline_at = now() - interval '1 second' where id = $1", run_id)
             turn = (await client.post(f"/api/runs/{run_id}/next", headers=players["Li Wei"])).json()
             check(turn["finished"], "speed run ends when the clock runs out")
+            fast = (await client.get(f"/api/runs/{run_id}/soundtrack", headers=players["Li Wei"])).json()
+            ending = (await client.get(f"/api/runs/{run_id}/summary", headers=players["Li Wei"])).json()["summary"]["afterParty"]
+            check(len(fast["tracks"]) >= 10 and bool(ending) and ending["decade"] == fast["decade"],
+                  f"speed run: a soundtrack from one decade ({fast['decade']}) that carries on behind its results")
 
             print("== leaderboard + readiness ==")
             board = (await client.get(f"/api/quiz/{slug}/leaderboard?mode=show", headers=players["Dana Reyes"])).json()
@@ -279,7 +304,17 @@ async def main() -> None:
             await client.patch(f"/api/admin/questions/{victim['question_id']}", headers=admin, json={"status": "approved"})
 
             print("== results ==")
+            rated = (await client.get(f"/api/admin/quizzes/{quiz_id}/results", headers=admin)).json()["feedback"]
+            for stars in (5, 2, 4):    # one tap on the stars, then two changes of mind
+                r = await client.post("/api/feedback", json={"runId": show["run_id"], "stars": stars}, headers=players["Dana Reyes"])
+                assert r.status_code == 200, r.text
+            kept = [row["stars"] for row in await db.fetch("select stars from feedback where run_id = $1", show["run_id"])]
+            check(kept == [4], f"a player who changes their rating has one rating, the last one: {kept}")
+            r = await client.post("/api/feedback", json={"runId": show["run_id"], "stars": 1}, headers=players["Omar Haddad"])
+            check(r.status_code == 404, "nobody can rate someone else's game")
             results = (await client.get(f"/api/admin/quizzes/{quiz_id}/results", headers=admin)).json()
+            check(results["feedback"]["count"] == rated["count"] + 1,
+                  f"the admin counts it once ({rated['count']} -> {results['feedback']['count']} ratings)")
             check(len(results["participants"]) >= 3, f"results list {len(results['participants'])} participants, {results['ready']} ready")
             csv_text = (await client.get(f"/api/admin/quizzes/{quiz_id}/results.csv", headers=admin)).text
             check(csv_text.startswith("Name,Email,Team,Ready"), "results export as CSV")

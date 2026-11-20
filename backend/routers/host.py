@@ -60,14 +60,14 @@ async def _live_direction(session: dict, cue: str) -> str | None:
     item = items[index] if 0 <= index < len(items) else None
     if cue == "live_welcome":
         players = await db.fetchval("select count(*) from live_participants where session_id = $1", session["id"])
-        return (f"Open the live show. {players} players are in the room with their phones out. Give a big announcer "
-                "welcome in two short sentences, under 25 words, and tell them to keep their phones ready.")
+        return (f"Open the live show. {players} players are in the room with their phones out. Welcome the room in "
+                "two short sentences, under 25 words, and tell them to keep their phones ready.")
     if cue == "live_question" and item and session["status"] == "question":
         # The phones stay locked until this line has been said, so it must end on the question itself.
         if item["kind"] == "music":
-            return ("Announce a music break like a game-show announcer: \"Music Break!\" then one quick joke of ten "
-                    "words or fewer. Do not name the song or artist. The clip starts as you finish.")
-        return (f"Read question {index + 1} to the room, clearly and at a brisk pace, exactly as written, after a lead-in "
+            return ("Announce a music break. Its name first, as a headline - \"Music Break!\" - then one quick joke of "
+                    "ten words or fewer. Do not name the song or artist. The clip starts as you finish.")
+        return (f"Read question {index + 1} to the room, clearly and at an easy pace, exactly as written, after a lead-in "
                 f"of at most three words. Do not read the options and do not add a joke or a comment afterwards: the clock "
                 f"starts as you finish. The question: \"{item['text']}\"")
     if cue == "live_reveal" and item and session["status"] == "reveal":

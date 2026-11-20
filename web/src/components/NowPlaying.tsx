@@ -1,15 +1,35 @@
-// The "now playing" strip for the results-screen playlist: what the song is, and a way to
-// pause or skip it. It shows nothing at all until a playlist is actually running.
+// What the player sees of the jukebox: the "now playing" strip on the results screen (what the
+// song is, and a way to pause or skip it), and the little switch that turns the music behind the
+// questions off without silencing the host. Both show nothing at all when there is no music.
 
 import { useEffect, useState } from 'react'
-import { nextPartySong, onPartyChange, toggleAfterParty, type PartyState } from '../lib/afterParty'
+import { musicOn, nextJukeboxSong, onJukeboxChange, onMusicChange, setMusicOn, toggleJukebox, type JukeboxState } from '../lib/jukebox'
 import { DECADE_LABEL } from '../lib/theme'
 import type { PartyTrack } from '../lib/types'
 
-export function useAfterParty(): PartyState {
-  const [state, setState] = useState<PartyState>({ track: null, playing: false, needsTap: false })
-  useEffect(() => onPartyChange(setState), [])
+export function useJukebox(): JukeboxState {
+  const [state, setState] = useState<JukeboxState>({ active: false, track: null, playing: false, needsTap: false })
+  useEffect(() => onJukeboxChange(setState), [])
   return state
+}
+
+/** Background music on or off, for this player, remembered. The host and the sound effects are not affected. */
+export function MusicToggle() {
+  const { active } = useJukebox()
+  const [on, setOn] = useState(musicOn)
+  useEffect(() => onMusicChange(setOn), [])
+  if (!active) return null
+  return (
+    <button
+      className="btn btn-ghost btn-sm"
+      aria-pressed={on}
+      aria-label={on ? 'Turn the background music off' : 'Turn the background music on'}
+      title={on ? 'Background music on' : 'Background music off'}
+      onClick={() => setMusicOn(!on)}
+    >
+      <span aria-hidden style={on ? undefined : { opacity: 0.45, textDecoration: 'line-through' }}>♫</span>
+    </button>
+  )
 }
 
 /** The record sleeve. On a player's own screen it is also the way to the full song. */
@@ -25,7 +45,7 @@ function Cover({ track, large }: { track: PartyTrack; large?: boolean }) {
 }
 
 export function NowPlaying({ decade, large }: { decade?: string | null; large?: boolean }) {
-  const { track, playing, needsTap } = useAfterParty()
+  const { track, playing, needsTap } = useJukebox()
   if (!track) return null
   const label = needsTap ? 'Tap play for music' : decade ? `${DECADE_LABEL[decade] ?? decade} hits` : 'Now playing'
   return (
@@ -39,10 +59,10 @@ export function NowPlaying({ decade, large }: { decade?: string | null; large?: 
         <p className={`mt-1 truncate font-bold ${large ? 'text-lg lg:text-xl' : ''}`} aria-live="polite">{track.title}</p>
         <p className={`truncate text-muted ${large ? 'lg:text-lg' : 'text-[15px]'}`}>{track.artist}</p>
       </div>
-      <button className="btn btn-ghost btn-sm flex-none" onClick={toggleAfterParty} aria-label={playing ? 'Pause the music' : 'Play the music'}>
+      <button className="btn btn-ghost btn-sm flex-none" onClick={toggleJukebox} aria-label={playing ? 'Pause the music' : 'Play the music'}>
         {playing ? '❚❚' : '▶'}
       </button>
-      <button className="btn btn-ghost btn-sm flex-none" onClick={nextPartySong} aria-label="Next song">▶▶</button>
+      <button className="btn btn-ghost btn-sm flex-none" onClick={nextJukeboxSong} aria-label="Next song">▶▶</button>
     </section>
   )
 }

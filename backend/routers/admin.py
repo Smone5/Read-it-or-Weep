@@ -58,6 +58,8 @@ async def meta(admin: dict = Depends(current_admin)) -> dict:
     defaults = await settings_store.get("game")
     return {"modes": [settings_store.mode_view(key, defaults) for key in MODES], "decades": ALL_DECADES, "voices": VOICES,
             "voiceInfo": settings_store.VOICE_INFO,
+            "manners": [{"id": key, "label": host_service.MANNERS[key]["label"], "blurb": host_service.MANNERS[key]["blurb"]}
+                        for key in settings_store.HOST_MANNERS],
             "extensions": supported_extensions(), "aiConfigured": config.ai_configured,
             "gameDefaults": defaults, "webBaseUrl": config.web_base_url or config.public_base_url}
 
@@ -143,7 +145,8 @@ class HostSample(BaseModel):
     voice: str | None = None        # give a voice to get the sample spoken as well as written
     quality: Literal["standard", "premium"] = "standard"
     pace: Literal["relaxed", "snappy", "rapid"] = "snappy"
-    style: str | None = Field(default=None, max_length=300)   # how this character comes across
+    style: str | None = Field(default=None, max_length=300)   # an extra line about this character
+    manner: Literal["wiseguy", "deadpan", "showman"] = "wiseguy"   # how this character performs
 
 
 @router.post("/host/sample")
@@ -156,7 +159,8 @@ async def host_sample(body: HostSample, request: Request, admin: dict = Depends(
             if body.voice not in VOICES:
                 raise HTTPException(422, "Unknown voice.")
             line, wav = await host_service.sample_audio(body.sarcasm, body.name, body.voice,
-                                                        quality=body.quality, pace=body.pace, style=body.style)
+                                                        quality=body.quality, pace=body.pace, style=body.style,
+                                                        manner=body.manner)
             return {"line": line, "style": style,
                     "audio": "data:audio/wav;base64," + base64.b64encode(wav).decode()}
         return {"line": await host_service.sample_line(body.sarcasm, body.name), "style": style, "audio": None}

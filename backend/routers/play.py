@@ -247,6 +247,21 @@ async def resume_run(run_id: str, player: dict = Depends(current_player)) -> dic
     return await _turn(run, rules, deal=False)
 
 
+@router.get("/runs/{run_id}/soundtrack")
+async def run_soundtrack(run_id: str, player: dict = Depends(current_player)) -> dict:
+    """Songs to play quietly behind this game (none for a Straight Quiz, or when music is switched off)."""
+    run, _, rules = await _load_run(run_id, player)
+    if not (rules["music_enabled"] and rules.get("soundtrack", True)) or run["mode"] == "straight":
+        return {"decade": None, "tracks": []}
+    decade = music_service.game_decade(run, rules)
+    if not decade:
+        return {"decade": None, "tracks": []}
+    music_service.ensure_decade(decade)
+    asked = await db.fetch("select music_track_id from run_items where run_id = $1 and music_track_id is not null", run_id)
+    tracks = await music_service.soundtrack(decade, run["id"], {r["music_track_id"] for r in asked})
+    return {"decade": decade, "tracks": tracks, "volume": rules["soundtrack_volume"]}
+
+
 @router.post("/runs/{run_id}/next")
 async def next_turn(run_id: str, player: dict = Depends(current_player)) -> dict:
     run, _, rules = await _load_run(run_id, player)
@@ -365,17 +380,19 @@ async def flag_question(body: FlagBody, request: Request, player: dict = Depends
 
 
 class FeedbackBody(BaseModel):
-    runId: str | None = None
+    runId: str
     stars: int = Field(ge=1, le=5)
     comment: str | None = Field(default=None, max_length=1000)
 
 
 @router.post("/feedback")
 async def feedback(body: FeedbackBody, player: dict = Depends(current_player)) -> dict:
-    quiz_id = None
-    if body.runId:
-        run = await db.fetchrow("select quiz_id from runs where id = $1 and player_id = $2", body.runId, player["id"])
-        quiz_id = run["quiz_id"] if run else None
-    await db.execute("insert into feedback (player_id, quiz_id, run_id, stars, comment) values ($1,$2,$3,$4,$5)",
-                     player["id"], quiz_id, body.runId if quiz_id else None, body.stars, body.comment)
+    """Rate a game. A player has one rating per game: tapping a different star replaces it."""
+    run = await db.fetchrow("select id, quiz_id from runs where id = $1 and player_id = $2", body.runId, player["id"])
+    if run is None:
+        raise HTTPException(404, "We could not find that game.")
+    await db.execute("insert into feedback (player_id, quiz_id, run_id, stars, comment) values ($1,$2,$3,$4,$5)"
+                     " on conflict (player_id, run_id) where run_id is not null do update"
+                     " set stars = excluded.stars, comment = coalesce(excluded.comment, feedback.comment), created_at = now()",
+                     player["id"], run["quiz_id"], run["id"], body.stars, body.comment)
     return {"ok": True}

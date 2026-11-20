@@ -18,6 +18,8 @@ export type QuestionSources = 'all' | 'manual' | 'ai'
 
 export type PictureMode = 'auto' | 'show' | 'memory'
 
+export type SoundtrackVolume = 'quiet' | 'medium' | 'loud'
+
 /** Company defaults with one quiz's overrides on top (settings_store.quiz_rules). */
 export type GameRules = {
   modes: ModeId[]
@@ -27,6 +29,9 @@ export type GameRules = {
   music_enabled: boolean
   /** Hits from the game's decade play on the results screen once a game is over. */
   after_party: boolean
+  /** ...and quietly behind the questions while the game is being played. */
+  soundtrack: boolean
+  soundtrack_volume: SoundtrackVolume
   decades: string[]
   picture_mode: PictureMode
   ready_threshold: number
@@ -57,11 +62,17 @@ export type VoiceTone = 'clear' | 'smooth' | 'gravelly'
 /** Two things measured from each voice's audio: how low or high it sits, and how clean it sounds. */
 export type VoiceInfo = Record<string, { pitchHz: number; register: VoiceRegister; clarityDb: number; tone: VoiceTone }>
 
+/** How a host character performs: the acting, as opposed to the voice. */
+export type HostManner = 'wiseguy' | 'deadpan' | 'showman'
+
+export type MannerMeta = { id: HostManner; label: string; blurb: string }
+
 export type Meta = {
   modes: ModeMeta[]
   decades: string[]
   voices: string[]
   voiceInfo?: VoiceInfo
+  manners?: MannerMeta[]
   extensions: string[]
   aiConfigured: boolean
   gameDefaults: GameRules
@@ -81,7 +92,7 @@ export type BrandingSettings = {
   support_email: string | null
 }
 
-export type HostCharacter = { id: string; name: string; voice: string; style?: string }
+export type HostCharacter = { id: string; name: string; voice: string; style?: string; manner?: HostManner }
 
 export type VoiceQuality = 'standard' | 'premium'
 
@@ -111,11 +122,19 @@ export type HostSettingsWrite = {
   player_can_choose: boolean
   voice_quality: VoiceQuality
   pace: HostPace
-  hosts: { name: string; voice: string; style: string }[]
+  hosts: { name: string; voice: string; style: string; manner: HostManner }[]
 }
 
 /** Body of POST /host/sample. With a `voice` the line comes back spoken as well as written. */
-export type HostSampleRequest = { sarcasm: number; name: string; voice: string; quality: VoiceQuality; pace: HostPace; style?: string }
+export type HostSampleRequest = {
+  sarcasm: number
+  name: string
+  voice: string
+  quality: VoiceQuality
+  pace: HostPace
+  style?: string
+  manner?: HostManner
+}
 
 /** `audio` is a `data:audio/wav;base64,…` URL, or null when no voice was asked for. */
 export type HostSample = { line: string; style: string; audio: string | null }

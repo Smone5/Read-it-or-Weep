@@ -1,7 +1,8 @@
 """The host's hint guard, the results-screen playlist, live-game lead-ins and the music safety net."""
+import numpy as np
 import pytest
 
-from services import host_service, live, music_service
+from services import host_service, live, music_service, settings_store
 
 
 # --- hints must help without handing over the answer ---------------------------------------------------
@@ -32,6 +33,43 @@ def test_the_persona_never_carries_report_facts():
     assert "Max" in persona and "Read It or Weep" in persona
     assert "1. Summary" in persona                      # section names are fine: they give nothing away
     assert "never" in persona.lower() and "answer" in persona.lower()
+
+
+# --- how the host performs -------------------------------------------------------------------------------
+
+def test_every_manner_has_its_own_direction_and_none_asks_for_speed():
+    assert set(host_service.MANNERS) == set(settings_store.HOST_MANNERS)
+    personas = {manner: host_service.build_persona(name="Max", game_title="Read It or Weep", company="Acme", sarcasm=6,
+                                                   manner=manner) for manner in settings_store.HOST_MANNERS}
+    assert len(set(personas.values())) == len(personas)          # three manners, three different directions
+    for text in personas.values():
+        assert "talk fast" not in text.lower()                    # speed is what made the host sound rushed
+        assert "never rushed" in text.lower() or "never a sprint" in text.lower()
+        assert "# The jokes" in text                              # the comedy guidance travels with every manner
+
+
+def test_an_unknown_manner_plays_as_the_default():
+    default = host_service.build_persona(name="Max", game_title="G", company="Acme", sarcasm=6)
+    assert host_service.build_persona(name="Max", game_title="G", company="Acme", sarcasm=6, manner="shouty") == default
+    assert host_service.MANNERS[host_service.DEFAULT_MANNER]["sound"] in default
+
+
+def test_the_voice_is_not_sped_up_unless_asked():
+    assert host_service.PACE_SPEED["snappy"] == 1.0
+    assert host_service.PACE_SPEED["relaxed"] < 1.0 < host_service.PACE_SPEED["rapid"]
+
+
+def test_a_gentle_host_keeps_the_manner_but_loses_the_teasing():
+    gentle = host_service.build_persona(name="Max", game_title="G", company="Acme", sarcasm=1, manner="deadpan")
+    assert "the teasing is gone" in gentle and "No sarcasm at all" in gentle
+
+
+def test_a_saved_character_keeps_a_known_manner_only():
+    cleaned = settings_store._clean_host({"hosts": [
+        {"name": "Max", "voice": "cedar", "manner": "showman"},
+        {"name": "Roxy", "voice": "coral", "manner": "shouty"},
+        {"name": "Sam", "voice": "verse"}]})
+    assert [host["manner"] for host in cleaned["hosts"]] == ["showman", "wiseguy", "wiseguy"]
 
 
 # --- the playlist behind the results ---------------------------------------------------------------------
@@ -73,6 +111,98 @@ async def test_playlist_is_the_same_every_time_for_the_same_game(catalogue):
 
 async def test_no_music_for_an_empty_decade(catalogue):
     assert await music_service.after_party("50s") == []
+
+
+# --- dead air is edited out of the host's lines; his voice is not touched ------------------------------------
+
+RATE = host_service.SAMPLE_RATE
+
+
+def tone(seconds, level=0.3):
+    """A stretch of talking, as far as the editor can tell: a steady 200 Hz tone."""
+    t = np.arange(int(RATE * seconds)) / RATE
+    return (np.sin(2 * np.pi * 200 * t) * level * 32767).astype(np.int16).tobytes()
+
+
+def hush(seconds):
+    return np.zeros(int(RATE * seconds), dtype=np.int16).tobytes()
+
+
+def tighten(audio, cap, piece=4800):
+    edit = host_service.TightEdit(cap)
+    out = b"".join(edit.feed(audio[i:i + piece]) for i in range(0, len(audio), piece))
+    return out + edit.finish()
+
+
+def seconds_of(audio):
+    return len(audio) / 2 / RATE
+
+
+def test_a_long_pause_is_shortened_and_the_silence_after_the_line_is_dropped():
+    line = tone(1.0) + hush(0.9) + tone(1.0) + hush(0.6)
+    out = tighten(line, 0.38)
+    assert abs(seconds_of(out) - (1.0 + 0.38 + 1.0 + 0.06)) < 0.03      # talk, capped pause, talk, a short release
+    assert out.startswith(tone(1.0))                                     # the talking itself is passed through untouched
+    assert tone(1.0) in out[len(tone(1.0)):]
+
+
+def test_a_natural_gap_between_words_is_left_alone():
+    line = tone(0.5) + hush(0.2) + tone(0.5)
+    assert tighten(line, 0.38) == line
+
+
+def test_the_relaxed_pace_keeps_every_pause_but_still_ends_when_he_stops():
+    line = tone(1.0) + hush(0.9) + tone(1.0) + hush(0.6)
+    out = tighten(line, None)
+    assert abs(seconds_of(out) - (1.0 + 0.9 + 1.0 + 0.06)) < 0.03
+
+
+def test_the_edit_is_the_same_however_the_audio_arrives():
+    line = hush(0.3) + tone(0.7) + hush(0.8) + tone(0.4) + hush(0.5)
+    assert tighten(line, 0.38, piece=4800) == tighten(line, 0.38, piece=777) == tighten(line, 0.38, piece=len(line))
+
+
+def test_a_line_with_no_sound_in_it_sends_nothing():
+    assert tighten(hush(1.0), 0.38) == b""
+
+
+def test_each_pace_has_a_speed_and_a_pause_setting():
+    assert set(host_service.PACE_SPEED) == set(host_service.PAUSE_CAP_SEC) == {"relaxed", "snappy", "rapid"}
+    assert host_service.PAUSE_CAP_SEC["relaxed"] is None
+    assert host_service.PAUSE_CAP_SEC["rapid"] < host_service.PAUSE_CAP_SEC["snappy"]
+
+
+# --- the soundtrack behind the questions ------------------------------------------------------------------
+
+async def test_the_soundtrack_is_fixed_for_a_game_and_differs_between_games(catalogue):
+    first = await music_service.soundtrack("80s", "run-1")
+    assert first == await music_service.soundtrack("80s", "run-1")      # the browser and the game must agree on it
+    assert first != await music_service.soundtrack("80s", "run-2")
+    artists = [song["artist"] for song in first]
+    assert len(artists) == len(set(artists)) == 7                        # one song per artist
+
+
+async def test_a_song_already_asked_about_is_left_out_of_the_soundtrack(catalogue):
+    rows = await music_service.soundtrack_rows("80s", "run-1")
+    asked = rows[0]
+    songs = await music_service.soundtrack("80s", "run-1", {asked["id"]})
+    assert asked["preview_url"] not in [song["previewUrl"] for song in songs]
+    assert len(songs) == len(rows) - 1
+
+
+async def test_the_soundtrack_is_not_the_results_playlist_in_the_same_order(catalogue):
+    behind = [song["previewUrl"] for song in await music_service.soundtrack("80s", "run-1")]
+    after = [song["previewUrl"] for song in await music_service.after_party("80s", seed="run-1")]
+    assert behind != after
+
+
+def test_a_game_without_music_breaks_still_gets_one_decade_for_all_its_music():
+    rules = {"decades": ["70s", "80s", "90s"]}
+    speed_run = {"id": "run-7", "decade": None}
+    assert music_service.game_decade(speed_run, rules) == music_service.game_decade(speed_run, rules)
+    assert music_service.game_decade(speed_run, rules) in rules["decades"]
+    assert music_service.game_decade({"id": "run-8", "decade": "60s"}, rules) == "60s"
+    assert music_service.game_decade(speed_run, {"decades": []}) is None
 
 
 # --- a browser failing to play a clip proves nothing about the clip --------------------------------------

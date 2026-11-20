@@ -1,7 +1,10 @@
-// One shared <audio> element for music-round clips.
+// One shared <audio> element for music-round clips ("name that tune").
 //
 // Phones (iOS especially) only let a page start audio from inside a tap. By "unlocking"
 // this single element during the Start tap, every later clip can begin on its own.
+//
+// (The music that plays behind the questions and the results is the jukebox's, in jukebox.ts.
+// It listens to this module only to know when the host has the floor.)
 
 import { trace } from './trace'
 
@@ -39,17 +42,6 @@ export function musicElement(): HTMLAudioElement {
   return element
 }
 
-let decks: [HTMLAudioElement, HTMLAudioElement] | null = null
-
-/** Two more players for the results-screen playlist, which crossfades one song into the next. */
-export function partyDecks(): [HTMLAudioElement, HTMLAudioElement] {
-  if (!decks) {
-    decks = [new Audio(), new Audio()]
-    decks.forEach((deck) => (deck.preload = 'auto'))
-  }
-  return decks
-}
-
 function unlock(audio: HTMLAudioElement) {
   if (audio.dataset.unlocked) return
   audio.muted = true
@@ -66,9 +58,9 @@ function unlock(audio: HTMLAudioElement) {
     })
 }
 
-/** Call from a tap handler (e.g. the Start button): every player this game will use becomes free to start by itself. */
+/** Call from a tap handler (e.g. the Start button): the clip player becomes free to start by itself. */
 export function unlockMusic() {
-  ;[musicElement(), ...partyDecks()].forEach(unlock)
+  unlock(musicElement())
 }
 
 // --------------------------------------------------------------------------- riding the volume
@@ -92,16 +84,28 @@ let timer = 0
 let lastTick = 0
 let adjustable: boolean | null = null
 
-const duckListeners = new Set<(on: boolean) => void>()
+// The jukebox (the music behind the questions) follows a different signal from the clip above. A clip
+// steps back as soon as the host is *about* to speak, so that his first word is never fought. The
+// jukebox is what fills the second or two before he starts, so it dips only when a voice is actually
+// sounding: his, or the player's on the microphone.
 
-/** Be told when the host (or the player's microphone) takes or gives up the floor. */
-export function onDuck(listener: (on: boolean) => void): () => void {
-  duckListeners.add(listener)
-  return () => duckListeners.delete(listener)
+let voiceOver = false
+const voiceListeners = new Set<() => void>()
+
+/** A voice has started or stopped sounding over the music. */
+export function setVoiceOver(on: boolean) {
+  if (voiceOver === on) return
+  voiceOver = on
+  voiceListeners.forEach((listener) => listener())
 }
 
-export function musicDucked(): boolean {
-  return ducked
+export function voiceIsOver(): boolean {
+  return voiceOver
+}
+
+export function onVoiceOver(listener: () => void): () => void {
+  voiceListeners.add(listener)
+  return () => voiceListeners.delete(listener)
 }
 
 /** iPhones ignore volume changes on media elements; find out once. */
@@ -154,7 +158,6 @@ function stopRiding() {
 export function duckMusic(on: boolean) {
   if (ducked === on) return
   ducked = on
-  duckListeners.forEach((listener) => listener(on))
   const audio = element
   if (!audio) return
   if (adjustable === false) {

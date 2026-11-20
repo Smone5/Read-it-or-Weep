@@ -1,7 +1,7 @@
 // End of a game: the score, what to re-read, and a reason to play again.
 
 import confetti from 'canvas-confetti'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NowPlaying } from '../components/NowPlaying'
 import { api } from '../lib/api'
 import { play } from '../lib/sound'
@@ -44,9 +44,13 @@ export default function Summary({ slug, summary, hostName, hostLine, hostSpeakin
     }
   }, [celebrate, showLeaderboard, slug, summary.mode])
 
+  // The server keeps one rating per game. Ratings are sent one after another, so when a player
+  // taps a different star, the last one they tapped is the one that is kept.
+  const rating = useRef<Promise<unknown>>(Promise.resolve())
   const rate = (value: number) => {
     setStars(value)
-    void api('/api/feedback', { body: { runId: summary.runId, stars: value } })
+    rating.current = rating.current
+      .then(() => api('/api/feedback', { body: { runId: summary.runId, stars: value }, retry: 3 }))
       .then(() => setThanked(true))
       .catch(() => undefined)
   }

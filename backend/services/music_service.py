@@ -34,6 +34,7 @@ log = logging.getLogger("music")
 ITUNES_SEARCH = "https://itunes.apple.com/search"
 APPLE_MUSIC_SEARCH = "https://api.music.apple.com/v1/catalog/us/search"
 TARGET_TRACKS = 90        # per decade: enough that music breaks and the results playlist rarely repeat
+SOUNDTRACK_SONGS = 24     # about ten minutes of 30-second clips, crossfaded; the list goes round again after that
 MIN_TRACKS_FOR_BANK = 6
 
 DECADE_YEARS = {
@@ -320,6 +321,41 @@ async def build_question(decade: str, avoid_track_ids: set[str]) -> dict | None:
 def _track_view(track: dict) -> dict:
     return {"title": track["title"], "artist": track["artist"], "previewUrl": track["preview_url"],
             "artworkUrl": track["artwork_url"], "trackUrl": track["track_url"]}
+
+
+def game_decade(run: dict, rules: dict) -> str | None:
+    """The decade a game's background music comes from: the one it was started with, or - for a style
+    of play without music breaks - one picked for that game, the same every time it is asked for."""
+    if run["decade"]:
+        return run["decade"]
+    allowed = sorted(rules["decades"])
+    return random.Random(f"decade:{run['id']}").choice(allowed) if allowed else None
+
+
+async def soundtrack_rows(decade: str, seed: str, count: int = SOUNDTRACK_SONGS) -> list[dict]:
+    """The songs that play quietly behind one game: one per artist, in an order fixed by ``seed``.
+
+    Fixed, because two things must agree on it without talking to each other: the browser plays these
+    songs, and the game never uses one of them as a "name that tune" question.
+    """
+    tracks = sorted(await tracks_for(decade), key=lambda t: t["id"])
+    random.Random(f"soundtrack:{seed}").shuffle(tracks)
+    chosen: list[dict] = []
+    artists: set[str] = set()
+    for track in tracks:
+        artist = track["artist"].lower()
+        if artist in artists:
+            continue
+        artists.add(artist)
+        chosen.append(track)
+        if len(chosen) >= count:
+            break
+    return chosen
+
+
+async def soundtrack(decade: str, seed: str, skip_ids: set[str] | None = None) -> list[dict]:
+    """The same list as the browser plays it, leaving out any song already used as a question."""
+    return [_track_view(t) for t in await soundtrack_rows(decade, seed) if t["id"] not in (skip_ids or set())]
 
 
 async def after_party(decade: str, heard_ids: list[str] | None = None, count: int = 40, seed: str | None = None) -> list[dict]:

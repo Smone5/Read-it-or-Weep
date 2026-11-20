@@ -12,7 +12,7 @@ import { useParams } from 'react-router-dom'
 import { FullScreenMessage, SoundToggle, Spinner, Stage } from '../components/ui'
 import { NowPlaying } from '../components/NowPlaying'
 import { HostBox, LETTERS, TONES } from '../game/parts'
-import { startAfterParty, stopAfterParty } from '../lib/afterParty'
+import { startParty, stopJukebox } from '../lib/jukebox'
 import { api } from '../lib/api'
 import { HostVoice } from '../lib/hostVoice'
 import { fadeOutMusic, playClip, preloadClip, stopMusic, unlockMusic } from '../lib/music'
@@ -70,7 +70,7 @@ export default function HostScreen() {
     return () => {
       voice.current?.close()
       stopMusic()
-      stopAfterParty(0)
+      stopJukebox(0)
       applyDecade(null)
     }
   }, [code, joinUrl])
@@ -156,7 +156,7 @@ export default function HostScreen() {
       const party = state.afterParty
       if (party) {
         void Promise.all([pause(2200), Promise.race([host?.whenQuiet(), pause(15000)])]).then(() => {
-          if (seen.current === marker) startAfterParty(party.tracks)
+          if (seen.current === marker) startParty(party.tracks)
         })
       }
     }
