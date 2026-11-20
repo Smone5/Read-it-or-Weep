@@ -76,7 +76,9 @@ const STING_GAP_MS = 400
 // When the host finishes a title ("...the Deep End!") the music answers it for a beat before the question appears.
 const BUTTON_MS = 600
 const OPENING_BUTTON_MS = 800
-const CLIP_GAP_MS = 400 // before a "name that tune" clip: the music stops dead, a beat of silence, then the mystery song
+// Into a "name that tune" clip the soundtrack fades away (about a second) as the mystery song comes in: a crossfade.
+// (A dead stop and a beat of silence, tried first, sounded like the music had broken.)
+const CLIP_GAP_MS = 150
 // After an answer the music comes up while the player decides when to tap Next - never in the first moments, under the
 // answer's sting - and eases back down if they stay. ("...go up while waiting, then fade away, but be abrupt when they
 // click next.")
@@ -173,7 +175,8 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   //   reveal         "gap" under the answer's sting and the host, "wait" (up) once he is done, easing back to
   //                  "linger" if the player stays; down at once when they tap Next
   //   wager screen   a bed: no clock is running, and the bet is the drama
-  //   music break    the soundtrack plays under the host's introduction, then stops dead before the clip
+  //   music break    the soundtrack plays under the host's introduction, then fades away as the mystery song comes
+  //                  in; once the clip has played out its 30 seconds, the soundtrack comes back as after any question
   const [bigMoment, setBigMoment] = useState(false)
   const [opening, setOpening] = useState(!resumed) // the show's opening card: the loudest the music gets
   // A round card begins with a moment of quiet for its sting; then the music comes up under the title.
@@ -188,6 +191,11 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   const [lingering, setLingering] = useState(false)
   // Next was tapped: the music drops at once, without waiting for the next question to arrive.
   const [leaving, setLeaving] = useState(false)
+  // A "name that tune" clip has the floor until it has played to its end; then the soundtrack carries on, whether the
+  // player is still on the question or on its answer. ("The music trivia question should finish playing its 30
+  // seconds and new music should keep going.")
+  const [clipOver, setClipOver] = useState(false)
+  const clipHasFloor = item?.slot === 'music' && !clipOver
   useEffect(() => {
     setAfterHost(false)
     setLingering(false)
@@ -203,7 +211,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
     }
   }, [phase, host])
   useEffect(() => {
-    if (!afterHost) return
+    if (!afterHost || clipHasFloor) return
     const linger = () => setLingering(true)
     const timer = window.setTimeout(linger, LINGER_AFTER_MS)
     const onHide = () => document.hidden && linger() // nobody is looking: no need for it to be up
@@ -212,23 +220,22 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       window.clearTimeout(timer)
       document.removeEventListener('visibilitychange', onHide)
     }
-  }, [afterHost])
+  }, [afterHost, clipHasFloor])
   useEffect(() => {
-    const music = item?.slot === 'music'
-    // What is under the question (or the betting screen) this card leads to.
-    const bed = music ? 'out' : quick || item?.needsWager ? 'gap' : 'think'
+    // What is under a question (or the betting screen).
+    const bed = quick || item?.needsWager ? 'gap' : 'think'
     if (phase === 'card') {
-      if (handover === 'bed') setJukeboxLevel(bed)
+      if (handover === 'bed') setJukeboxLevel(item?.slot === 'music' ? 'out' : bed)
       else if (opening) setJukeboxLevel('intro')
       else setJukeboxLevel(titleUp ? 'title' : 'think')
-    } else if (music) setJukeboxLevel('out')
+    } else if (clipHasFloor) setJukeboxLevel('out')
     else if (phase === 'wager') setJukeboxLevel('gap')
     else if (phase === 'question') setJukeboxLevel(bed)
     else if (leaving) setJukeboxLevel(bed)
     else if (bigMoment && !quick) setJukeboxLevel('swell')
     else if (afterHost && !quick) setJukeboxLevel(lingering ? 'linger' : 'wait')
     else setJukeboxLevel('gap')
-  }, [phase, item?.slot, item?.needsWager, quick, bigMoment, opening, titleUp, handover, afterHost, lingering, leaving])
+  }, [phase, item?.slot, item?.needsWager, quick, bigMoment, opening, titleUp, handover, afterHost, lingering, leaving, clipHasFloor])
 
   // On a phone the explanation lands below the answers: bring it into view, and return to the
   // top for each new question.
@@ -272,6 +279,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
     setFlagged(false)
     setError('')
     setClipStarted(false)
+    setClipOver(false)
     setSecondsLeft(null)
     if (next.round.name !== roundRef.current) {
       roundRef.current = next.round.name
@@ -327,6 +335,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
     async (next: Item, opening: boolean) => {
       roundRef.current = next.round.name
       setItem(next)
+      setClipOver(false)
       setReveal(null)
       setPicked(null)
       setError('')
@@ -728,7 +737,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
 
             {/* The clip keeps playing through the reveal (dipping under the host) and fades out on Next. */}
             {item.music && (
-              <MusicPlayer key={`clip:${item.id}`} src={item.music.previewUrl} active={phase === 'question'} onBroken={() => void musicBroken()} onPlaying={() => setClipStarted(true)} />
+              <MusicPlayer key={`clip:${item.id}`} src={item.music.previewUrl} active={phase === 'question'} onBroken={() => void musicBroken()} onPlaying={() => setClipStarted(true)} onClipOver={setClipOver} />
             )}
 
             {phase === 'question' && item.timeLimitSec > 0 && (

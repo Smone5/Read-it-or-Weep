@@ -374,21 +374,31 @@ type MusicPlayerProps = {
   onBroken: () => void
   /** The clip is actually coming out of the speaker (so the question's clock can start). */
   onPlaying?: () => void
+  /** The clip has played to its end (true) - or been started again from there (false). */
+  onClipOver?: (over: boolean) => void
 }
 
-export function MusicPlayer({ src, active, onBroken, onPlaying }: MusicPlayerProps) {
+export function MusicPlayer({ src, active, onBroken, onPlaying, onClipOver }: MusicPlayerProps) {
   const [playing, setPlaying] = useState(false)
   const [blocked, setBlocked] = useState(false)
   const broken = useRef(onBroken)
   broken.current = onBroken
   const started = useRef(onPlaying)
   started.current = onPlaying
+  const over = useRef(onClipOver)
+  over.current = onClipOver
 
   useEffect(() => {
     const audio = musicElement()
     const onPlay = () => {
       setPlaying(true)
       setBlocked(false)
+      over.current?.(false)
+    }
+    const onEnd = () => {
+      setPlaying(false)
+      trace('clip.ended')
+      over.current?.(true)
     }
     const onSound = () => {
       trace('clip.heard')
@@ -408,7 +418,7 @@ export function MusicPlayer({ src, active, onBroken, onPlaying }: MusicPlayerPro
     audio.addEventListener('play', onPlay)
     audio.addEventListener('playing', onSound)
     audio.addEventListener('pause', onPause)
-    audio.addEventListener('ended', onPause)
+    audio.addEventListener('ended', onEnd)
     audio.addEventListener('error', onError)
     // The clip was loading while the round was being introduced; if it already failed, say so now.
     if (audio.dataset.clip === src && audio.error) onError()
@@ -435,7 +445,7 @@ export function MusicPlayer({ src, active, onBroken, onPlaying }: MusicPlayerPro
       audio.removeEventListener('play', onPlay)
       audio.removeEventListener('playing', onSound)
       audio.removeEventListener('pause', onPause)
-      audio.removeEventListener('ended', onPause)
+      audio.removeEventListener('ended', onEnd)
       audio.removeEventListener('error', onError)
       if (!musicFading()) stopMusic() // a fade already in progress finishes by itself
     }

@@ -252,7 +252,8 @@ function goal(): number {
 
 /** Seconds to cover about two thirds of the way to a new level. Each kind of move has its own speed. */
 function settleFor(target: number): number {
-  if (target === 0) return level === 'out' ? 0.08 : 0.3 // a music break cuts the song for the clip; anything else fades
+  // Into a music break the song fades away (about a second) as the clip comes in; anything else fades a little faster.
+  if (target === 0) return level === 'out' ? 0.45 : 0.3
   if (target < riding) {
     if (voiceIsOver()) return level === 'intro' ? 0.35 : 0.07 // the opening hands over to the host in a glide; a duck is quick
     if (level === 'linger') return 1.5 // the player is lingering on the answer: the music eases away
