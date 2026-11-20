@@ -1,0 +1,569 @@
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { ErrorNote } from '../components/ui'
+import { call, errorText, isAbort } from './api'
+import { ChoiceGroup, ErrorBlock, Field, LoadingBlock, Note, PageHeader, Panel, SaveBar, Segmented, Switch } from './components'
+import { useNotify, usePageTitle } from './context'
+import { useLoad, useMeta } from './hooks'
+import type {
+  HostPace,
+  HostSample,
+  HostSampleRequest,
+  HostSettings,
+  HostSettingsWrite,
+  SettingsRead,
+  SettingsWritten,
+  VoiceInfo,
+  VoiceQuality,
+  VoiceRegister,
+} from './types'
+
+export default function HostPage() {
+  usePageTitle('Host')
+  const settings = useLoad<SettingsRead<HostSettings>>('/settings/host')
+  const { meta, error: metaError, retry: retryMeta } = useMeta()
+  const ready = settings.data !== null && meta !== null
+  const error = settings.error ?? metaError
+
+  return (
+    <>
+      <PageHeader title="Host" description="The talking game-show host: who they are, how they sound and how cheeky they get. This applies to every quiz." />
+      {!ready && !error && <LoadingBlock label="Loading the host" />}
+      {!ready && error && (
+        <ErrorBlock
+          message={error}
+          onRetry={() => {
+            settings.reload()
+            retryMeta()
+          }}
+        />
+      )}
+      {settings.data && meta && (
+        <HostForm initial={settings.data.value} voices={meta.voices} voiceInfo={meta.voiceInfo ?? {}} aiConfigured={meta.aiConfigured} />
+      )}
+    </>
+  )
+}
+
+// ---- wording --------------------------------------------------------------------------
+
+const MAX_CHARACTERS = 3
+const NAME_MAX = 30
+const INSTRUCTIONS_MAX = 600
+
+/** A short name for each band of the scale. The fuller description comes from the server with each sample. */
+function sarcasmLabel(level: number): string {
+  if (level <= 1) return 'Warm, no teasing'
+  if (level <= 3) return 'Light and friendly'
+  if (level <= 5) return 'Playful'
+  if (level <= 7) return 'Properly sarcastic'
+  if (level <= 9) return 'Very sarcastic'
+  return 'Maximum roast'
+}
+
+const REGISTER_WORDS: Record<VoiceRegister, string> = {
+  deeper: 'deeper voice',
+  'lower-mid': 'lower voice',
+  middle: 'mid-range voice',
+  higher: 'higher voice',
+}
+
+/** For example "cedar — lower voice, smooth tone". */
+function voiceLabel(voice: string, info: VoiceInfo): string {
+  const facts = info[voice]
+  if (!facts) return voice
+  return `${voice} — ${REGISTER_WORDS[facts.register] ?? `${facts.register} voice`}, ${facts.tone} tone`
+}
+
+const QUALITIES: { value: VoiceQuality; label: string; description: string }[] = [
+  { value: 'standard', label: 'Standard', description: 'Fast and inexpensive (about 5 cents of AI cost per game).' },
+  { value: 'premium', label: 'Premium', description: 'Sharper, funnier jokes (about 17 cents per game).' },
+]
+
+const PACES: { value: HostPace; label: string }[] = [
+  { value: 'relaxed', label: 'Relaxed' },
+  { value: 'snappy', label: 'Snappy (recommended)' },
+  { value: 'rapid', label: 'Rapid-fire' },
+]
+
+// ---- the form's working copy -------------------------------------------------------------
+
+/** `key` only tells the rows apart on screen; the server gives each character its real id on saving. */
+type Character = { key: number; name: string; voice: string }
+
+type Draft = Omit<HostSettingsWrite, 'hosts'> & { hosts: Character[] }
+
+let nextKey = 1
+
+function draftOf(value: HostSettings, fallbackVoice: string): Draft {
+  // An install saved before characters existed has only the single `name` and `voice`.
+  const hosts = value.hosts?.length ? value.hosts : [{ name: value.name || 'Max', voice: value.voice || fallbackVoice }]
+  return {
+    sarcasm: value.sarcasm,
+    voice_enabled: value.voice_enabled,
+    talk_enabled: value.talk_enabled ?? true,
+    custom_instructions: value.custom_instructions ?? '',
+    player_can_choose: value.player_can_choose ?? true,
+    voice_quality: value.voice_quality ?? 'standard',
+    pace: value.pace ?? 'snappy',
+    hosts: hosts.slice(0, MAX_CHARACTERS).map((host) => ({ key: nextKey++, name: host.name, voice: host.voice })),
+  }
+}
+
+/** Exactly what PUT /settings/host expects. `name` and `voice` at the top level are copies and are never sent. */
+const bodyOf = (draft: Draft): HostSettingsWrite => ({
+  sarcasm: draft.sarcasm,
+  voice_enabled: draft.voice_enabled,
+  talk_enabled: draft.talk_enabled,
+  custom_instructions: draft.custom_instructions.trim(),
+  player_can_choose: draft.player_can_choose,
+  voice_quality: draft.voice_quality,
+  pace: draft.pace,
+  hosts: draft.hosts.map((host) => ({ name: host.name.trim(), voice: host.voice })),
+})
+
+function problemWith(draft: Draft): string | null {
+  const names = draft.hosts.map((host) => host.name.trim().toLowerCase())
+  if (names.some((name) => !name)) return 'Give every character a name.'
+  if (new Set(names).size !== names.length) return 'Two characters have the same name. Give each one a different name.'
+  return null
+}
+
+// ---- samples ------------------------------------------------------------------------------
+
+type Sample =
+  | { status: 'loading' }
+  | { status: 'ready'; line: string; audio: string | null; blocked: boolean }
+  | { status: 'error'; message: string }
+
+// Ten milliseconds of silence. Browsers only let a page start sound in direct response to a
+// click, and a sample takes a few seconds to arrive, so the player is started on this at the
+// moment of the click and then handed the real recording.
+const SILENCE =
+  'data:audio/wav;base64,UklGRnQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YVAAAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA=='
+
+function HostForm({
+  initial,
+  voices,
+  voiceInfo,
+  aiConfigured,
+}: {
+  initial: HostSettings
+  voices: string[]
+  voiceInfo: VoiceInfo
+  aiConfigured: boolean
+}) {
+  const notify = useNotify()
+  const fallbackVoice = voices[0] ?? ''
+  const [saved, setSaved] = useState(initial)
+  const [draft, setDraft] = useState<Draft>(() => draftOf(initial, fallbackVoice))
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  /** One entry per character (by `key`) that has had a sample asked for. */
+  const [samples, setSamples] = useState<Record<number, Sample>>({})
+  /** The character whose sample is sounding right now. */
+  const [playing, setPlaying] = useState<number | null>(null)
+  /** The server's own description of each sarcasm level, as samples bring them in. */
+  const [styles, setStyles] = useState<Record<number, string>>({})
+  const player = useRef<HTMLAudioElement | null>(null)
+  const request = useRef<{ id: number; controller: AbortController } | null>(null)
+  const requestCount = useRef(0)
+
+  // Lowest voice first, so the list reads as a scale.
+  const voiceOptions = useMemo(() => {
+    const known = [...voices].sort((a, b) => (voiceInfo[a]?.pitchHz ?? Infinity) - (voiceInfo[b]?.pitchHz ?? Infinity) || a.localeCompare(b))
+    const extra = draft.hosts.map((host) => host.voice).filter((voice) => voice && !known.includes(voice))
+    return [...known, ...new Set(extra)]
+  }, [voices, voiceInfo, draft.hosts])
+
+  const savedBody = useMemo(() => JSON.stringify(bodyOf(draftOf(saved, fallbackVoice))), [saved, fallbackVoice])
+  const dirty = JSON.stringify(bodyOf(draft)) !== savedBody
+
+  const stopSound = useCallback(() => {
+    const audio = player.current
+    if (audio) {
+      audio.onended = null
+      audio.pause()
+    }
+    player.current = null
+    setPlaying(null)
+  }, [])
+
+  /** Stop whatever is sounding and give up on a sample that is still on its way. */
+  const cancelSample = useCallback(() => {
+    request.current?.controller.abort()
+    request.current = null
+    stopSound()
+  }, [stopSound])
+
+  useEffect(() => cancelSample, [cancelSample]) // leaving the page silences it
+
+  const startSound = (audio: HTMLAudioElement, key: number, onBlocked: () => void) => {
+    player.current = audio
+    audio.onended = () => {
+      if (player.current !== audio) return
+      player.current = null
+      setPlaying(null)
+    }
+    audio.play().then(
+      () => {
+        if (player.current === audio) setPlaying(key)
+      },
+      () => {
+        if (player.current !== audio) return
+        player.current = null
+        onBlocked()
+      },
+    )
+  }
+
+  const forgetSample = (key: number) =>
+    setSamples((current) => {
+      const next = { ...current }
+      delete next[key]
+      return next
+    })
+
+  /** Ask for a line spoken by this character, using the settings on screen (saved or not), and play it. */
+  const hear = (character: Character) => {
+    cancelSample()
+    const controller = new AbortController()
+    const id = ++requestCount.current
+    request.current = { id, controller }
+
+    const audio = new Audio(SILENCE)
+    audio.play().catch(() => {}) // still inside the click: this is what lets the recording play later
+
+    const body: HostSampleRequest = {
+      sarcasm: draft.sarcasm,
+      name: character.name.trim() || 'Max',
+      voice: character.voice,
+      quality: draft.voice_quality,
+      pace: draft.pace,
+    }
+    setSamples((current) => {
+      const next: Record<number, Sample> = {}
+      for (const [key, sample] of Object.entries(current)) if (sample.status !== 'loading') next[Number(key)] = sample
+      next[character.key] = { status: 'loading' }
+      return next
+    })
+
+    call<HostSample>('/host/sample', { method: 'POST', body, signal: controller.signal }).then(
+      (result) => {
+        if (request.current?.id !== id) return // another sample was asked for meanwhile
+        request.current = null
+        setStyles((current) => ({ ...current, [body.sarcasm]: result.style }))
+        setSamples((current) => ({ ...current, [character.key]: { status: 'ready', line: result.line, audio: result.audio, blocked: false } }))
+        if (!result.audio) return
+        audio.src = result.audio
+        startSound(audio, character.key, () =>
+          setSamples((current) => {
+            const sample = current[character.key]
+            return sample?.status === 'ready' ? { ...current, [character.key]: { ...sample, blocked: true } } : current
+          }),
+        )
+      },
+      (reason: unknown) => {
+        if (isAbort(reason) || request.current?.id !== id) return
+        request.current = null
+        setSamples((current) => ({ ...current, [character.key]: { status: 'error', message: errorText(reason) } }))
+      },
+    )
+  }
+
+  const replay = (key: number, source: string) => {
+    cancelSample()
+    setSamples((current) => {
+      const sample = current[key]
+      return sample?.status === 'ready' ? { ...current, [key]: { ...sample, blocked: false } } : current
+    })
+    startSound(new Audio(source), key, () => {})
+  }
+
+  const change = (patch: Partial<Draft>) => {
+    setDraft((current) => ({ ...current, ...patch }))
+    setError(null)
+  }
+
+  /** For settings a sample depends on: the samples on screen no longer match, so they go. */
+  const changeSound = (patch: Partial<Draft>) => {
+    cancelSample()
+    setSamples({})
+    change(patch)
+  }
+
+  const changeCharacter = (key: number, patch: Partial<Pick<Character, 'name' | 'voice'>>) => {
+    cancelSample()
+    forgetSample(key)
+    change({ hosts: draft.hosts.map((host) => (host.key === key ? { ...host, ...patch } : host)) })
+  }
+
+  const addCharacter = () => {
+    const used = new Set(draft.hosts.map((host) => host.voice))
+    const voice = voiceOptions.find((option) => !used.has(option)) ?? fallbackVoice
+    change({ hosts: [...draft.hosts, { key: nextKey++, name: '', voice }] })
+  }
+
+  const removeCharacter = (key: number) => {
+    cancelSample()
+    forgetSample(key)
+    change({ hosts: draft.hosts.filter((host) => host.key !== key) })
+  }
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    if (saving || !dirty) return
+    const problem = problemWith(draft)
+    if (problem) {
+      setError(problem)
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      const result = await call<SettingsWritten<HostSettings>>('/settings/host', { method: 'PUT', body: bodyOf(draft) })
+      cancelSample()
+      setSamples({})
+      setSaved(result.value)
+      setDraft(draftOf(result.value, fallbackVoice))
+      notify('Host saved. New games use it straight away.')
+    } catch (reason) {
+      setError(errorText(reason))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const names = draft.hosts.map((host) => host.name.trim().toLowerCase())
+  const waiting = Object.values(samples).some((sample) => sample.status === 'loading')
+
+  return (
+    // A flex column, not a grid, so the save bar (position: sticky) can follow the screen.
+    <form onSubmit={submit} className="flex flex-col gap-5">
+      {!aiConfigured && (
+        <Note tone="warn" role="status">
+          <strong>The AI service is not set up on this server</strong>, so the host cannot speak and samples are not available. You can still set
+          everything up here for when it is.
+        </Note>
+      )}
+
+      <Panel
+        title="Host characters"
+        description="One to three characters, each with a name and a voice. The first one is the host everyone gets unless players are allowed to choose."
+      >
+        <ol className="grid gap-3">
+          {draft.hosts.map((character, index) => {
+            const sample = samples[character.key]
+            const name = character.name.trim().toLowerCase()
+            const nameError = !name ? 'Give this character a name.' : names.indexOf(name) !== index ? 'Another character already has this name.' : null
+            const facts = voiceInfo[character.voice]
+            return (
+              <li key={character.key} className="rounded-xl border border-line p-3 sm:p-4">
+                <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)]">
+                  <Field label={index === 0 ? 'Name (the main host)' : `Name of character ${index + 1}`} error={character.name === '' && !error ? null : nameError}>
+                    {(props) => (
+                      <input
+                        className="field"
+                        {...props}
+                        value={character.name}
+                        onChange={(event) => changeCharacter(character.key, { name: event.target.value })}
+                        maxLength={NAME_MAX}
+                        autoComplete="off"
+                        placeholder="For example Max"
+                      />
+                    )}
+                  </Field>
+                  <Field
+                    label="Voice"
+                    hint={facts ? `Measured: pitch about ${facts.pitchHz} Hz, clarity ${facts.clarityDb} dB.` : undefined}
+                  >
+                    {(props) => (
+                      <select className="field" {...props} value={character.voice} onChange={(event) => changeCharacter(character.key, { voice: event.target.value })}>
+                        {voiceOptions.map((voice) => (
+                          <option key={voice} value={voice}>
+                            {voiceLabel(voice, voiceInfo)}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </Field>
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => hear(character)}
+                    disabled={!aiConfigured || sample?.status === 'loading'}
+                    aria-label={`Hear a sample of ${character.name.trim() || `character ${index + 1}`}`}
+                  >
+                    {sample?.status === 'loading' ? 'Getting a sample…' : 'Hear a sample'}
+                  </button>
+                  {sample?.status === 'ready' &&
+                    sample.audio &&
+                    (playing === character.key ? (
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={stopSound}>
+                        Stop
+                      </button>
+                    ) : (
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => replay(character.key, sample.audio ?? '')}>
+                        {sample.blocked ? 'Play' : 'Play again'}
+                      </button>
+                    ))}
+                  <span className="ml-auto">
+                    <button
+                      type="button"
+                      className="btn btn-danger btn-sm"
+                      onClick={() => removeCharacter(character.key)}
+                      disabled={draft.hosts.length === 1}
+                      title={draft.hosts.length === 1 ? 'There must be at least one character' : undefined}
+                      aria-label={`Remove ${character.name.trim() || `character ${index + 1}`}`}
+                    >
+                      Remove
+                    </button>
+                  </span>
+                </div>
+
+                <div role="status">
+                  {sample?.status === 'loading' && <p className="mt-2 text-sm text-muted">Writing a line and recording it. This takes a few seconds.</p>}
+                  {sample?.status === 'ready' && (
+                    <figure className="mt-3 rounded-lg bg-surface-2 p-3">
+                      <blockquote className="text-sm font-semibold">“{sample.line}”</blockquote>
+                      <figcaption className="mt-1 text-xs text-muted">
+                        {sample.blocked
+                          ? 'Your browser did not let the sound start by itself. Press Play to hear it.'
+                          : sample.audio
+                            ? `${character.name.trim() || 'The host'}, reacting to a wrong answer about quarterly revenue.`
+                            : 'No recording came back, so here is the line in writing.'}
+                      </figcaption>
+                    </figure>
+                  )}
+                </div>
+                {sample?.status === 'error' && (
+                  <div className="mt-3">
+                    <ErrorNote>{sample.message}</ErrorNote>
+                  </div>
+                )}
+              </li>
+            )
+          })}
+        </ol>
+
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+          <button type="button" className="btn btn-ghost" onClick={addCharacter} disabled={draft.hosts.length >= MAX_CHARACTERS}>
+            Add a character
+          </button>
+          <span className="text-xs text-muted">
+            {draft.hosts.length >= MAX_CHARACTERS ? 'Three is the most.' : 'Up to three.'} Samples use what is on this page right now, saved or not
+            {waiting ? '.' : ', and each one is a new line.'}
+          </span>
+        </div>
+        <p className="mt-3 text-xs text-muted">
+          Voices are listed from the lowest to the highest. The pitch and tone shown are measured from the audio; whether a voice suits your host is
+          best judged by ear.
+        </p>
+
+        <div className="mt-3 border-t border-line pt-2">
+          <Switch
+            checked={draft.player_can_choose}
+            onChange={(checked) => change({ player_can_choose: checked })}
+            label="Let players choose their host in the lobby"
+            description={
+              draft.hosts.length < 2
+                ? 'With only one character there is nothing to choose. Add a second one to offer a choice.'
+                : 'When off, everyone gets the first character.'
+            }
+          />
+        </div>
+      </Panel>
+
+      <Panel title="Personality" description="How much the host teases. Move the slider, then use “Hear a sample” above to judge it before you save.">
+        <Field label="Sarcasm">
+          {(props) => (
+            <input
+              type="range"
+              min={0}
+              max={10}
+              step={1}
+              {...props}
+              value={draft.sarcasm}
+              onChange={(event) => changeSound({ sarcasm: Number(event.target.value) })}
+              aria-valuetext={`${draft.sarcasm} out of 10: ${sarcasmLabel(draft.sarcasm)}`}
+            />
+          )}
+        </Field>
+        <div className="flex justify-between text-xs text-muted" aria-hidden>
+          <span>0 · Warm</span>
+          <span>10 · Full roast</span>
+        </div>
+        <p className="mt-3 text-sm">
+          <strong>
+            {draft.sarcasm} out of 10: {sarcasmLabel(draft.sarcasm)}.
+          </strong>{' '}
+          {styles[draft.sarcasm] ?? ''}
+        </p>
+        <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-muted">
+          <li>At every level the host stays workplace-safe: jokes are about the answers and office life, never about a person.</li>
+          <li>The Straight Quiz style always uses the warmest setting, whatever is chosen here.</li>
+        </ul>
+
+        <div className="mt-5">
+          <Field
+            label="Extra instructions for the host (optional)"
+            hint={`${draft.custom_instructions.length} of ${INSTRUCTIONS_MAX} characters. Plain sentences work best: what to mention, what to stay away from.`}
+          >
+            {(props) => (
+              <textarea
+                className="field"
+                {...props}
+                value={draft.custom_instructions}
+                onChange={(event) => change({ custom_instructions: event.target.value })}
+                maxLength={INSTRUCTIONS_MAX}
+                rows={4}
+                placeholder="For example: We are a logistics company, so the odd trucking pun is welcome. Never joke about job cuts. Call the chief executive “the boss”."
+              />
+            )}
+          </Field>
+        </div>
+      </Panel>
+
+      <Panel title="Voice">
+        <Switch
+          checked={draft.voice_enabled}
+          onChange={(checked) => change({ voice_enabled: checked })}
+          label="The host speaks out loud"
+          description="When off, the host's lines appear on screen as text only."
+        />
+        <Switch
+          checked={draft.talk_enabled}
+          onChange={(checked) => change({ talk_enabled: checked })}
+          label="Let players talk to the host (hold-to-talk microphone)"
+          description="The microphone is on only while a player holds the button."
+        />
+
+        <div className="mt-3 grid gap-x-6 gap-y-5 border-t border-line pt-4 lg:grid-cols-2">
+          <div>
+            <span className="label">Quality</span>
+            <ChoiceGroup label="Voice quality" options={QUALITIES} value={draft.voice_quality} onChange={(quality) => changeSound({ voice_quality: quality })} />
+          </div>
+          <div>
+            <span className="label">How fast the host talks</span>
+            <Segmented label="How fast the host talks" options={PACES} value={draft.pace} onChange={(pace) => changeSound({ pace })} />
+            <p className="mt-1 text-xs text-muted">Samples are spoken with the quality and pace chosen here.</p>
+          </div>
+        </div>
+      </Panel>
+
+      <SaveBar
+        dirty={dirty}
+        saving={saving}
+        error={error}
+        onDiscard={() => {
+          cancelSample()
+          setSamples({})
+          setDraft(draftOf(saved, fallbackVoice))
+          setError(null)
+        }}
+      />
+    </form>
+  )
+}

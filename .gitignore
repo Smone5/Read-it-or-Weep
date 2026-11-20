@@ -1,0 +1,37 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+backend/secrets/
+*.p8
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.next/
+out/
+*.tsbuildinfo
+npm-debug.log*
+
+# Local data and uploads
+backend/var/
+samples/out/
+
+# Local tool settings (contain paths on one person's computer)
+.claude/
+
+# OS / editors
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.vercel/

@@ -1,0 +1,47 @@
+# Local development and a simple single-host deployment.
+#
+#   docker compose up -d db          # just the database (run the app natively for development)
+#   docker compose up -d --build     # database + the app container on http://localhost:8100
+#
+# In a cloud deployment you normally run only the `app` image and point DATABASE_URL
+# at that cloud's managed PostgreSQL (Azure Database for PostgreSQL, Amazon RDS,
+# Google Cloud SQL, ...). Nothing here is specific to any one cloud.
+name: quizgame
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: quiz
+      POSTGRES_PASSWORD: quiz
+      POSTGRES_DB: quiz
+    ports:
+      - "127.0.0.1:5544:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quiz -d quiz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    profiles: ["app"]
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: backend/.env
+    environment:
+      DATABASE_URL: postgresql://quiz:quiz@db:5432/quiz
+      STORAGE_BACKEND: local
+      STORAGE_LOCAL_DIR: /data/storage
+      PORT: "8100"
+    ports:
+      - "8100:8100"
+    volumes:
+      - appdata:/data
+
+volumes:
+  pgdata:
+  appdata:

@@ -1,0 +1,691 @@
+// The game loop: show an item, take one answer, reveal, move on.
+//
+// The server decides everything that matters (what is asked, what is correct, the score).
+// This screen never holds a correct answer until the server has accepted the player's own.
+//
+// Who has the stage, and when
+// ---------------------------
+// Only one thing happens at a time, in this order:
+//
+//   title card   the host opens the show or introduces a round. The question is not on screen and
+//                its clock has not started; the card stays until he has finished (or the player
+//                skips, or he takes too long).
+//   question     the clock runs and the host keeps quiet, unless the player asks him for a hint or
+//                talks to him. A music clip starts here, and its clock starts when it is heard.
+//   reveal       the result, then the host's reaction. "Next" is there from the start: tapping it
+//                while he is talking cuts him off cleanly rather than letting him run on.
+//
+// To make that possible the server deals the first item of a round *sealed*: we learn which round
+// is coming, show its card, and only then ask for the question to be opened.
+
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { ErrorNote, Modal, SoundToggle } from '../components/ui'
+import { api, ApiError, onConnectionTrouble } from '../lib/api'
+import type { HostVoice } from '../lib/hostVoice'
+import { fadeOutMusic, preloadClip, stopMusic } from '../lib/music'
+import { buzz, play } from '../lib/sound'
+import { trace } from '../lib/trace'
+import type { Item, ModeId, Reveal, RunState, Summary, Turn } from '../lib/types'
+import { AnswerList, FactFakeButtons, HostBox, Hud, MusicPlayer, PictureView, TimerBar, useDeadline, type TalkControl } from './parts'
+
+type Props = {
+  firstTurn: Turn
+  /** True when picking a game back up after a reload: skip the welcome. */
+  resumed?: boolean
+  hostName: string
+  hostLine: string
+  hostSpeaking: boolean
+  host: HostVoice | null
+  talk?: TalkControl | null
+  onDone: (summary: Summary) => void
+}
+
+type Phase = 'card' | 'wager' | 'question' | 'reveal'
+type Card = { kicker: string; title: string; blurb: string }
+
+// Every step of a game is safe to repeat (asking again for the next question, or sending the same
+// answer twice, changes nothing), so each request is retried by itself across a dropped connection.
+const RETRY = 4
+
+const MIN_CARD_MS = 1400 // a title card stays at least long enough to be read
+const MAX_INTRO_MS = 11000 // ...and the host never holds the game up longer than this
+const HOST_LATE_MS = 3200 // if he has not started speaking by now, the game goes on without the introduction
+const HOST_LATE_OPENING_MS = 4800 // (the opening allows for him still connecting)
+const CLIP_WAIT_MS = 2500 // a music clip that has not started by now: start the clock anyway
+
+const ROUND_BLURB: Record<string, string> = {
+  'Warm-Up': 'Easy ones first',
+  'Music Break': 'Name that tune',
+  'Picture Round': 'Charts and pictures',
+  'The Deep End': 'Now it gets harder',
+  'Lightning Round': 'Fact or fake – be quick',
+  'Second Chance': 'The ones you missed · half points',
+  'Final Wager': 'Bet your points',
+  'Last Question': 'Double points',
+  'Speed Run': 'Beat the clock',
+  'The Quiz': 'Take your time',
+}
+
+const MODE_BLURB: Record<ModeId, string> = {
+  show: 'Rounds, music and a final wager',
+  sudden_death: 'Three strikes and you are out',
+  speed: 'Beat the clock',
+  straight: 'Take your time',
+}
+
+function openingCard(state: RunState, first?: Item): Card {
+  const round = first && state.mode === 'show' ? `First up: ${first.round.name}` : ''
+  return { kicker: 'Get ready', title: state.modeName, blurb: round || MODE_BLURB[state.mode] }
+}
+
+function roundCard(next: Item, mode: ModeId): Card {
+  if (next.slot === 'music' && mode !== 'show') return { kicker: 'Bonus', title: 'Music Break', blurb: 'Name that tune · win back a life' }
+  const kicker = mode === 'show' ? `Round ${next.round.number}` : 'Get ready'
+  return { kicker, title: next.round.name, blurb: ROUND_BLURB[next.round.name] ?? '' }
+}
+
+const LIFELINES: { kind: 'fifty' | 'peek' | 'hint'; label: string; help: string }[] = [
+  { kind: 'fifty', label: '50/50', help: 'Remove two wrong answers' },
+  { kind: 'peek', label: 'Peek', help: 'See the passage (half points)' },
+  { kind: 'hint', label: 'Hint', help: 'Ask the host' },
+]
+
+const FLAG_REASONS = ['The marked answer is wrong', 'More than one answer fits', 'The question is unclear', 'Something else']
+
+export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeaking, host, talk, onDone }: Props) {
+  const [state, setState] = useState<RunState>(firstTurn.state)
+  const [item, setItem] = useState<Item | null>(null)
+  const [phase, setPhase] = useState<Phase>('card')
+  const [card, setCard] = useState<Card>(() => openingCard(firstTurn.state))
+  const [canSkip, setCanSkip] = useState(false)
+  const [reveal, setReveal] = useState<Reveal | null>(null)
+  const [picked, setPicked] = useState<number | null>(null)
+  const [busy, setBusy] = useState(false) // a request about the question on screen is in flight
+  const [moving, setMoving] = useState(false) // on the way to the next item
+  const [clipStarted, setClipStarted] = useState(false)
+  const [secondsLeft, setSecondsLeft] = useState<number | null>(null) // for the full-screen picture view
+  const [stranded, setStranded] = useState(false) // the game is over but its results would not load
+  const [error, setError] = useState('')
+  const [reconnecting, setReconnecting] = useState(false)
+  const [quitting, setQuitting] = useState(false)
+  const [flagging, setFlagging] = useState(false)
+  const [flagged, setFlagged] = useState(false)
+  const [banner, setBanner] = useState('')
+  const roundRef = useRef('')
+  const doneRef = useRef(false)
+  const aliveRef = useRef(true)
+  const startedRef = useRef(false)
+  const movingRef = useRef(false)
+  const skipRef = useRef<(() => void) | null>(null)
+  const revealRef = useRef<HTMLElement>(null)
+
+  const runId = state.runId
+  const mode = state.mode
+  const quick = mode === 'speed' || item?.slot === 'fact_fake'
+  // The host reacts to answers in the two "show" styles. In a Speed Run he opens and signs off
+  // but stays out of the way of the race; the Straight Quiz has no host at all.
+  const hostReacts = mode === 'show' || mode === 'sudden_death'
+
+  useEffect(() => onConnectionTrouble(setReconnecting), [])
+
+  // On a phone the explanation lands below the answers: bring it into view, and return to the
+  // top for each new question.
+  useEffect(() => {
+    if (phase === 'reveal') revealRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    else window.scrollTo({ top: 0, behavior: 'smooth' })
+  }, [phase, item?.id])
+
+  const finish = useCallback(async () => {
+    if (doneRef.current) return
+    doneRef.current = true
+    host?.skip()
+    fadeOutMusic()
+    trace('finish')
+    try {
+      let result: { summary: Summary }
+      try {
+        result = await api<{ summary: Summary }>(`/api/runs/${runId}/summary`, { retry: RETRY })
+      } catch (caught) {
+        // "Still going" means the server has not closed the game yet (the clock ran out here first): close it.
+        if (!(caught instanceof ApiError) || caught.status !== 409) throw caught
+        result = await api<{ summary: Summary }>(`/api/runs/${runId}/quit`, { method: 'POST', retry: RETRY })
+      }
+      onDone(result.summary)
+    } catch (caught) {
+      // Never a dead end: say so, and let the player ask again.
+      doneRef.current = false
+      if (aliveRef.current) {
+        setError(`Your results could not be loaded (${(caught as Error).message}) Tap to try again.`)
+        setStranded(true)
+      }
+    }
+  }, [runId, host, onDone])
+
+  /** Put a question (or the wager screen) in front of the player. Its clock is already running. */
+  const show = useCallback((next: Item) => {
+    setItem(next)
+    setReveal(null)
+    setPicked(null)
+    setFlagged(false)
+    setError('')
+    setClipStarted(false)
+    setSecondsLeft(null)
+    if (next.round.name !== roundRef.current) {
+      roundRef.current = next.round.name
+      setBanner(next.round.name) // a new level that did not get a title card
+      window.setTimeout(() => setBanner(''), 1800)
+    }
+    setPhase(next.needsWager ? 'wager' : 'question')
+    trace('show', { slot: next.slot, round: next.round.name, wager: Boolean(next.needsWager) })
+  }, [])
+
+  /** Hold a title card for as long as the host needs: at least long enough to read, never too long, always skippable. */
+  const hostBeat = useCallback(
+    (lateMs: number) =>
+      new Promise<void>((resolve) => {
+        let over = false
+        const end = (why: string) => {
+          if (over) return
+          over = true
+          window.clearTimeout(floor)
+          window.clearTimeout(late)
+          window.clearTimeout(cap)
+          skipRef.current = null
+          setCanSkip(false)
+          trace('card.end', { why })
+          resolve()
+        }
+        const floor = window.setTimeout(() => {
+          if (host) void host.whenQuiet().then(() => end('host finished'))
+          else end('no host')
+        }, MIN_CARD_MS)
+        // Dead air on a title card feels broken: a host who is late to start loses his turn.
+        const late = window.setTimeout(() => {
+          if (!host?.stalled) return
+          host.tooLate()
+          end('host late')
+        }, lateMs)
+        const cap = window.setTimeout(() => {
+          host?.skip()
+          end('too long')
+        }, MAX_INTRO_MS)
+        skipRef.current = () => {
+          host?.skip()
+          end('skipped')
+        }
+        setCanSkip(true)
+      }),
+    [host],
+  )
+
+  /** A title card: the host introduces what is coming, and only then does the question (and its clock) appear. */
+  const introduce = useCallback(
+    async (next: Item, opening: boolean) => {
+      roundRef.current = next.round.name
+      setItem(next)
+      setReveal(null)
+      setPicked(null)
+      setError('')
+      setCard(opening ? openingCard(state, next) : roundCard(next, mode))
+      setPhase('card')
+      trace('card', { round: next.round.name, slot: next.slot, opening })
+      if (next.music) preloadClip(next.music.previewUrl) // so the clip can start the instant the host is done
+      if (!opening) {
+        play('levelup')
+        if (hostReacts) host?.cue('round', next.id)
+      }
+      await hostBeat(opening ? HOST_LATE_OPENING_MS : HOST_LATE_MS)
+      if (!aliveRef.current || doneRef.current) return
+      if (next.needsWager) {
+        show(next) // the wager screen; placing the bet is what opens the question
+        return
+      }
+      const opened = await api<{ item: Item; state: RunState }>(`/api/runs/${runId}/open`, { body: { itemId: next.id }, retry: RETRY })
+      if (!aliveRef.current || doneRef.current) return
+      setState(opened.state)
+      show(opened.item)
+    },
+    [state, mode, hostReacts, host, hostBeat, show, runId],
+  )
+
+  /** Deal the next item and put it on stage – behind a title card when it starts a round. */
+  const pull = useCallback(
+    async (opening = false) => {
+      if (movingRef.current || doneRef.current) return
+      movingRef.current = true
+      setMoving(true)
+      setError('')
+      try {
+        const turn = await api<Turn>(`/api/runs/${runId}/next`, { method: 'POST', retry: RETRY })
+        if (!aliveRef.current) return
+        setState(turn.state)
+        if (turn.finished || !turn.item) await finish()
+        else if (turn.item.sealed || turn.item.needsWager) await introduce(turn.item, opening)
+        else show(turn.item)
+      } catch (caught) {
+        if (aliveRef.current) setError((caught as Error).message)
+      } finally {
+        movingRef.current = false
+        setMoving(false)
+      }
+    },
+    [runId, finish, introduce, show],
+  )
+
+  // The opening. A new game starts on its title card with the host's welcome; the first question is
+  // dealt behind it and opens when he is done. A game picked back up goes straight to where it was.
+  useEffect(() => {
+    aliveRef.current = true
+    if (!startedRef.current) {
+      startedRef.current = true
+      const waiting = firstTurn.item
+      if (firstTurn.finished) void finish()
+      else if (waiting && !waiting.sealed) {
+        roundRef.current = waiting.round.name
+        show(waiting) // mid-question, or at the wager screen
+      } else if (waiting) {
+        movingRef.current = true
+        void introduce(waiting, false)
+          .catch((caught) => setError((caught as Error).message))
+          .finally(() => {
+            movingRef.current = false
+          })
+      } else {
+        if (!resumed) {
+          play('levelup')
+          host?.cue('welcome')
+          trace('opening')
+        }
+        void pull(!resumed)
+      }
+    }
+    return () => {
+      aliveRef.current = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const advance = useCallback(() => {
+    if (!reveal || movingRef.current) return
+    host?.skip() // the player has moved on, so the host stops – cleanly – rather than talk over what comes next
+    fadeOutMusic()
+    trace('advance')
+    if (reveal.finished) void finish()
+    else void pull()
+  }, [reveal, host, finish, pull])
+
+  const submit = useCallback(
+    async (choice: number | null) => {
+      if (!item || busy || phase !== 'question') return
+      setBusy(true)
+      setPicked(choice)
+      try {
+        const result = await api<Reveal>(`/api/runs/${runId}/answer`, { body: { itemId: item.id, choiceIndex: choice }, retry: RETRY })
+        setReveal(result)
+        setState(result.state)
+        setPhase('reveal')
+        trace('reveal', { correct: result.correct, timedOut: result.timedOut })
+        play(result.correct ? 'correct' : 'wrong')
+        buzz(result.correct ? 30 : [60, 40, 60])
+        if (result.strikeRestored) play('cheer')
+        if (hostReacts && item.slot !== 'fact_fake') host?.cue('result', item.id)
+      } catch (caught) {
+        if (caught instanceof ApiError && caught.status === 409) await finish()
+        else {
+          // The answer did not get through. The buttons are live again, so one more tap sends it.
+          setError(`${(caught as Error).message}${choice === null ? ' Tap any answer to carry on.' : ''}`)
+          setPicked(null)
+        }
+      } finally {
+        setBusy(false)
+      }
+    },
+    [item, busy, phase, runId, host, finish, hostReacts],
+  )
+
+  // Lightning statements and speed runs move on by themselves. (The timer reads `advance` through a
+  // ref: the function is rebuilt on every render, and a re-render must not restart the countdown.)
+  const advanceRef = useRef(advance)
+  advanceRef.current = advance
+  useEffect(() => {
+    if (phase !== 'reveal' || !reveal || !quick) return
+    const timer = window.setTimeout(() => advanceRef.current(), reveal.finished ? 1400 : mode === 'speed' ? 650 : 1150)
+    return () => window.clearTimeout(timer)
+  }, [phase, reveal, quick, mode])
+
+  // A music question's clock waits for its clip to be heard – but not for ever.
+  useEffect(() => {
+    if (phase !== 'question' || item?.slot !== 'music' || clipStarted) return
+    const timer = window.setTimeout(() => setClipStarted(true), CLIP_WAIT_MS)
+    return () => window.clearTimeout(timer)
+  }, [phase, item?.id, item?.slot, clipStarted])
+
+  const clockMs = useDeadline(mode === 'speed' ? state.deadlineAt : undefined, () => {
+    if (phase === 'question' && !busy) void pull()
+  })
+
+  // Keyboard: A-D or 1-4 to answer, Enter / Space to continue or to skip a title card.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return
+      const go = event.key === 'Enter' || event.key === ' '
+      if (phase === 'question' && item?.options) {
+        const index = 'abcd'.indexOf(event.key.toLowerCase())
+        const number = '1234'.indexOf(event.key)
+        const choice = index >= 0 ? index : number
+        if (choice >= 0 && choice < item.options.length && !item.removed.includes(choice)) void submit(choice)
+      } else if (phase === 'reveal' && !quick && go) {
+        event.preventDefault()
+        advance()
+      } else if (phase === 'card' && go && skipRef.current && !(event.target instanceof HTMLButtonElement)) {
+        event.preventDefault()
+        skipRef.current()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [phase, item, submit, advance, quick])
+
+  const useLifeline = async (kind: string) => {
+    if (!item || busy) return
+    setBusy(true)
+    try {
+      const result = await api<{ item: Item; state: RunState }>(`/api/runs/${runId}/lifeline`, { body: { itemId: item.id, kind }, retry: 2 })
+      setItem(result.item)
+      setState(result.state)
+      play('hint')
+      if (kind === 'hint') host?.cue('hint', item.id) // the one time he speaks during a question: the player asked
+    } catch (caught) {
+      setError((caught as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const placeWager = async (amount: number) => {
+    if (!item || busy) return
+    setBusy(true)
+    try {
+      const result = await api<{ item: Item; state: RunState }>(`/api/runs/${runId}/wager`, { body: { itemId: item.id, amount }, retry: RETRY })
+      play('click')
+      host?.skip() // nothing he was saying about the bet should run into the question
+      setItem(result.item)
+      setPhase('question')
+      trace('show', { slot: result.item.slot, round: result.item.round.name, wager: false })
+    } catch (caught) {
+      setError((caught as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const brokenClip = useRef('') // a clip is reported once, however many ways it fails
+  const musicBroken = async () => {
+    if (!item || phase !== 'question' || brokenClip.current === item.id) return
+    brokenClip.current = item.id
+    try {
+      const turn = await api<Turn>(`/api/runs/${runId}/media-error`, { body: { itemId: item.id }, retry: 2 })
+      setState(turn.state)
+      if (turn.finished || !turn.item) {
+        await finish()
+        return
+      }
+      // The break has already been introduced: whatever comes instead (another clip, or the next
+      // question if music will not play on this device) opens straight away.
+      let next = turn.item
+      if (next.sealed) next = (await api<{ item: Item }>(`/api/runs/${runId}/open`, { body: { itemId: next.id }, retry: RETRY })).item
+      show(next)
+    } catch {
+      /* keep the question; the player can still guess */
+    }
+  }
+
+  const quit = async () => {
+    doneRef.current = true
+    skipRef.current = null
+    stopMusic()
+    host?.skip()
+    try {
+      const { summary } = await api<{ summary: Summary }>(`/api/runs/${runId}/quit`, { method: 'POST', retry: RETRY })
+      onDone(summary)
+    } catch (caught) {
+      doneRef.current = false
+      setQuitting(false)
+      setError((caught as Error).message)
+    }
+  }
+
+  const flag = async (reason: string) => {
+    if (!item) return
+    setFlagging(false)
+    setFlagged(true)
+    await api('/api/questions/flag', { body: { itemId: item.id, reason } }).catch(() => undefined)
+  }
+
+  // "Question 3/19": answered so far, plus the one on screen, out of everything still queued.
+  const showsCounter = mode === 'show' || mode === 'straight'
+  const onScreen = item && !reveal && item.position >= state.answered ? 1 : 0
+  const total = Math.max(1, state.answered + onScreen + (state.remaining ?? 0))
+  const position = showsCounter ? `${Math.min(state.answered + onScreen, total) || 1}/${total}` : String(state.answered)
+  const canUseLifelines = phase === 'question' && item && (item.slot === 'report' || item.slot === 'image') && Object.keys(state.lifelines).length > 0
+  // Until a Speed Run's first question opens, its clock stands at the full time.
+  const speedClock = mode === 'speed' ? (state.deadlineAt ? clockMs : (state.clockSec ?? 0) * 1000) : undefined
+  const last = Boolean(reveal?.finished) || (showsCounter && state.remaining === 0)
+
+  return (
+    <div className="mx-auto flex min-h-[calc(100dvh-28px)] w-full max-w-2xl flex-col gap-3">
+      <header className="flex items-start gap-3">
+        <div className="flex-1">
+          <Hud state={state} clockMs={speedClock} position={position} />
+        </div>
+        <SoundToggle />
+        <button className="btn btn-ghost btn-sm" onClick={() => setQuitting(true)} aria-label="Quit this game">✕</button>
+      </header>
+
+      <HostBox name={hostName} line={hostLine} speaking={hostSpeaking} talk={talk} />
+
+      {banner && <p className="pixel neon-accent flicker-in text-center text-xs">{banner}</p>}
+      {reconnecting && <p className="pixel blink text-center text-[10px]" style={{ color: 'var(--accent)' }} role="status">Reconnecting…</p>}
+
+      <main className="flex flex-1 flex-col gap-3">
+        {phase === 'card' && (
+          <div className="grid flex-1 place-items-center py-10 text-center">
+            <div className="flicker-in" key={card.title}>
+              <p className="pixel blink text-[10px] text-muted">{card.kicker}</p>
+              <h1 className="neon mt-4 text-xl sm:text-3xl">{card.title}</h1>
+              <p className="mt-4 min-h-7 text-lg text-muted">{card.blurb}</p>
+              {error ? (
+                <button className="btn btn-primary mt-8" onClick={() => void pull()}>Try again ▶</button>
+              ) : (
+                <button className="btn btn-ghost btn-sm mt-8" style={{ visibility: canSkip ? 'visible' : 'hidden' }} onClick={() => skipRef.current?.()}>
+                  Skip ▶
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {phase === 'wager' && item && (
+          <div className="card rise flex flex-1 flex-col items-center justify-center gap-5 p-6 text-center">
+            <p className="chip chip-accent">Final wager</p>
+            <h2 className="neon text-base sm:text-xl">How sure are you?</h2>
+            <p className="text-muted">
+              One last question{item.section ? <> from <b className="text-ink">{item.section.heading}</b></> : null}. Bet before you see it: right wins the bet, wrong loses it.
+            </p>
+            <div className="grid w-full max-w-sm gap-3">
+              {(item.wagerOptions ?? []).map((amount, index, all) => (
+                <button key={amount} className={`btn ${index === all.length - 1 ? 'btn-accent' : 'btn-ghost'} btn-lg justify-between`} disabled={busy} onClick={() => void placeWager(amount)}>
+                  <span>{all.length === 3 ? ['Safe', 'Bold', 'Go big'][index] : 'Bet'}</span>
+                  <span>{amount}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {(phase === 'question' || phase === 'reveal') && item && item.options && (
+          <>
+            <section className="card rise p-4 sm:p-5" key={item.id}>
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <span className="chip">{item.slot === 'music' ? 'Music Break' : item.round.name}</span>
+                {item.section && item.slot !== 'music' && <span className="chip chip-accent">{item.section.heading}</span>}
+                {item.wager ? <span className="chip chip-accent">Bet {item.wager}</span> : null}
+                {item.multiplier !== 1 && !item.wager && <span className="chip">x{item.multiplier} points</span>}
+              </div>
+              {item.title && item.slot !== 'fact_fake' && item.slot !== 'music' && (
+                <p className="pixel neon-accent mb-2 text-[10px] sm:text-xs">“{item.title}”</p>
+              )}
+              <h2 className={`!normal-case ${item.slot === 'fact_fake' ? 'text-[22px] sm:text-2xl' : 'text-[19px] sm:text-[22px]'}`} style={{ fontFamily: 'var(--font-sans)', lineHeight: 1.35, letterSpacing: 0 }}>
+                {item.text}
+              </h2>
+              {item.peek && phase === 'question' && (
+                <blockquote className="mt-3 border-l-4 pl-3 text-[15px] text-muted" style={{ borderColor: 'var(--accent)' }}>
+                  <span className="pixel mb-1 block text-[8px]" style={{ color: 'var(--accent)' }}>From the report</span>
+                  {item.peek}
+                </blockquote>
+              )}
+              {item.hint && phase === 'question' && (
+                <p className="mt-3 text-[15px]" style={{ color: 'var(--accent)' }}><span className="pixel text-[8px]">Hint · </span>{item.hint}</p>
+              )}
+            </section>
+
+            {(reveal?.image ?? item.image) && (
+              <PictureView
+                key={`${item.id}:${phase}`}
+                image={(reveal?.image ?? item.image)!}
+                secondsLeft={phase === 'question' && item.timeLimitSec > 0 ? secondsLeft : null}
+                caption={phase === 'question' ? item.text : null}
+              />
+            )}
+
+            {/* The clip keeps playing through the reveal (dipping under the host) and fades out on Next. */}
+            {item.music && (
+              <MusicPlayer key={item.id} src={item.music.previewUrl} active={phase === 'question'} onBroken={() => void musicBroken()} onPlaying={() => setClipStarted(true)} />
+            )}
+
+            {phase === 'question' && item.timeLimitSec > 0 && (
+              <TimerBar
+                // Re-read the clock from the server after a wager or a lifeline (writing a hint stops it).
+                timerKey={`${item.id}:${item.wager ?? ''}:${item.lifelinesUsed.length}`}
+                totalMs={item.timeLimitSec * 1000}
+                remainingMs={item.remainingMs ?? item.timeLimitSec * 1000}
+                running={!busy}
+                hold={item.slot === 'music' && !clipStarted}
+                onExpire={() => void submit(null)}
+                onSecond={setSecondsLeft}
+                quiet={item.slot === 'music'}
+              />
+            )}
+
+            {item.slot === 'fact_fake' ? (
+              <FactFakeButtons picked={picked} correctIndex={reveal ? reveal.correctIndex : null} disabled={busy || phase !== 'question'} onPick={(i) => void submit(i)} />
+            ) : (
+              <AnswerList
+                options={item.options}
+                removed={item.removed}
+                picked={picked}
+                correctIndex={reveal ? reveal.correctIndex : null}
+                disabled={busy || phase !== 'question'}
+                onPick={(i) => void submit(i)}
+              />
+            )}
+
+            {canUseLifelines && (
+              <div className="flex flex-wrap gap-2" aria-label="Lifelines">
+                {LIFELINES.filter((l) => l.kind in state.lifelines).map((lifeline) => {
+                  const left = state.lifelines[lifeline.kind] ?? 0
+                  const used = item.lifelinesUsed.includes(lifeline.kind)
+                  return (
+                    <button key={lifeline.kind} className="btn btn-ghost btn-sm" disabled={busy || left <= 0 || used} onClick={() => void useLifeline(lifeline.kind)} title={lifeline.help}>
+                      {lifeline.label} <span className="text-muted">×{left}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+
+            {phase === 'reveal' && reveal && (
+              <section ref={revealRef} className="card rise scroll-mb-28 p-4 sm:p-5" aria-live="polite">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-sm sm:text-base" style={{ color: reveal.correct ? 'var(--good)' : 'var(--bad)' }}>
+                    {reveal.correct ? 'Correct!' : reveal.timedOut ? 'Out of time' : 'Wrong'}
+                  </h3>
+                  <span className="pixel text-xs" style={{ color: reveal.points > 0 ? 'var(--good)' : reveal.points < 0 ? 'var(--bad)' : 'var(--muted)' }}>
+                    {reveal.points > 0 ? '+' : ''}{reveal.points}
+                  </span>
+                </div>
+                {reveal.strikeRestored && <p className="pixel mt-2 text-[10px]" style={{ color: 'var(--good)' }}>Extra life!</p>}
+                {!quick && (
+                  <>
+                    {!reveal.correct && <p className="mt-2">The answer: <b>{reveal.correctAnswer}</b></p>}
+                    {reveal.music && (
+                      <div className="mt-3 flex items-center gap-3">
+                        {reveal.music.artworkUrl && <img src={reveal.music.artworkUrl} alt="" className="h-16 w-16 rounded-sm border-2 border-black" />}
+                        <div className="min-w-0">
+                          <p className="truncate font-bold">{reveal.music.title}</p>
+                          <p className="truncate text-muted">{reveal.music.artist}</p>
+                          {reveal.music.trackUrl && <a className="text-sm underline" href={reveal.music.trackUrl} target="_blank" rel="noreferrer">Listen on Apple Music</a>}
+                        </div>
+                      </div>
+                    )}
+                    {reveal.explanation && <p className="mt-2 text-[16px]">{reveal.explanation}</p>}
+                    {reveal.sourceQuote && (
+                      <blockquote className="mt-3 border-l-4 pl-3 text-[15px] text-muted" style={{ borderColor: 'var(--brand)' }}>
+                        <span className="pixel mb-1 block text-[8px]">From the report{reveal.section ? ` · ${reveal.section.heading}` : ''}</span>
+                        {reveal.sourceQuote}
+                      </blockquote>
+                    )}
+                  </>
+                )}
+              </section>
+            )}
+          </>
+        )}
+
+        <ErrorNote>{error}</ErrorNote>
+      </main>
+
+      {/* Lightning statements and speed runs move on by themselves – unless that failed, when the button is the way out. */}
+      {phase === 'reveal' && reveal && (!quick || Boolean(error)) && (
+        <footer className="sticky bottom-0 z-[45] -mx-1 flex items-center gap-2 px-1 pb-1 pt-2" style={{ background: 'linear-gradient(transparent, var(--page) 38%)' }}>
+          {item?.slot !== 'music' && (
+            <button className="btn btn-ghost btn-sm" disabled={flagged} onClick={() => setFlagging(true)} title="Tell the organiser this question is not right">
+              {flagged ? 'Flagged' : '⚑ Flag'}
+            </button>
+          )}
+          <button className="btn btn-primary btn-lg flex-1" disabled={moving} onClick={advance} autoFocus>
+            {error ? 'Try again ▶' : last ? 'See results ▶' : 'Next ▶'}
+          </button>
+        </footer>
+      )}
+      {stranded && phase !== 'reveal' && (
+        <footer className="sticky bottom-0 z-[45] pb-1 pt-2">
+          <button className="btn btn-primary btn-lg w-full" onClick={() => { setStranded(false); setError(''); void finish() }}>See results ▶</button>
+        </footer>
+      )}
+
+      <Modal open={quitting} onClose={() => setQuitting(false)}>
+        <div className="arcade">
+          <h2 className="neon text-sm">Quit this game?</h2>
+          <p className="mt-3 text-muted">Your answers so far still count towards your readiness.</p>
+          <div className="mt-5 grid grid-cols-2 gap-3">
+            <button className="btn btn-ghost" onClick={() => setQuitting(false)}>Keep playing</button>
+            <button className="btn btn-primary" onClick={() => void quit()}>Quit</button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={flagging} onClose={() => setFlagging(false)}>
+        <div className="arcade">
+          <h2 className="neon text-sm">What is wrong with it?</h2>
+          <p className="mt-3 text-muted">The organiser will take a look. Thanks for keeping the quiz honest.</p>
+          <div className="mt-4 grid gap-2">
+            {FLAG_REASONS.map((reason) => (
+              <button key={reason} className="answer" onClick={() => void flag(reason)}>{reason}</button>
+            ))}
+          </div>
+        </div>
+      </Modal>
+    </div>
+  )
+}

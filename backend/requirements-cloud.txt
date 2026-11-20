@@ -1,0 +1,7 @@
+# Optional object-storage SDKs. Only the one matching STORAGE_BACKEND is imported at runtime.
+#   s3    -> boto3            (AWS S3, and any S3-compatible store such as MinIO or Cloudflare R2)
+#   azure -> azure-storage-blob
+#   gcs   -> google-cloud-storage
+boto3>=1.35
+azure-storage-blob>=12.23
+google-cloud-storage>=2.18
