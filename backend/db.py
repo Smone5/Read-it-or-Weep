@@ -47,7 +47,9 @@ async def init_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
         config.validate()
-        _pool = await asyncpg.create_pool(config.database_url, min_size=1, max_size=12, init=_init_connection)
+        # Each request holds a connection only for the length of a query, so a modest pool serves many players.
+        _pool = await asyncpg.create_pool(config.database_url, min_size=1, max_size=config.db_pool_max,
+                                          init=_init_connection)
     return _pool
 
 

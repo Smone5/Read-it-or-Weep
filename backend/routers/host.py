@@ -5,6 +5,9 @@ can talk about one particular line: whether it started, when it ended, and that 
 wanted. That is what keeps the host from talking over the next question.
 
 Browser → server
+    {"type": "hello", "run": "...", "token": "...", ...}          first message: who is asking, and for which game.
+                                                                  (Sent as a message, never in the address, so that
+                                                                  sign-in tokens do not end up in server logs.)
     {"type": "cue", "id": 7, "cue": "result", "itemId": "..."}   react to something that happened
     {"type": "cancel", "through": 7}                              drop every line up to and including 7,
                                                                   cutting it off if it is being said now
@@ -36,6 +39,19 @@ router = APIRouter()
 
 MAX_TALK_BYTES = 20 * host_service.SAMPLE_RATE * 2         # 20 seconds of speech
 MIN_TALK_BYTES = int(0.35 * host_service.SAMPLE_RATE * 2)  # ignore accidental taps
+HELLO_TIMEOUT_SEC = 8
+
+# Every line costs money, so one game cannot open voice channels (or ask for lines) without end.
+MAX_SOCKETS_PER_GAME = 2          # the game itself, plus one more while it reconnects
+MAX_LINES_PER_GAME = 220          # across all of that game's connections
+_open: dict[str, int] = {}
+_said: dict[str, int] = {}
+
+
+def _count_line(game: str) -> None:
+    _said[game] = _said.get(game, 0) + 1
+    while len(_said) > 5000:                                # forget the oldest games
+        _said.pop(next(iter(_said)))
 
 
 async def _live_direction(session: dict, cue: str) -> str | None:
@@ -79,9 +95,19 @@ async def _live_direction(session: dict, cue: str) -> str | None:
 
 
 @router.websocket("/api/host/ws")
-async def host_socket(websocket: WebSocket, token: str = "", run: str = "", voice: int = 1,
-                      live_code: str = "", key: str = "", host_id: str = "") -> None:
+async def host_socket(websocket: WebSocket) -> None:
     await websocket.accept()
+    try:
+        hello = json.loads(await asyncio.wait_for(websocket.receive_text(), HELLO_TIMEOUT_SEC))
+        if not isinstance(hello, dict) or hello.get("type") != "hello":
+            raise ValueError("no hello")
+    except Exception:  # noqa: BLE001 – anything but a proper hello is refused
+        await websocket.close(code=4401)
+        return
+    token, run = str(hello.get("token") or ""), str(hello.get("run") or "")
+    live_code, key = str(hello.get("liveCode") or ""), str(hello.get("key") or "")
+    host_id, voice = str(hello.get("hostId") or ""), 1 if hello.get("voice", True) else 0
+
     player = run_row = quiz = session = None
     try:
         if live_code:
@@ -98,6 +124,28 @@ async def host_socket(websocket: WebSocket, token: str = "", run: str = "", voic
     except (TokenError, PermissionError, live.LiveError, ValueError):
         await websocket.close(code=4401)
         return
+    except Exception:  # noqa: BLE001 – e.g. an id that is not an id
+        await websocket.close(code=4401)
+        return
+
+    game = f"live:{session['id']}" if session is not None else f"run:{run_row['id']}"
+    if _open.get(game, 0) >= MAX_SOCKETS_PER_GAME:
+        await websocket.close(code=4429)
+        return
+    _open[game] = _open.get(game, 0) + 1
+    try:
+        await _serve(websocket, game=game, quiz=quiz, player=player, run_row=run_row, session=session,
+                     live_code=live_code, host_id=host_id, voice=voice)
+    finally:
+        if _open.get(game, 0) <= 1:
+            _open.pop(game, None)
+        else:
+            _open[game] -= 1
+
+
+async def _serve(websocket: WebSocket, *, game: str, quiz: dict, player: dict | None, run_row: dict | None,
+                 session: dict | None, live_code: str, host_id: str, voice: int) -> None:
+    """One voice channel, from the model's first breath to the socket closing."""
 
     instructions, host = await host_service.persona(quiz, straight=bool(run_row and run_row["mode"] == "straight"),
                                                     host_id=host_id or None, room=session is not None)
@@ -190,7 +238,8 @@ async def host_socket(websocket: WebSocket, token: str = "", run: str = "", voic
                     break
 
                 stream = None
-                if spoken < host_service.MAX_LINES_PER_CONNECTION and not unwanted(number):
+                within_budget = spoken < host_service.MAX_LINES_PER_CONNECTION and _said.get(game, 0) < MAX_LINES_PER_GAME
+                if within_budget and not unwanted(number):
                     if kind == "talk":
                         current = await db.fetchrow("select * from runs where id = $1", run_row["id"])
                         stream = voice_session.reply(await host_service.talk_note(current, player))
@@ -213,6 +262,7 @@ async def host_socket(websocket: WebSocket, token: str = "", run: str = "", voic
                     continue
 
                 spoken += 1
+                _count_line(game)
                 floor.update(speaking=number, cut=False)
                 await websocket.send_json({"type": "line.start", "id": number, "cue": cue})
                 try:

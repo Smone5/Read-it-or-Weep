@@ -102,19 +102,16 @@ export class HostVoice {
     this.ready = false
     this.listener.onStatus?.('connecting')
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
-    const query = new URLSearchParams({ voice: soundOn() ? '1' : '0' })
-    if ('runId' in this.target) {
-      query.set('run', this.target.runId)
-      query.set('token', this.target.token)
-      if (this.target.hostId) query.set('host_id', this.target.hostId)
-    } else {
-      query.set('live_code', this.target.liveCode)
-      query.set('key', this.target.hostKey)
-    }
-    const socket = new WebSocket(`${scheme}://${location.host}/api/host/ws?${query}`)
+    // Who we are goes in the first message, not in the address: addresses are written to server logs.
+    const hello =
+      'runId' in this.target
+        ? { type: 'hello', run: this.target.runId, token: this.target.token, hostId: this.target.hostId ?? undefined, voice: soundOn() }
+        : { type: 'hello', liveCode: this.target.liveCode, key: this.target.hostKey, voice: soundOn() }
+    const socket = new WebSocket(`${scheme}://${location.host}/api/host/ws`)
     socket.binaryType = 'arraybuffer'
     this.socket = socket
     socket.onopen = () => {
+      socket.send(JSON.stringify(hello))
       this.queue.splice(0).forEach((queued) => this.wanted(queued.id) && socket.send(queued.text))
     }
     socket.onmessage = (event) => {
@@ -219,7 +216,11 @@ export class HostVoice {
       this.send({ type: 'talk.cancel' })
       this.listener.onTalk?.('idle', true)
       const denied = (error as Error)?.name === 'NotAllowedError'
-      this.listener.onTalkProblem?.(denied ? 'Allow the microphone for this site to talk to the host.' : 'The microphone is not available on this device.')
+      this.listener.onTalkProblem?.(
+        denied
+          ? 'The microphone is blocked here. Allow it for this site – or, inside another app, open the game in Chrome or Safari.'
+          : 'No microphone could be found on this device.',
+      )
       this.settled()
     }
   }

@@ -143,3 +143,22 @@ def test_taglines_quote_the_quiz_s_own_numbers():
     assert mode_view("sudden_death", RULES)["tagline"].startswith("Three strikes")
     one = {**RULES, "sudden_death": {**RULES["sudden_death"], "strikes": 1}}
     assert mode_view("sudden_death", one)["tagline"].startswith("One strike and")
+
+
+# --- when a question is pulled for review ------------------------------------------------------------------
+
+def test_a_hard_question_is_not_mistaken_for_a_broken_one():
+    from services.stats import worse_than_guessing
+
+    assert not worse_than_guessing(1, 8, 4)            # eight unlucky players prove nothing
+    assert not worse_than_guessing(4, 20, 4)           # 20% right: hard, but no worse than guessing
+    assert not worse_than_guessing(0, 11, 4)           # too few answers to say
+
+
+def test_a_question_players_do_worse_than_guessing_on_is_pulled():
+    from services.stats import worse_than_guessing
+
+    assert worse_than_guessing(0, 14, 4)               # nobody in fourteen: the marked answer is probably wrong
+    assert worse_than_guessing(1, 24, 4)
+    assert worse_than_guessing(2, 12, 2)               # a true/false statement almost everyone gets "wrong"
+    assert not worse_than_guessing(5, 12, 2)

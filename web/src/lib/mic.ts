@@ -19,7 +19,10 @@ export class Mic {
   async start(onChunk: (pcm: ArrayBuffer) => void): Promise<void> {
     const context = audioContext()
     if (context.state === 'suspended') await context.resume()
-    workletReady ??= context.audioWorklet.addModule('/mic-worklet.js')
+    workletReady ??= context.audioWorklet.addModule('/mic-worklet.js').catch((error) => {
+      workletReady = null // a hiccup loading it must not break the microphone for the rest of the visit
+      throw error
+    })
     const [stream] = await Promise.all([
       navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } }),
       workletReady,

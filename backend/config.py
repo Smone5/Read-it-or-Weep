@@ -28,6 +28,7 @@ class Config:
     # --- core ---------------------------------------------------------------
     database_url: str = field(default_factory=lambda: _env("DATABASE_URL"))
     app_secret: str = field(default_factory=lambda: _env("APP_SECRET"))
+    db_pool_max: int = field(default_factory=lambda: int(_env("DB_POOL_MAX", "20")))
     public_base_url: str = field(default_factory=lambda: _env("PUBLIC_BASE_URL", "http://localhost:8100").rstrip("/"))
     web_base_url: str = field(default_factory=lambda: _env("WEB_BASE_URL", "").rstrip("/"))
     cors_origins: list[str] = field(default_factory=lambda: _env_list("CORS_ORIGINS"))
@@ -78,6 +79,8 @@ class Config:
             raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
         if len(self.app_secret) < 32:
             raise RuntimeError("APP_SECRET must be at least 32 characters.")
+        if self.app_secret.lower().startswith("change-me"):
+            raise RuntimeError("APP_SECRET is still the example value. Generate one: openssl rand -base64 48")
 
     @property
     def ai_configured(self) -> bool:

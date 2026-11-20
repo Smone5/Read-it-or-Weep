@@ -21,15 +21,8 @@ def report(tmp_path_factory):
         import make_sample_report
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"sample report generator not available: {exc}")
-    out = tmp_path_factory.mktemp("report") / "sample.docx"
-    builder = getattr(make_sample_report, "build", None) or getattr(make_sample_report, "main", None)
-    if builder is None:
-        pytest.skip("sample report generator has no build() or main()")
-    try:
-        builder(out)
-    except TypeError:
-        pytest.skip("sample report generator takes no output path")
-    return build_structure(parse_docx(out.read_bytes()))
+    path = make_sample_report.build()                      # written under samples/out, which is not kept in git
+    return build_structure(parse_docx(Path(path).read_bytes()))
 
 
 def test_sections_follow_the_report_s_headings(report):

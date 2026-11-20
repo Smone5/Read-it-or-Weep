@@ -21,7 +21,11 @@ _hits: dict[str, deque] = defaultdict(deque)
 
 
 def throttle(request: Request, bucket: str, limit: int, window: int = 60) -> None:
-    key = f"{bucket}:{request.client.host if request.client else 'unknown'}"
+    throttle_key(f"{bucket}:{request.client.host if request.client else 'unknown'}", limit, window)
+
+
+def throttle_key(key: str, limit: int, window: int = 60) -> None:
+    """The same brake for anything that should be counted by something other than the caller's address."""
     now = time.monotonic()
     hits = _hits[key]
     while hits and now - hits[0] > window:
@@ -145,7 +149,7 @@ async def upsert_player(name: str, email: str, team: str | None) -> dict:
 
 @router.post("/quiz/{slug}/join")
 async def join(slug: str, body: JoinRequest, request: Request, x_admin_token: str | None = Header(default=None)) -> dict:
-    throttle(request, "join", 240)
+    throttle(request, "join", 600)      # a whole company can sit behind one address and join in the same minute
     quiz = await find_quiz(slug, x_admin_token)
     email = body.email.strip().lower()
     domains = [d.lower().lstrip("@") for d in quiz["allowed_email_domains"]]
@@ -163,14 +167,14 @@ async def join(slug: str, body: JoinRequest, request: Request, x_admin_token: st
 
 @router.get("/quiz/{slug}/leaderboard")
 async def quiz_leaderboard(slug: str, mode: str | None = None, team: str | None = None,
-                           player: dict | None = Depends(optional_player),
+                           player: dict = Depends(current_player),      # names and scores are for people who joined
                            x_admin_token: str | None = Header(default=None)) -> dict:
     quiz = await find_quiz(slug, x_admin_token)
     rules = await settings_store.quiz_rules(quiz)
     if not rules["leaderboard"]:
         raise HTTPException(403, "The leaderboard is switched off for this quiz.")
     mode = mode if mode in rules["modes"] else rules["default_mode"]
-    return await stats.leaderboard(quiz["id"], mode, team or None, player_id=player["id"] if player else None)
+    return await stats.leaderboard(quiz["id"], mode, team or None, player_id=player["id"])
 
 
 # --------------------------------------------------------------------------- playing
@@ -227,7 +231,7 @@ async def _turn(run: dict, rules: dict, deal: bool = True) -> dict:
 @router.post("/quiz/{slug}/runs")
 async def start_run(slug: str, body: StartRun, request: Request, player: dict = Depends(current_player),
                     x_admin_token: str | None = Header(default=None)) -> dict:
-    throttle(request, "start", 120)
+    throttle(request, "start", 600)
     quiz = await find_quiz(slug, x_admin_token)
     rules = await settings_store.quiz_rules(quiz)
     try:

@@ -33,7 +33,7 @@ log = logging.getLogger("music")
 
 ITUNES_SEARCH = "https://itunes.apple.com/search"
 APPLE_MUSIC_SEARCH = "https://api.music.apple.com/v1/catalog/us/search"
-TARGET_TRACKS = 36
+TARGET_TRACKS = 90        # per decade: enough that music breaks and the results playlist rarely repeat
 MIN_TRACKS_FOR_BANK = 6
 
 DECADE_YEARS = {
@@ -177,16 +177,24 @@ async def _seed_if_needed(decade: str) -> None:
 
 
 async def seed_decade(decade: str, count: int = TARGET_TRACKS) -> int:
-    have = {(t["artist"].lower(), t["title"].lower()) for t in await tracks_for(decade)}
+    """Top a decade's catalogue up to ``count`` tracks, asking only for artists it does not have yet."""
+    existing = await tracks_for(decade)
+    have = {(t["artist"].lower(), t["title"].lower()) for t in existing}
+    wanted = count - len(existing)
+    if wanted <= 0:
+        return 0
     start, end = DECADE_YEARS[decade]
+    artists = sorted({t["artist"] for t in existing})
+    already = (" We already have songs by these artists, so choose other artists: " + "; ".join(artists[:150]) + "."
+               if artists else "")
     hits = await llm.parse(
         model=config.model_writer,
         system=("You are a music historian building a 'name that tune' round for an office trivia game. "
                 "List hugely popular hit songs that nearly everyone who was around would recognise. "
                 "One song per artist. Mix genres. Radio-friendly: no explicit titles or artists known mainly "
                 "for explicit lyrics. Use the original performing artist and the exact song title."),
-        user=f"List {count + 12} such songs first released between {start} and {end}.",
-        schema=HitList, effort="low", max_output_tokens=4000)
+        user=f"List {wanted + 12} such songs first released between {start} and {end}.{already}",
+        schema=HitList, effort="low", max_output_tokens=6000)
     added = 0
     use_apple = _apple_developer_token() is not None
     async with httpx.AsyncClient(timeout=15) as client:
@@ -314,7 +322,7 @@ def _track_view(track: dict) -> dict:
             "artworkUrl": track["artwork_url"], "trackUrl": track["track_url"]}
 
 
-async def after_party(decade: str, heard_ids: list[str] | None = None, count: int = 10, seed: str | None = None) -> list[dict]:
+async def after_party(decade: str, heard_ids: list[str] | None = None, count: int = 40, seed: str | None = None) -> list[dict]:
     """A playlist for the results screen: hits from the game's decade, opening with the ones just played.
 
     One song per artist keeps it varied. With a ``seed`` the order is the same every time it is asked for.

@@ -203,7 +203,26 @@ async def tick(session: dict) -> dict:
     return session
 
 
+_counts: dict[str, tuple[float, int, tuple[int, int]]] = {}
+
+
 async def _answer_counts(session: dict) -> tuple[int, int]:
+    """(answers in, players joined) for the current question.
+
+    Every connected phone asks this twice a second while a question is open, so the answer is
+    shared for a moment rather than counted afresh for each of them.
+    """
+    cached = _counts.get(session["id"])
+    if cached and cached[1] == session["current_index"] and time.monotonic() - cached[0] < 0.3:
+        return cached[2]
+    counts = await _count_answers(session)
+    _counts[session["id"]] = (time.monotonic(), session["current_index"], counts)
+    while len(_counts) > 500:
+        _counts.pop(next(iter(_counts)))
+    return counts
+
+
+async def _count_answers(session: dict) -> tuple[int, int]:
     row = await db.fetchrow(
         "select (select count(*) from live_answers where session_id = $1 and question_index = $2) as answered,"
         " (select count(*) from live_participants where session_id = $1) as joined",
@@ -252,6 +271,7 @@ async def join(session: dict, player: dict) -> dict:
         " returning *", session["id"], player["id"], stats.display_name(player["name"]), player["team"], head_start)
     await db.execute("update live_sessions set version = version + 1 where id = $1", session["id"])
     _recent.pop(session["code"], None)
+    _counts.pop(session["id"], None)
     return participant
 
 
@@ -279,6 +299,7 @@ async def answer(session: dict, player: dict, choice: int) -> dict:
         " values ($1,$2,$3,$4,$5,$6,$7) on conflict (session_id, participant_id, question_index) do nothing returning id",
         session["id"], participant["id"], index, choice, correct, int(elapsed * 1000), points)
     if inserted:
+        _counts.pop(session["id"], None)                    # the shared count is out of date as of now
         await db.execute(
             "update live_participants set score = score + $2, correct_count = correct_count + $3,"
             " streak = case when $4 then streak + 1 else 0 end where id = $1",

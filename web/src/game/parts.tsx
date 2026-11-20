@@ -21,15 +21,64 @@ export type TalkControl = {
   onRelease: () => void
 }
 
-/** The host's dialogue box, with a hold-to-talk button when the player may answer back. */
+const TAP_MS = 400 // a press shorter than this is a tap: the microphone stays open until the next tap
+const LONGEST_TURN_MS = 15000 // ...or until this long has passed
+
+/**
+ * The host's dialogue box, with a microphone button when the player may answer back.
+ *
+ * The button works both ways people expect: tap it, talk, tap again to send – or hold it while
+ * talking and let go. (The first press may bring up the browser's permission question, which is
+ * why a tap must not need to be held.)
+ */
 export function HostBox({ name, line, speaking, talk }: { name: string; line: string; speaking: boolean; talk?: TalkControl | null }) {
+  const pressedAt = useRef(0)
+  const pressing = useRef(false)
+  const limit = useRef<number | undefined>(undefined)
+  const [tapped, setTapped] = useState(false) // listening because of a tap, not a hold
+  const state = talk?.state ?? 'idle'
+
+  // Whatever ends the listening (sent, refused, lost connection) also ends the tap.
+  useEffect(() => {
+    if (state !== 'listening') {
+      setTapped(false)
+      window.clearTimeout(limit.current)
+    }
+  }, [state])
+  useEffect(() => () => window.clearTimeout(limit.current), [])
+
+  const press = () => {
+    if (!talk) return
+    if (state === 'listening' && tapped) {
+      talk.onRelease() // the second tap: send it
+      return
+    }
+    if (state !== 'idle') return
+    pressing.current = true
+    pressedAt.current = performance.now()
+    talk.onPress()
+  }
+  const release = () => {
+    if (!talk || !pressing.current) return
+    pressing.current = false
+    if (performance.now() - pressedAt.current >= TAP_MS) {
+      talk.onRelease() // held and let go
+      return
+    }
+    setTapped(true)
+    window.clearTimeout(limit.current)
+    limit.current = window.setTimeout(() => talk.onRelease(), LONGEST_TURN_MS)
+  }
+
   if (!line && !speaking && !talk) return <div className="h-0" aria-hidden />
-  const listening = talk?.state === 'listening'
-  const thinking = talk?.state === 'thinking'
+  const listening = state === 'listening'
+  const thinking = state === 'thinking'
   let words: React.ReactNode = line || '…'
-  if (listening) words = <span style={{ color: 'var(--accent)' }}>Listening… let go when you are done.</span>
+  if (listening) words = <span style={{ color: 'var(--accent)' }}>{tapped ? 'Listening… tap the mic again to send.' : 'Listening… let go when you are done.'}</span>
   else if (!line && thinking) words = <span className="text-white/60">…</span>
-  else if (!line && !speaking) words = <span className="text-white/55">{talk?.problem ?? `Hold the mic to talk to ${name}.`}</span>
+  else if (!line && !speaking) {
+    words = <span className="text-white/55">{talk?.problem ?? `Tap the mic to talk to ${name}: heckle, ask your score, or have the question read out.`}</span>
+  }
   return (
     <div className="dialogue rise flex items-center gap-3 px-3 pb-2.5 pt-3.5 text-[15px] leading-snug sm:text-base">
       <span className="who">{name}</span>
@@ -47,24 +96,28 @@ export function HostBox({ name, line, speaking, talk }: { name: string; line: st
           className="mic"
           data-on={listening}
           aria-pressed={listening}
-          aria-label={`Hold to talk to ${name}`}
-          title={`Hold to talk to ${name}`}
+          aria-label={listening ? `Send what you said to ${name}` : `Talk to ${name}`}
+          title={`Talk to ${name}`}
           onPointerDown={(event) => {
             event.preventDefault()
-            event.currentTarget.setPointerCapture(event.pointerId)
-            talk.onPress()
+            try {
+              event.currentTarget.setPointerCapture(event.pointerId)
+            } catch {
+              /* nothing to capture */
+            }
+            press()
           }}
-          onPointerUp={talk.onRelease}
-          onPointerCancel={talk.onRelease}
-          onLostPointerCapture={talk.onRelease}
+          onPointerUp={release}
+          onPointerCancel={release}
+          onLostPointerCapture={release}
           onContextMenu={(event) => event.preventDefault()}
           onKeyDown={(event) => {
             if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) {
               event.preventDefault()
-              talk.onPress()
+              press()
             }
           }}
-          onKeyUp={(event) => (event.key === ' ' || event.key === 'Enter') && talk.onRelease()}
+          onKeyUp={(event) => (event.key === ' ' || event.key === 'Enter') && release()}
         >
           <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden fill="currentColor">
             <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 0 0-7 0v5A3.5 3.5 0 0 0 12 15Zm6-3.5a1 1 0 1 0-2 0 4 4 0 0 1-8 0 1 1 0 1 0-2 0 6 6 0 0 0 5 5.900V20H9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2h-2v-2.600a6 6 0 0 0 5-5.900Z" />

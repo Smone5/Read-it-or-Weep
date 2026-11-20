@@ -81,7 +81,7 @@ export type BrandingSettings = {
   support_email: string | null
 }
 
-export type HostCharacter = { id: string; name: string; voice: string }
+export type HostCharacter = { id: string; name: string; voice: string; style?: string }
 
 export type VoiceQuality = 'standard' | 'premium'
 
@@ -111,11 +111,11 @@ export type HostSettingsWrite = {
   player_can_choose: boolean
   voice_quality: VoiceQuality
   pace: HostPace
-  hosts: { name: string; voice: string }[]
+  hosts: { name: string; voice: string; style: string }[]
 }
 
 /** Body of POST /host/sample. With a `voice` the line comes back spoken as well as written. */
-export type HostSampleRequest = { sarcasm: number; name: string; voice: string; quality: VoiceQuality; pace: HostPace }
+export type HostSampleRequest = { sarcasm: number; name: string; voice: string; quality: VoiceQuality; pace: HostPace; style?: string }
 
 /** `audio` is a `data:audio/wav;base64,…` URL, or null when no voice was asked for. */
 export type HostSample = { line: string; style: string; audio: string | null }

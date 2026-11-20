@@ -9,6 +9,7 @@ plus a PostgreSQL database, on any cloud.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -31,6 +32,11 @@ log = logging.getLogger("app")
 async def _bootstrap_admin() -> None:
     """Create the first admin from ADMIN_EMAIL / ADMIN_PASSWORD when no admin exists yet."""
     if await db.fetchval("select 1 from admin_users limit 1"):
+        return
+    password = config.bootstrap_admin_password
+    if config.bootstrap_admin_email and password and (len(password) < 10 or password.lower().startswith("change-me")):
+        log.warning("ADMIN_PASSWORD is too short or still the example value – no admin was created. "
+                    "Set a real one (10+ characters), or run scripts.create_admin.")
         return
     if config.bootstrap_admin_email and config.bootstrap_admin_password:
         await db.execute("insert into admin_users (email, name, password_hash) values ($1, 'Admin', $2)",
@@ -62,7 +68,53 @@ async def lifespan(_: FastAPI):
     await db.close_pool()
 
 
-app = FastAPI(title="Read It or Weep", version="1.0.0", lifespan=lifespan)
+# The interactive API pages are for development; they are off unless API_DOCS=1.
+_docs = os.environ.get("API_DOCS") == "1"
+app = FastAPI(title="Read It or Weep", version="1.0.0", lifespan=lifespan,
+              docs_url="/docs" if _docs else None, redoc_url=None, openapi_url="/openapi.json" if _docs else None)
+
+# What a page from this site may load, and from where. Scripts only from the site itself; pictures
+# and sound also from Apple (album covers and 30-second clips); nothing may put the site in a frame.
+_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob: https://*.mzstatic.com; "
+        "media-src 'self' data: blob: https://*.itunes.apple.com https://*.mzstatic.com; "
+        "font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'")
+_SECURITY_HEADERS = {
+    b"x-content-type-options": b"nosniff",
+    b"referrer-policy": b"strict-origin-when-cross-origin",
+    b"x-frame-options": b"DENY",
+    b"permissions-policy": b"microphone=(self), camera=(), geolocation=()",
+    b"content-security-policy": _CSP.encode(),
+}
+
+
+class SecurityHeaders:
+    """Adds the standard protective headers to every response (plain ASGI, so streams are untouched)."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.inner(scope, receive, send)
+            return
+        secure = scope.get("scheme") == "https"
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                present = {name.lower() for name, _ in headers}
+                headers += [(name, value) for name, value in _SECURITY_HEADERS.items() if name not in present]
+                if secure and b"strict-transport-security" not in present:
+                    headers.append((b"strict-transport-security", b"max-age=31536000"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.inner(scope, receive, send_with_headers)
+
+
+app.add_middleware(SecurityHeaders)
 
 if config.cors_origins:
     app.add_middleware(CORSMiddleware, allow_origins=config.cors_origins, allow_methods=["*"], allow_headers=["*"],

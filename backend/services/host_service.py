@@ -64,7 +64,8 @@ def sarcasm_style(level: int) -> str:
 
 
 def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, room: bool = False,
-                  quiz_title: str | None = None, outline: list[str] | None = None, custom: str | None = None) -> str:
+                  quiz_title: str | None = None, outline: list[str] | None = None, custom: str | None = None,
+                  style: str | None = None) -> str:
     """The host's character, delivery and rules, as instructions for the voice model."""
     if room:
         role = (f"You are {name}, host of \"{game_title}\", a comedy trivia game show. You are running a LIVE game on the "
@@ -84,6 +85,7 @@ def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, roo
         "- Treats a dry business report like prime-time television, and finds that hilarious.\n"
         "- Loves an absurd comparison, a groan-worthy pun, a deadpan aside. Knows this is a quiz about a corporate "
         "document and is not above saying so.",
+        *([f"# How {name} sounds\n{style}"] if style else []),
         f"# How sarcastic (the organiser's setting: {sarcasm} out of 10)\n{sarcasm_style(sarcasm)}",
         "# Delivery\n"
         "- Talk FAST. Announcer pace, tight comedic timing: verdict, tiny beat, punchline. Then stop.\n"
@@ -129,8 +131,14 @@ def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, roo
         sections.append(context)
     sections.append(
         "# When the contestant talks to you\n"
-        "Sometimes the contestant speaks to you out loud. Answer like a host bantering with a contestant: quick, in "
-        "character, under 20 words.\n"
+        "Sometimes the contestant speaks to you out loud. Answer like a host bantering with a contestant: quick and in "
+        "character. What you are happy to do when asked:\n"
+        "- Read the question on their screen out loud, and its options too if they ask (word for word, in order, in an "
+        "even voice that favours none of them).\n"
+        "- Tell them their score, their streak, and how much of the game is left.\n"
+        "- Explain how something works: a lifeline, the wager, a round.\n"
+        "- Trade jokes, take a heckle, give a pep talk.\n"
+        "What you never do:\n"
         "- You are never told the answer to a question before it is answered. If they ask for the answer, a clue, or "
         "which option to pick, refuse with a joke and point them to the Hint or 50/50 lifeline buttons.\n"
         "- Never guess, confirm or rule out an option, even if you think you know.\n"
@@ -148,7 +156,7 @@ async def persona(quiz: dict | None, *, straight: bool = False, host_id: str | N
     character = settings["hosts"][0]
     if host_id and settings["player_can_choose"]:
         character = next((c for c in settings["hosts"] if c["id"] == host_id), character)
-    host = {**settings, "name": character["name"], "voice": character["voice"]}
+    host = {**settings, "name": character["name"], "voice": character["voice"], "style": character.get("style") or ""}
     outline: list[str] = []
     if quiz:
         rows = await db.fetch(
@@ -158,7 +166,8 @@ async def persona(quiz: dict | None, *, straight: bool = False, host_id: str | N
     instructions = build_persona(
         name=host["name"], game_title=branding["game_title"], company=branding["company_name"],
         sarcasm=1 if straight else int(host["sarcasm"]), room=room,
-        quiz_title=quiz["title"] if quiz else None, outline=outline, custom=host["custom_instructions"] or None)
+        quiz_title=quiz["title"] if quiz else None, outline=outline, custom=host["custom_instructions"] or None,
+        style=None if straight else (host["style"] or None))
     return instructions, host
 
 
@@ -458,8 +467,8 @@ _SAMPLE_SCENE = ("Question: \"What was quarterly revenue?\" Correct answer: \"18
                  "wrong answer, then the right answer.")
 
 
-def _sample_persona(sarcasm: int, name: str) -> str:
-    return build_persona(name=name, game_title="the quiz", company="the company", sarcasm=sarcasm)
+def _sample_persona(sarcasm: int, name: str, style: str | None = None) -> str:
+    return build_persona(name=name, game_title="the quiz", company="the company", sarcasm=sarcasm, style=style or None)
 
 
 async def sample_line(sarcasm: int, name: str) -> str:
@@ -469,11 +478,11 @@ async def sample_line(sarcasm: int, name: str) -> str:
 
 
 async def sample_audio(sarcasm: int, name: str, voice: str, *, quality: str = "standard",
-                       pace: str = "snappy") -> tuple[str, bytes]:
+                       pace: str = "snappy", style: str | None = None) -> tuple[str, bytes]:
     """The same sample, spoken: returns (the words, a WAV file) so an admin can hear a voice."""
     words, pcm = "", bytearray()
     model = voice_model({"voice_quality": quality})
-    async with HostVoice(_sample_persona(sarcasm, name), voice, speak=True, model=model, pace=pace) as session:
+    async with HostVoice(_sample_persona(sarcasm, name, style), voice, speak=True, model=model, pace=pace) as session:
         async for kind, data in session.say(_SAMPLE_SCENE):
             if kind == "audio":
                 pcm.extend(data)  # type: ignore[arg-type]
@@ -492,19 +501,33 @@ async def talk_note(run: dict, player: dict | None) -> str:
     """Stage note that goes with something the contestant said: the game state, minus any answer."""
     name = _first_name(player["name"]) if player else "the contestant"
     item = await db.fetchrow("select * from run_items where run_id = $1 order by position desc limit 1", run["id"])
+    facts = [f"score {run['score']}", f"{run['questions_answered']} answered ({run['correct_answers']} right)"]
+    if run["streak"] >= 2:
+        facts.append(f"{run['streak']} right in a row")
+    if run["mode"] in ("show", "straight") and run["plan"]:
+        facts.append(f"{len(run['plan'])} still to come")
+    if run["mode"] == "sudden_death":
+        facts.append(f"{run['strikes']} strikes so far")
+    lifelines = ", ".join(f"{kind} x{left}" for kind, left in (run["lifelines"] or {}).items() if left)
+    if lifelines:
+        facts.append(f"lifelines left: {lifelines}")
     parts = [f"(Stage note, not spoken aloud: {name} just spoke to you; their words are in the audio that follows. "
-             f"Their score is {run['score']}."]
-    if item is not None and item["answered_at"] is None and item["payload"].get("text") and not (
-            (item["slot"] == "final" and item["wager"] is None) or item["payload"].get("sealed")):
-        options = "; ".join(f"{chr(65 + i)}) {text}" for i, text in enumerate(item["payload"]["options"]))
-        parts.append(f"On their screen right now: \"{item['payload']['text']}\" Options: {options}. You have NOT been told "
-                     "which is correct. Do not guess, confirm, rule out or hint at any option.")
+             f"Game so far: {'; '.join(facts)}."]
+    on_screen = (item is not None and item["answered_at"] is None and item["payload"].get("text")
+                 and not (item["slot"] == "final" and item["wager"] is None) and not item["payload"].get("sealed"))
+    if on_screen:
+        options = "; ".join(f"{chr(65 + i)}) {text}" for i, text in enumerate(item["payload"]["options"])
+                            if i not in item["payload"].get("removed", []))
+        parts.append(f"On their screen right now: \"{item['payload']['text']}\" Options: {options}. You may read the "
+                     "question and these options out loud if asked, exactly as written. You have NOT been told which is "
+                     "correct: do not guess, confirm, rule out or hint at any option.")
         if item["slot"] == "music":
             parts.append("It is a music clip: do not name the song or the artist.")
     elif item is not None and item["answered_at"] is not None:
         parts.append("They have just answered a question and are looking at the result.")
     else:
         parts.append("No question is on screen at the moment.")
-    parts.append("Reply to what they said, in character, in under 20 words. This is conversation, not an answer "
-                 "verdict: do not open with \"Correct\", \"Nope\", \"Time\" or any other verdict call.)")
+    parts.append("Reply to what they said, in character. Keep it under 20 words unless you are reading the question or "
+                 "its options out, which may take as long as they take. This is conversation, not an answer verdict: do "
+                 "not open with \"Correct\", \"Nope\", \"Time\" or any other verdict call.)")
     return " ".join(parts)

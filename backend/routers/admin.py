@@ -17,7 +17,7 @@ from config import config
 from dependencies import current_admin
 from ingest import MIME_TYPES, extension_of, supported_extensions
 from ingest import pipeline
-from routers.play import throttle
+from routers.play import throttle, throttle_key
 from security import hash_password, issue_admin_token, verify_password
 from services import bank, host_service, live, music_service, settings_store, stats
 from services.settings_store import ALL_DECADES, DEFAULTS, MODES, VOICES
@@ -39,6 +39,7 @@ class Login(BaseModel):
 @router.post("/login")
 async def login(body: Login, request: Request) -> dict:
     throttle(request, "admin-login", 12)
+    throttle_key(f"admin-login:{body.email.lower()}", 10, window=900)   # ten tries per account per quarter hour
     admin = await db.fetchrow("select * from admin_users where lower(email) = lower($1)", body.email)
     if admin is None or not verify_password(admin["password_hash"], body.password):
         raise HTTPException(401, "That email and password do not match an admin account.")
@@ -142,6 +143,7 @@ class HostSample(BaseModel):
     voice: str | None = None        # give a voice to get the sample spoken as well as written
     quality: Literal["standard", "premium"] = "standard"
     pace: Literal["relaxed", "snappy", "rapid"] = "snappy"
+    style: str | None = Field(default=None, max_length=300)   # how this character comes across
 
 
 @router.post("/host/sample")
@@ -154,7 +156,7 @@ async def host_sample(body: HostSample, request: Request, admin: dict = Depends(
             if body.voice not in VOICES:
                 raise HTTPException(422, "Unknown voice.")
             line, wav = await host_service.sample_audio(body.sarcasm, body.name, body.voice,
-                                                        quality=body.quality, pace=body.pace)
+                                                        quality=body.quality, pace=body.pace, style=body.style)
             return {"line": line, "style": style,
                     "audio": "data:audio/wav;base64," + base64.b64encode(wav).decode()}
         return {"line": await host_service.sample_line(body.sarcasm, body.name), "style": style, "audio": None}

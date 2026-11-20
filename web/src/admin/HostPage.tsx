@@ -88,7 +88,7 @@ const PACES: { value: HostPace; label: string }[] = [
 // ---- the form's working copy -------------------------------------------------------------
 
 /** `key` only tells the rows apart on screen; the server gives each character its real id on saving. */
-type Character = { key: number; name: string; voice: string }
+type Character = { key: number; name: string; voice: string; style: string }
 
 type Draft = Omit<HostSettingsWrite, 'hosts'> & { hosts: Character[] }
 
@@ -96,7 +96,9 @@ let nextKey = 1
 
 function draftOf(value: HostSettings, fallbackVoice: string): Draft {
   // An install saved before characters existed has only the single `name` and `voice`.
-  const hosts = value.hosts?.length ? value.hosts : [{ name: value.name || 'Max', voice: value.voice || fallbackVoice }]
+  const hosts: { name: string; voice: string; style?: string }[] = value.hosts?.length
+    ? value.hosts
+    : [{ name: value.name || 'Max', voice: value.voice || fallbackVoice }]
   return {
     sarcasm: value.sarcasm,
     voice_enabled: value.voice_enabled,
@@ -105,7 +107,7 @@ function draftOf(value: HostSettings, fallbackVoice: string): Draft {
     player_can_choose: value.player_can_choose ?? true,
     voice_quality: value.voice_quality ?? 'standard',
     pace: value.pace ?? 'snappy',
-    hosts: hosts.slice(0, MAX_CHARACTERS).map((host) => ({ key: nextKey++, name: host.name, voice: host.voice })),
+    hosts: hosts.slice(0, MAX_CHARACTERS).map((host) => ({ key: nextKey++, name: host.name, voice: host.voice, style: host.style ?? '' })),
   }
 }
 
@@ -118,7 +120,7 @@ const bodyOf = (draft: Draft): HostSettingsWrite => ({
   player_can_choose: draft.player_can_choose,
   voice_quality: draft.voice_quality,
   pace: draft.pace,
-  hosts: draft.hosts.map((host) => ({ name: host.name.trim(), voice: host.voice })),
+  hosts: draft.hosts.map((host) => ({ name: host.name.trim(), voice: host.voice, style: host.style.trim() })),
 })
 
 function problemWith(draft: Draft): string | null {
@@ -239,6 +241,7 @@ function HostForm({
       voice: character.voice,
       quality: draft.voice_quality,
       pace: draft.pace,
+      style: character.style.trim() || undefined,
     }
     setSamples((current) => {
       const next: Record<number, Sample> = {}
@@ -291,7 +294,7 @@ function HostForm({
     change(patch)
   }
 
-  const changeCharacter = (key: number, patch: Partial<Pick<Character, 'name' | 'voice'>>) => {
+  const changeCharacter = (key: number, patch: Partial<Pick<Character, 'name' | 'voice' | 'style'>>) => {
     cancelSample()
     forgetSample(key)
     change({ hosts: draft.hosts.map((host) => (host.key === key ? { ...host, ...patch } : host)) })
@@ -300,7 +303,7 @@ function HostForm({
   const addCharacter = () => {
     const used = new Set(draft.hosts.map((host) => host.voice))
     const voice = voiceOptions.find((option) => !used.has(option)) ?? fallbackVoice
-    change({ hosts: [...draft.hosts, { key: nextKey++, name: '', voice }] })
+    change({ hosts: [...draft.hosts, { key: nextKey++, name: '', voice, style: '' }] })
   }
 
   const removeCharacter = (key: number) => {
@@ -384,6 +387,25 @@ function HostForm({
                           </option>
                         ))}
                       </select>
+                    )}
+                  </Field>
+                </div>
+
+                <div className="mt-3">
+                  <Field
+                    label="How they come across (optional)"
+                    hint="A line of direction for this character's delivery. Leave it empty for the standard wisecracking announcer."
+                  >
+                    {(props) => (
+                      <input
+                        className="field"
+                        {...props}
+                        value={character.style}
+                        onChange={(event) => changeCharacter(character.key, { style: event.target.value })}
+                        maxLength={300}
+                        autoComplete="off"
+                        placeholder="For example: bright, bubbly and quick, a laugh never far away"
+                      />
                     )}
                   </Field>
                 </div>

@@ -61,10 +61,13 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "sarcasm": 6,                     # 0 (warm) .. 10 (full roast)
         "voice_enabled": True,
         "custom_instructions": "",
-        # One to three host characters. Players may pick between them in the lobby.
+        # One to three host characters. Players may pick between them in the lobby. "style" is an
+        # optional line of direction for how that character comes across.
         "hosts": [
-            {"id": "max", "name": "Max", "voice": "cedar"},    # lower voice
-            {"id": "roxy", "name": "Roxy", "voice": "marin"},  # brighter voice
+            {"id": "max", "name": "Max", "voice": "cedar", "style": ""},    # lower voice
+            # Measured on identical lines, "coral" sits about a quarter higher than "marin" and has the cleanest
+            # tone of any voice - brighter and more television than the calmer "marin" it replaced.
+            {"id": "roxy", "name": "Roxy", "voice": "coral", "style": "A prime-time game-show host at full sparkle: bright, bubbly and quick, a laugh never far away. Swoop up on the verdict call, punch the punchline, land the answer with a wink. Never level, never soothing, never a narrator."},
         ],
         "player_can_choose": True,
         "voice_quality": "standard",      # standard (cheaper) | premium (sharper jokes, about 3x the cost)
@@ -200,7 +203,7 @@ def _clean_host(value: dict) -> dict:
             host_id, n = f"{base}-{n}", n + 1
         taken.add(host_id)
         voice = raw.get("voice") if raw.get("voice") in VOICES else DEFAULTS["host"]["hosts"][0]["voice"]
-        hosts.append({"id": host_id, "name": name, "voice": voice})
+        hosts.append({"id": host_id, "name": name, "voice": voice, "style": str(raw.get("style") or "").strip()[:300]})
     value["hosts"] = hosts or copy.deepcopy(DEFAULTS["host"]["hosts"][:1])
     value["name"], value["voice"] = value["hosts"][0]["name"], value["hosts"][0]["voice"]
     value["player_can_choose"] = bool(value.get("player_can_choose", True))

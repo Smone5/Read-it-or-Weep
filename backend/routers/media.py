@@ -6,6 +6,7 @@ the sharp picture early by inspecting the page.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 from collections import OrderedDict
 
@@ -38,10 +39,11 @@ async def report_image(image_id: str, v: str = "sharp", exp: int = 0, sig: str =
     row = await db.fetchrow("select storage_key, mime_type from doc_images where id = $1", image_id)
     if row is None:
         raise HTTPException(404, "Picture not found.")
-    headers = {"Cache-Control": "private, max-age=3600"}
+    headers = {"Cache-Control": "private, max-age=3600", "Content-Security-Policy": "default-src 'none'"}
     if v == "blur":
         if image_id not in _blur_cache:
-            _blur_cache[image_id] = _blurred(await storage().get(row["storage_key"]))
+            # Image work is slow enough to hold everyone else up, so it runs on a worker thread.
+            _blur_cache[image_id] = await asyncio.to_thread(_blurred, await storage().get(row["storage_key"]))
             while len(_blur_cache) > 200:
                 _blur_cache.popitem(last=False)
         return Response(_blur_cache[image_id], media_type="image/jpeg", headers=headers)

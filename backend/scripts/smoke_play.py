@@ -344,6 +344,11 @@ async def main() -> None:
             phone = (await client.get(f"/api/live/{code}/state", headers=players["Dana Reyes"])).json()
             check("afterParty" not in phone, "phones are not sent the finale playlist")
 
+            # Leave the database as it was found: the throw-away players and what they played are removed.
+            from scripts.reset_play_data import clear
+            removed = await clear(test_only=True, apply=True)
+            print("== tidy up ==\n       removed " + ", ".join(f"{n} {what}" for what, n in removed.items()))
+
     print("\n" + ("ALL CHECKS PASSED" if not FAILS else f"{len(FAILS)} FAILED:\n  - " + "\n  - ".join(FAILS)))
     sys.exit(1 if FAILS else 0)
 

@@ -80,7 +80,12 @@ question bank, and roughly five cents per game for the host's voice.
 This builds the app, runs it on this computer and opens a secure public link to it with
 [ngrok](https://ngrok.com) (free). Anyone with the link can play from their own phone,
 microphone included. The computer has to stay on while they play. Before inviting people,
-give the quiz an access code (admin ▸ quiz ▸ Overview) so only your testers can start games.
+give the quiz an access code (admin ▸ quiz ▸ Overview) so only your testers can start games,
+and clear out your own practice games so their results start clean:
+
+```bash
+cd backend && .venv/bin/python -m scripts.reset_play_data --all        # shows what would go; add --yes to do it
+```
 
 On your own Wi-Fi you can also start the server with `--host 0.0.0.0` and open
 `http://<this-computer's-address>:8100` from a phone, but phones only allow the microphone over
@@ -116,12 +121,38 @@ Most container services give you a secure address of their own (`*.run.app`,
 Everything else is in [`backend/.env.example`](backend/.env.example). Uploaded files are kept
 on local disk by default; use a bucket (`STORAGE_BACKEND`) when running more than one copy.
 
+## How many people can play at once
+
+Measured on one laptop, one server process, with `scripts/load_test.py`:
+
+| Test | Result |
+| --- | --- |
+| 50 people each playing a whole game at the same moment, about 15× faster than a person can | every game finished; a typical request took 10 ms, the slowest 69 ms |
+| 200 people doing the same | every game finished with no errors, but the single process was saturated (about 250 requests a second; typical request a quarter of a second) |
+| One live game with 150 phones | answers took 10 ms; everyone joined within about a second |
+
+A real player makes a request every several seconds, not several a second, so one process has
+room for roughly a thousand people playing at once. Past that, run more copies – more
+containers behind a load balancer, or `WEB_CONCURRENCY=4` inside one – since everything a game
+needs to remember is in the database. The talking host is the exception: each player with the
+voice on holds one realtime session with the AI provider, so the ceiling there is your account's
+rate limit, not this server.
+
+Security in brief: admin pages need an admin sign-in (passwords stored with Argon2, sign-in
+attempts limited); every game request is checked against the player who owns the game; answers
+never leave the server before a question is answered; pictures are reached through short-lived
+signed links; sign-in tokens are never put in addresses; responses carry a content security
+policy; and each game is capped in how much AI voice it can use. Players join with a name and
+an email and no password, by design – use a quiz access code or an allowed email domain to
+keep a quiz to the people it is meant for.
+
 ## Tests
 
 ```bash
 cd backend
 .venv/bin/python -m pytest                    # rules, scoring, question choice, safety nets (no database needed)
 .venv/bin/python -m scripts.smoke_play        # plays whole games through the API against the real database
+.venv/bin/python -m scripts.load_test --players 100   # many people at once, against a running server
 cd ../web && npm run build                    # type-check and production build
 ```
 

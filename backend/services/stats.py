@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import random
 from typing import Any
 
@@ -197,14 +198,31 @@ async def insights(quiz_id: str) -> dict:
     return {"sections": sections, "hardestQuestions": hardest, "weakestSections": weakest}
 
 
+def worse_than_guessing(correct: int, served: int, choices: int) -> bool:
+    """True when we can be confident (95%) that players do worse on a question than blind guessing would.
+
+    That is the mark of a wrong answer key: people who know the material pick the truly right
+    answer and are told it is wrong. A hard question is not the same thing – plenty of honest
+    questions are answered correctly only a third of the time – so a few bad results are not enough.
+    """
+    if served < 12:
+        return False
+    z = 1.96
+    rate = correct / served
+    centre = rate + z * z / (2 * served)
+    margin = z * math.sqrt(rate * (1 - rate) / served + z * z / (4 * served * served))
+    upper = (centre + margin) / (1 + z * z / served)          # top of the Wilson interval for the true rate
+    return upper < 0.9 / max(2, choices)
+
+
 async def note_question_health(question_id: str) -> None:
-    """Pull a question for review when players flag it twice, or when almost nobody gets it right."""
+    """Pull a question for review when players flag it twice, or when they do worse on it than guessing."""
     question = await db.fetchrow(
-        "select quiz_id, status, flag_count, times_served, times_correct from questions where id = $1", question_id)
+        "select quiz_id, kind, status, flag_count, times_served, times_correct from questions where id = $1", question_id)
     if question is None or question["status"] != "approved":
         return
     flagged = question["flag_count"] >= 2
-    brutal = question["times_served"] >= 8 and question["times_correct"] / question["times_served"] < 0.15
+    brutal = worse_than_guessing(question["times_correct"], question["times_served"], 4 if question["kind"] == "mcq" else 2)
     if flagged or brutal:
         reason = "flagged by players" if flagged else "almost nobody answers it correctly"
         await db.execute(
