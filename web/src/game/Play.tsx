@@ -27,7 +27,7 @@ import { MusicToggle } from '../components/NowPlaying'
 import { ErrorNote, Modal, SoundToggle } from '../components/ui'
 import { api, ApiError, onConnectionTrouble } from '../lib/api'
 import type { HostVoice } from '../lib/hostVoice'
-import { onJukeboxChange, setJukeboxLevel } from '../lib/jukebox'
+import { musicOn, onJukeboxChange, setJukeboxLevel, type JukeboxState } from '../lib/jukebox'
 import { fadeOutMusic, preloadClip, stopMusic } from '../lib/music'
 import { blip, buzz, play } from '../lib/sound'
 import { trace } from '../lib/trace'
@@ -66,7 +66,9 @@ const MAX_OPENING_MS = 45000
 const OPENING_MUSIC_MS = 7000
 const OPENING_THEME_MS = 7000
 const OPENING_LATEST_MS = 9500
-const NO_MUSIC_AFTER_MS = 2500 // no song by now (music off, or it will not load): he need not wait for one
+// No song by now and none on its way (music off, or no soundtrack for this game): he need not wait for one. A song
+// that is only late - the browser's audio still waking - is still waited for, up to OPENING_LATEST_MS.
+const NO_MUSIC_AFTER_MS = 2500
 const NO_HOST_OPENING_MS = 4000 // with no host to open the show, the theme still gets a few seconds
 // A round's title card: the music drops as the player taps Next, the sting plays in that moment of quiet, then the
 // music comes in under the title. ("A TV title card goes quiet, sting, theme, then the host over it.")
@@ -346,6 +348,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         opening ? MAX_OPENING_MS : MAX_INTRO_MS,
         opening && !welcomeRef.current ? NO_HOST_OPENING_MS : MIN_CARD_MS,
       )
+      if (opening) stopOpeningWatch.current() // the opening is over: its moment no longer depends on the music
       if (!aliveRef.current || doneRef.current) return
       if (next.slot === 'music') {
         // The soundtrack stops dead on his last word ("Roll it!"), and the mystery song starts out of the silence.
@@ -431,10 +434,14 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
               stopOpeningWatch.current()
               host.holdUntil(at)
             }
+            let jukeboxNow: JukeboxState | null = null
             const unsubscribe = onJukeboxChange((jukebox) => {
+              jukeboxNow = jukebox
               if (jukebox.playing) anchor(Math.min(tapped + OPENING_LATEST_MS, Math.max(tapped + OPENING_MUSIC_MS, Date.now() + OPENING_THEME_MS)))
             })
-            const noMusic = window.setTimeout(() => anchor(0), NO_MUSIC_AFTER_MS)
+            const noMusic = window.setTimeout(() => {
+              if (!(jukeboxNow?.active && musicOn())) anchor(0)
+            }, NO_MUSIC_AFTER_MS)
             stopOpeningWatch.current = () => {
               unsubscribe()
               window.clearTimeout(noMusic)

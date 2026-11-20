@@ -73,9 +73,11 @@ const UNDER_HOST = 0.26 // (0.17 left his voice 10 dB above the music; the organ
 // clearly up with his voice about 8 dB above it; at 0.28 his voice was only 6 dB above it - too close for the opening,
 // where he is explaining the rules over songs with singers in them.
 const UNDER_HOST_BIG = 0.26
-// Under the show's opening the music goes further down, and glides there (see ride): the theme hands over to the
-// host. ("Need the music to fade out and the host to fade in more in the intro.")
-const UNDER_HOST_INTRO = 0.14
+// Under the show's opening the music glides down (see ride) as the host fades in: the theme hands over to him. ("Need
+// the music to fade out and the host to fade in more in the intro.") It settles where it sits under him for the rest
+// of the game: at 0.14 with the carve it was 16 dB under his voice and, on a laptop's speakers, simply gone for the
+// twenty-odd seconds of the opening ("music doesn't play when the game starts", 2026-11-20).
+const UNDER_HOST_INTRO = 0.26
 // Turning the music up with ♫ raises it under the host too, but only a little (about 2 dB), so he stays clear.
 const UNDER_HOST_PLAYER_MAX = 1.26
 // The carve: while his voice sounds, the music loses some of the band where speech is understood (consonants,
@@ -117,6 +119,7 @@ let carved = false
 let voiceWas = false
 let voiceEndedAt = -Infinity
 let releaseTimer = 0
+let wakeWatched = false
 let riding = 0 // the level the master gain was last sent towards
 let current: Voice | null = null
 let leaving: Voice[] = [] // songs fading out under the one that replaced them
@@ -457,6 +460,7 @@ async function advance(fadeSec: number, notBefore = 0) {
           needsTap = true
           shown = track
           announce()
+          startWhenAwake()
         }
         return
       }
@@ -470,6 +474,27 @@ async function advance(fadeSec: number, notBefore = 0) {
   } finally {
     if (mine === token) busy = false
   }
+}
+
+/**
+ * The browser had not woken its audio yet when the song was ready (it can take a moment, e.g. while headphones
+ * connect). Start the music the moment it wakes, rather than leaving it silent until the game next changes scene.
+ */
+function startWhenAwake() {
+  if (wakeWatched) return
+  wakeWatched = true
+  const context = audioContext()
+  const onChange = () => {
+    if (context.state !== 'running') return
+    context.removeEventListener('statechange', onChange)
+    wakeWatched = false
+    trace('jukebox.awake', { waiting: needsTap })
+    if (!needsTap) return
+    needsTap = false
+    if (wanted() && !current && !busy) void advance(level === 'intro' || level === 'title' ? INTRO_SEC : SWELL_SEC)
+    else announce()
+  }
+  context.addEventListener('statechange', onChange)
 }
 
 /** Stop everything that is sounding, keeping the place in the list. */

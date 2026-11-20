@@ -108,7 +108,8 @@ export function audioMode(mode: 'playback' | 'talk') {
 export function unlockAudio() {
   audioMode('playback')
   for (const ctx of [audioContext(), hostAudioContext()]) {
-    if (ctx.state === 'suspended') void ctx.resume().catch(() => undefined)
+    // Not only 'suspended': Safari also has 'interrupted' (another app or tab took the sound), which only a tap undoes.
+    if (ctx.state !== 'running' && ctx.state !== 'closed') void ctx.resume().catch(() => undefined)
   }
   preloadSounds()
   keepAwake()
