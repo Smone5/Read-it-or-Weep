@@ -528,3 +528,15 @@ def test_the_persona_makes_the_last_word_the_button():
     persona = host_service.build_persona(name="Max", game_title="Read It or Weep", company="Acme", sarcasm=6, tags=True)
     assert "your LAST word is the button" in persona and "INSIDE the verdict" in persona
     assert "10 words when they are right, 14 when they are wrong or out of time, 16 for a song" in persona
+
+
+def test_the_host_stays_safe_for_work():
+    # "Me and the report are meeting again... someone should book a room" - wrong for a work quiz (2026-11-20).
+    for tags in (True, False):
+        persona = host_service.build_persona(name="Max", game_title="Read It or Weep", company="Acme", sarcasm=8, tags=tags)
+        assert "no romance, dating, flirting or innuendo" in persona and "get a room" in persona
+        assert "Never assume anyone's gender from a name" in persona
+    angles = host_service._opening_angles({"decade": "80s"}, {"team": "Sales"},
+                                          {"title": "Q3 Review", "meeting_at": None}, returning=True)
+    assert any("sports-style" in angle for angle in angles)
+    assert not any(word in angle for angle in angles for word in ("meet again", "date", "relationship", "romance"))

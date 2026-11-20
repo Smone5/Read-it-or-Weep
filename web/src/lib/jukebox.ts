@@ -63,23 +63,26 @@ const PARTY = 0.45 // a bed to read your results by, not a performance
 // voice was about 20 dB above the music; at 0.14, 13 dB; 0.17 leaves about 10 dB - plainly there, still clear. The
 // songs have singers in them, which compete with speech far more than an instrumental would: keep 10 dB.
 // Since 2026-11-20 the music is also *carved* under him rather than only turned down (see CARVE below), which leaves
-// room for it to sit higher. Measured over a whole game at 0.30 with the carve: his voice a median 8.6 dB above the
-// music, 11 dB in the 1-4 kHz band where speech is understood - just short of the 12 dB a broadcast mixer asks for,
-// so it sits at 0.26: still fuller than the 0.22 before the carve, and clearer.
-const UNDER_HOST = 0.26 // (0.17 left his voice 10 dB above the music; the organiser wanted the music up a little more)
+// room for it to sit higher. Measured at 0.26 with the carve: his voice a median 9 dB above the music, 12 dB in the
+// 1-4 kHz band where speech is understood. The organiser still found it "too quiet at times" (2026-11-20) - on a
+// laptop's speakers the carve takes away much of what is heard of a song - so it sits at 0.34: about 2.3 dB louder,
+// with his voice still about 10 dB clear where speech is understood.
+const UNDER_HOST = 0.34 // (0.17 left his voice 10 dB above the music; the organiser wanted the music up a little more)
 // The big moments keep the music up under the host, so the show's opening and a round's title card sound like a
 // broadcast. (The organiser: "music needs to be louder when the game starts and the host is speaking, but then get
 // quieter for the question.") Measured in a game: at 0.12 it sat only 1.5 dB above the question level; at 0.22 it is
 // clearly up with his voice about 8 dB above it; at 0.28 his voice was only 6 dB above it - too close for the opening,
 // where he is explaining the rules over songs with singers in them.
-const UNDER_HOST_BIG = 0.26
+const UNDER_HOST_BIG = 0.34
 // Under the show's opening the music glides down (see ride) as the host fades in: the theme hands over to him. ("Need
 // the music to fade out and the host to fade in more in the intro.") It settles where it sits under him for the rest
 // of the game: at 0.14 with the carve it was 16 dB under his voice and, on a laptop's speakers, simply gone for the
 // twenty-odd seconds of the opening ("music doesn't play when the game starts", 2026-11-20).
-const UNDER_HOST_INTRO = 0.26
-// Turning the music up with ♫ raises it under the host too, but only a little (about 2 dB), so he stays clear.
-const UNDER_HOST_PLAYER_MAX = 1.26
+const UNDER_HOST_INTRO = 0.34
+// Turning the music up with ♫ raises it under the host too - as far as ♫ at 75 (7 dB); beyond that only the rest of
+// the game gets louder, so he never disappears under it. (A cap of 2 dB, tried first, meant a player who turned the
+// music up still found it "too quiet at times": while the host talks, which is much of a game.)
+const UNDER_HOST_PLAYER_MAX = 2.25
 // The carve: while his voice sounds, the music loses some of the band where speech is understood (consonants,
 // 1.5-4 kHz - also where a phone speaker is loudest and where the songs' singers sit). That buys more clarity than
 // turning the whole song down would, so the song can stay fuller underneath him.

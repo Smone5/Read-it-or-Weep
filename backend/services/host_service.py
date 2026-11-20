@@ -275,7 +275,11 @@ def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, roo
            "stage directions in parentheses, no asterisks, no emoji. Word limits count spoken words, not tags.\n" if tags
            else "- Spoken words only. Never say a stage direction or a sound effect out loud as words.\n") +
         "- Jokes target the answer, the situation, corporate life or yourself. Never a person's intelligence, job, "
-        "looks or identity. Workplace-safe. No profanity.\n"
+        "looks or identity. No profanity.\n"
+        "- Workplace-safe, as if their manager and HR were in the room: no romance, dating, flirting or innuendo - "
+        "nothing like \"get a room\", and the contestant never has a \"relationship\" with the report or with "
+        "anything else - and nothing about bodies, politics or religion. Never assume anyone's gender from a name: no "
+        "\"he\", \"she\", \"man\", \"lady\" or \"guy\" for the contestant - use their name or \"you\".\n"
         "- Never reveal or hint at an answer before it has been given, unless you are asked to deliver a hint.\n"
         "- Report facts come only from what you are told. Never invent them.\n"
         "- Do not name real game shows or their hosts, and never say you are an AI.",
@@ -441,9 +445,9 @@ def _when(moment) -> str | None:
     return f"on {moment.strftime('%B')} {moment.day}"
 
 
-async def _opening_angle(run: dict, player: dict | None, quiz: dict, returning: bool) -> str:
-    """One thing to make this opening about, different each game."""
-    import random as _random
+def _opening_angles(run: dict, player: dict | None, quiz: dict, returning: bool) -> list[str]:
+    """What an opening can be about. (A returning player's rematch is a sporting one: framed as the contestant and
+    the report "meeting again", it drew a "someone should book a room" joke - wrong for a work quiz.)"""
     angles = [
         "a fake sponsor from office life (the jammed printer, the 4 pm meeting, reply-all...): one quick line",
         "mock-epic stakes: treat this like a championship final, for a quiz about a business report",
@@ -458,9 +462,16 @@ async def _opening_angle(run: dict, player: dict | None, quiz: dict, returning: 
     if player and player["team"]:
         angles.append(f"the contestant's team, {player['team']}, and its reputation riding on this")
     if returning:
-        angles += ["a rematch: the report and the contestant meet again",
+        angles += ["a rematch, sports-style: the contestant is back for another round against this report, like a title "
+                   "fight or a replay",
                    "the contestant's record so far (see the facts), and whether tonight beats it"]
-    return _random.choice(angles)
+    return angles
+
+
+async def _opening_angle(run: dict, player: dict | None, quiz: dict, returning: bool) -> str:
+    """One thing to make this opening about, different each game."""
+    import random as _random
+    return _random.choice(_opening_angles(run, player, quiz, returning))
 
 
 async def _welcome(run: dict, player: dict | None, name: str) -> str:
@@ -517,7 +528,8 @@ async def _welcome(run: dict, player: dict | None, name: str) -> str:
         "Open the show. This is the big opening, the one moment you take your time - but it must never drag: "
         f"{limit} spoken words AT MOST, in four to six short beats. Count them.",
         "You start over the theme music as it fades down, so your first two or three words are half heard: begin with "
-        "a [building] run-up in your own words (never a name - not the show's, not yours, not theirs), then open the "
+        "a [building] run-up in your own words (never a name - not the show's, not yours, not theirs - and not a word "
+        "about the music), then open the "
         "show by name, like the top of a broadcast. Then, in this order: "
         + ("introduce yourself in a line; " if not returning else "welcome them back - you have met before; ")
         + f"introduce tonight's contestant like a contestant on a show; then {ending}, in plain words, as a host "
