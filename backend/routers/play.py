@@ -380,28 +380,45 @@ async def lifeline(run_id: str, body: LifelineBody, player: dict = Depends(curre
 
 @router.post("/runs/{run_id}/media-error")
 async def media_error(run_id: str, body: ItemBody, player: dict = Depends(current_player)) -> dict:
-    """The browser could not play a music clip. Work out whose fault that is, and carry on either way.
+    """The browser could not play a question's song (a music clip, or the song behind a jargon title). Work out whose
+    fault that is, and carry on either way.
 
-    If the clip really is gone it is retired and the break is dealt again with another one. If the
+    If the clip really is gone it is retired and the question is dealt again with another song. If the
     clip is fine, the trouble is on the player's side (a network that blocks the music host, say):
     nothing is retired, and this game simply continues without music instead of failing every break.
+    Office Jukebox is all music, but its jargon rounds still work as words: they stay, without their
+    songs (and its decade stays, since the questions are about it); only its clip questions go.
     """
     run, _, rules = await _load_run(run_id, player)
     item = await db.fetchrow("select * from run_items where id = $1 and run_id = $2 and answered_at is null",
                              body.itemId, run_id)
-    if item and item["slot"] == "music":
-        attempt = int(item["payload"].get("attempt", 1))
-        clip_gone = await music_service.preview_is_dead(item["payload"]["preview_url"])
-        await db.execute("delete from run_items where id = $1", item["id"])
+    if item and item["slot"] in engine.CLIP_SLOTS:
+        payload = item["payload"]
+        attempt = int(payload.get("attempt", 1))
+        clip_gone = await music_service.preview_is_dead(payload["preview_url"])
         if clip_gone:
             await music_service.retire_track(item["music_track_id"])
         if clip_gone and attempt < 3:
-            slot = {"slot": "music", "round": item["round_no"], "name": item["round_name"],
-                    "limit": item["time_limit_sec"], "attempt": attempt + 1}
+            slot = {"slot": item["slot"], "round": item["round_no"], "name": item["round_name"],
+                    "limit": item["time_limit_sec"], "mult": float(item["points_multiplier"]), "attempt": attempt + 1}
+            if payload.get("asks"):
+                slot["asks"] = payload["asks"]           # "name the artist" stays "name the artist"
+            await db.execute("delete from run_items where id = $1", item["id"])
             await db.execute("update runs set position = position - 1, plan = $2::jsonb || plan where id = $1",
                              run_id, [slot])
+        elif run["mode"] == "jukebox":
+            rest = [{**slot, "no_clip": True} if slot["slot"] in ("jargon", "song_or_jargon") else slot
+                    for slot in run["plan"] if slot["slot"] != "music"]
+            if item["slot"] == "jargon":                 # the title stays on screen, now without its song
+                await db.execute("update run_items set payload = payload || '{\"no_clip\": true}'::jsonb where id = $1",
+                                 item["id"])
+                await db.execute("update runs set plan = $2 where id = $1", run_id, rest)
+            else:
+                await db.execute("delete from run_items where id = $1", item["id"])
+                await db.execute("update runs set position = position - 1, plan = $2 where id = $1", run_id, rest)
         else:
             without_music = [slot for slot in run["plan"] if slot["slot"] != "music"]
+            await db.execute("delete from run_items where id = $1", item["id"])
             await db.execute("update runs set position = position - 1, plan = $2, decade = null where id = $1",
                              run_id, without_music)
         run = await db.fetchrow("select * from runs where id = $1", run_id)

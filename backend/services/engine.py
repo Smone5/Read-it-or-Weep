@@ -40,6 +40,10 @@ BADGES = [(90, "Briefing Boss"), (70, "Well Read"), (40, "Skimmer"), (0, "Judged
 LIFELINE_MULTIPLIER = {"fifty": 0.6, "hint": 0.6, "peek": 0.5}
 REPORT_SLOTS = ("report", "image", "final", "second_chance")
 MUSIC_SLOTS = ("music", "jargon", "song_or_jargon")    # counted as music in a game's score card
+# A song plays while these are on screen: a music question's clip, and the song behind an Office Jukebox jargon title
+# (its clue - and the background music steps aside for it, or the player hears the wrong song; user, 2026-11-20).
+# Not Song or Synergy?, where hearing it would give the answer away: its song plays once it has been answered.
+CLIP_SLOTS = ("music", "jargon")
 
 
 class GameError(Exception):
@@ -231,8 +235,11 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
             built = jukebox.song_or_jargon_item(tracks, avoid, used)
         if built is None:
             return None
+        payload = {**built["payload"], "attempt": int(slot.get("attempt", 1))}
+        if slot.get("no_clip"):
+            payload["no_clip"] = True           # this player's browser cannot play the songs (see the media-error route)
         return {**base, "music_track_id": built["track"]["id"] if built["track"] else None,
-                "correct_index": built["correct_index"], "payload": built["payload"]}
+                "correct_index": built["correct_index"], "payload": payload}
 
     if kind == "second_chance":
         retried = {i["payload"].get("retry_of") for i in items if i["slot"] == "second_chance"}
@@ -306,7 +313,16 @@ async def _items(run_id: str) -> list[dict]:
 
 
 def _grace_ms(item: dict) -> int:
-    return MUSIC_GRACE_MS if item["slot"] == "music" else GRACE_MS
+    return MUSIC_GRACE_MS if item["slot"] in CLIP_SLOTS else GRACE_MS
+
+
+def _clip(item: dict) -> dict | None:
+    """The song the browser plays while this question is on screen (see CLIP_SLOTS), if any. A player whose browser
+    cannot play the songs gets the jargon titles without theirs (`no_clip`, see the media-error route)."""
+    payload = item["payload"]
+    if item["slot"] not in CLIP_SLOTS or not payload.get("preview_url") or payload.get("no_clip"):
+        return None
+    return {"previewUrl": payload["preview_url"], "asks": payload.get("asks", "title" if item["slot"] == "jargon" else "artist")}
 
 
 def _deals_sealed(run: dict, items: list[dict], fields: dict) -> bool:
@@ -404,8 +420,8 @@ async def public_item(item: dict, run: dict) -> dict:
     if payload.get("sealed"):
         # Only what the title card needs. A music clip's address is included so it can load during the introduction.
         view.update({"sealed": True, "title": None, "section": None, "text": None, "options": None})
-        if item["slot"] == "music":
-            view["music"] = {"previewUrl": payload["preview_url"], "asks": payload.get("asks", "artist")}
+        if clip := _clip(item):
+            view["music"] = clip
         return view
     starts_in_ms = int((item["served_at"] - _now()).total_seconds() * 1000)
     if item["slot"] == "final" and starts_in_ms > 0:
@@ -423,8 +439,8 @@ async def public_item(item: dict, run: dict) -> dict:
         description = await db.fetchval("select description from doc_images where id = $1", payload["image_id"])
         variant = "sharp" if payload.get("picture_mode") == "show" or "peek" in item["lifelines_used"] else "blur"
         view["image"] = _image_view(payload["image_id"], variant, description if variant == "sharp" else None)
-    if item["slot"] == "music":
-        view["music"] = {"previewUrl": payload["preview_url"], "asks": payload.get("asks", "artist")}
+    if clip := _clip(item):
+        view["music"] = clip
     return view
 
 
@@ -668,8 +684,9 @@ async def _reveal(item: dict, run: dict, rules: dict) -> dict:
         if track:
             result["music"] = {"artist": track["artist"], "title": track["title"],
                                "artworkUrl": track["artwork_url"], "trackUrl": track["track_url"]}
-            # The side game's song plays once it has been answered: the reward for working it out.
-            if item["slot"] in ("jargon", "song_or_jargon") and payload.get("preview_url"):
+            # Song or Synergy?'s song plays once it has been answered: the reward for working it out. (A jargon title's
+            # song is already playing; pages from before it was, still play it from here.)
+            if item["slot"] in ("jargon", "song_or_jargon") and payload.get("preview_url") and not payload.get("no_clip"):
                 result["music"]["previewUrl"] = payload["preview_url"]
     if payload.get("explain"):
         result["explanation"] = payload["explain"]
@@ -682,7 +699,7 @@ def run_state(run: dict, rules: dict) -> dict:
         "runId": run["id"], "mode": run["mode"], "modeName": MODES[run["mode"]]["name"], "status": run["status"],
         "score": run["score"], "streak": run["streak"], "answered": run["questions_answered"],
         "correct": run["correct_answers"], "decade": run["decade"], "lifelines": run["lifelines"],
-        "remaining": len(run["plan"]) if run["mode"] in ("show", "straight") else None,
+        "remaining": len(run["plan"]) if run["mode"] in ("show", "straight", "jukebox") else None,   # "Question 3/12"
         # Lets the browser show a round's title card *before* asking for its first question,
         # so the card never eats into the player's answering time.
         "nextRound": run["plan"][0]["name"] if run["plan"] else None,

@@ -384,7 +384,7 @@ _ROUND_ANGLE = {
     "The Quiz": "no clock, no tricks",
     # Office Jukebox, the music side game
     "Morning Stand-up": "a few seconds of a hit: name the artist. An easy start to the working day",
-    "Jargon Jukebox": "a song title rewritten as corporate jargon: pick the real title, and the song plays",
+    "Jargon Jukebox": "a song plays while its title, rewritten as corporate jargon, is on screen: pick the real title",
     "Song or Synergy?": "a phrase: is it a hit song, or office jargon?",
     "Closing Bell": "name the song from its clip, for double points: the last two before home time",
 }
@@ -618,8 +618,8 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
         # The song plays the moment he stops, so a music break ends on the throw that starts it.
         throw = ("End on a two- or three-word throw that starts the song (\"Roll it!\", \"Hit it!\"): it plays the "
                  "moment you stop.")
-        if item["slot"] == "music" and run["mode"] == "jukebox":
-            # The side game's clip rounds keep their own names; a clip still starts as he stops.
+        if item["slot"] in ("music", "jargon") and run["mode"] == "jukebox":
+            # The side game's song rounds keep their own names; the song still starts as he stops.
             angle = _ROUND_ANGLE.get(round_name, "name the song")
             ending = f"then, if you like, ONE joke of five words or fewer about it. {throw}"
         elif item["slot"] == "music":
@@ -664,7 +664,7 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
                        else f"guessed \"{_chosen(item)}\", which is WRONG")
             return (f"Jargon Jukebox: the corporate title was \"{jargon}\"; the song is {song}. {name} {verdict}.{warm} "
                     "React: the verdict, one quick joke about the corporate title, and end on the song's title and artist, "
-                    "like a DJ - the song plays the moment you stop. Word limit: 16.")
+                    "like a DJ back-announcing the record - it is playing under you. Word limit: 16.")
         if item["slot"] == "music":
             track = await db.fetchrow("select artist, title from music_tracks where id = $1", item["music_track_id"])
             song = f"\"{track['title']}\" by {track['artist']}" if track else "the track"
@@ -744,7 +744,9 @@ async def round_set(run: dict, item_id: str | None) -> str | None:
     if item is None or await _lightning_tally(run, dict(item)):
         return None
     decade = run["decade"] if item["slot"] == "music" else ""     # a music break's line may mention the decade
-    return f"{run['mode']}|{item['slot']}|{item['round_name']}|{decade}"
+    # Jargon Jukebox's set was started afresh when its song began playing under the titles: its lines end on a throw.
+    edition = "|2" if item["slot"] == "jargon" else ""
+    return f"{run['mode']}|{item['slot']}|{item['round_name']}|{decade}{edition}"
 
 
 async def final_question_line(run: dict, item_id: str | None) -> str | None:

@@ -49,6 +49,8 @@ async def play(client: httpx.AsyncClient, slug: str, headers: dict, mode: str, s
     check(again["item"] is None and not again["finished"], f"{label}: re-opening the game deals nothing either")
     turn = (await client.post(f"/api/runs/{run_id}/next", headers=headers)).json()
     slots, rounds, score_seen, leaked, used = [], [], 0, False, set()
+    songs: list[tuple[str, bool]] = []            # (slot, a song plays while it is on screen)
+    rewards: list[tuple[str, int, bool]] = []     # (slot, right answer, a song plays once it is answered)
     sealed_rounds: list[str] = []
     guard = 0
     while not turn["finished"] and guard < 140:
@@ -94,6 +96,7 @@ async def play(client: httpx.AsyncClient, slug: str, headers: dict, mode: str, s
             check(bool(item["options"]) and item["remainingMs"] == item["timeLimitSec"] * 1000,
                   f"{label}: after the reading the answers appear with the full clock ({item['remainingMs']} ms)")
         slots.append(item["slot"])
+        songs.append((item["slot"], bool(item.get("music"))))
         if not rounds or rounds[-1] != item["round"]["name"]:
             rounds.append(item["round"]["name"])
         right = await correct_index(item["id"])
@@ -122,6 +125,7 @@ async def play(client: httpx.AsyncClient, slug: str, headers: dict, mode: str, s
         assert r.status_code == 200, r.text
         reveal = r.json()
         assert reveal["correct"] == (choice == right), "server marking disagrees with the stored answer"
+        rewards.append((item["slot"], right, bool((reveal.get("music") or {}).get("previewUrl"))))
         if mode == "jukebox":
             assert reveal["points"] >= 0, f"{label}: an Office Jukebox answer cost points ({reveal['points']})"
         score_seen = reveal["state"]["score"]
@@ -136,7 +140,81 @@ async def play(client: httpx.AsyncClient, slug: str, headers: dict, mode: str, s
     check(summary["score"] == score_seen, f"{label}: final score {summary['score']} matches the running score")
     print(f"       {label}: {len(slots)} items, rounds={rounds}, score={summary['score']}, accuracy={summary['accuracy']}%, "
           f"badge={summary['badge']!r}, readiness={summary['readiness']['cleared']}/{summary['readiness']['total']}")
-    return {"summary": summary, "slots": slots, "rounds": rounds, "run_id": run_id, "sealed": sealed_rounds}
+    return {"summary": summary, "slots": slots, "rounds": rounds, "run_id": run_id, "sealed": sealed_rounds,
+            "songs": songs, "rewards": rewards}
+
+
+async def jukebox_song_trouble(client: httpx.AsyncClient, slug: str, headers: dict) -> None:
+    """A jargon title whose song will not play: a dead clip is swapped for another song, and a browser that cannot
+    play songs at all keeps the titles without them (and loses the clip questions), instead of failing each one."""
+    from services import music_service
+
+    real = music_service.preview_is_dead, music_service.retire_track, music_service.tracks_for
+    retired: list[str] = []
+
+    async def dead(url: str) -> bool:
+        return True
+
+    async def fine(url: str) -> bool:
+        return False
+
+    async def retire(track_id: str) -> None:
+        retired.append(track_id)                   # not in the real catalogue: the clip is not really gone...
+
+    async def catalogue(decade: str) -> list[dict]:
+        return [t for t in await real[2](decade) if t["id"] not in retired]     # ...but it is gone from this game
+
+    async def opened(item: dict, run_id: str) -> dict:
+        if not item.get("sealed"):
+            return item
+        return (await client.post(f"/api/runs/{run_id}/open", json={"itemId": item["id"]}, headers=headers)).json()["item"]
+
+    try:
+        r = await client.post(f"/api/quiz/{slug}/runs", json={"mode": "jukebox", "decade": "80s"}, headers=headers)
+        run_id = r.json()["state"]["runId"]
+        turn = (await client.post(f"/api/runs/{run_id}/next", headers=headers)).json()
+        while turn["item"]["slot"] != "jargon":        # through the Morning Stand-up
+            item = await opened(turn["item"], run_id)
+            await client.post(f"/api/runs/{run_id}/answer", json={"itemId": item["id"], "choiceIndex": 0}, headers=headers)
+            turn = (await client.post(f"/api/runs/{run_id}/next", headers=headers)).json()
+        card = turn["item"]
+        check(bool(card.get("sealed")) and card["music"]["previewUrl"].startswith("https://"),
+              "jargon jukebox: its title card brings the first title's song, to load during the card")
+        riddle = await opened(card, run_id)
+        check(bool(riddle["text"]) and riddle["music"]["previewUrl"] == card["music"]["previewUrl"],
+              "a jargon title plays its song while it is on screen")
+
+        music_service.preview_is_dead, music_service.retire_track, music_service.tracks_for = dead, retire, catalogue
+        swapped =(await client.post(f"/api/runs/{run_id}/media-error", json={"itemId": riddle["id"]}, headers=headers)).json()
+        swapped = await opened(swapped["item"], run_id)
+        check(swapped["slot"] == "jargon" and swapped["id"] != riddle["id"] and len(retired) == 1
+              and swapped["music"]["previewUrl"] != riddle["music"]["previewUrl"],
+              "a jargon title whose song is gone is dealt again, with another song")
+
+        music_service.preview_is_dead = fine
+        kept = (await client.post(f"/api/runs/{run_id}/media-error", json={"itemId": swapped["id"]}, headers=headers)).json()
+        kept = kept["item"]
+        check(kept["id"] == swapped["id"] and kept["text"] == swapped["text"] and "music" not in kept,
+              "a browser that cannot play the song keeps the title, without it")
+        plan = await db.fetchval("select plan from runs where id = $1", run_id)
+        check(bool(plan) and all(slot["slot"] != "music" and slot.get("no_clip") for slot in plan),
+              f"...and the rest of its game goes on without songs ({[slot['slot'] for slot in plan]})")
+        item, quiet, answered, finished = kept, True, [], False
+        for _ in range(20):
+            item = await opened(item, run_id)
+            quiet = quiet and "music" not in item
+            r = await client.post(f"/api/runs/{run_id}/answer", json={"itemId": item["id"], "choiceIndex": 0}, headers=headers)
+            quiet = quiet and not (r.json().get("music") or {}).get("previewUrl")
+            answered.append(item["slot"])
+            turn = (await client.post(f"/api/runs/{run_id}/next", headers=headers)).json()
+            if turn["finished"]:                       # (this style ends on the deal after its last answer)
+                finished = True
+                break
+            item = turn["item"]
+        check(quiet and finished and answered.count("jargon") == 3 and answered.count("song_or_jargon") == 4,
+              f"no song is tried again, and the game plays on to its end ({answered})")
+    finally:
+        music_service.preview_is_dead, music_service.retire_track, music_service.tracks_for = real
 
 
 async def main() -> None:
@@ -288,6 +366,17 @@ async def main() -> None:
                                               "Hold Music Specialist"}, f"office jukebox earns its own title ({box['summary']['badge']})")
             jargon = await db.fetch("select payload from run_items where run_id = $1 and slot = 'jargon'", box["run_id"])
             print("       jargon titles:", [row["payload"]["text"] for row in jargon])
+            check(all(plays for slot, plays in box["songs"] if slot in ("music", "jargon")),
+                  "office jukebox: every clip question and jargon title plays its song while it is on screen")
+            first = (await client.post(f"/api/quiz/{slug}/runs", json={"mode": "jukebox", "decade": "80s"},
+                                       headers=players["Li Wei"])).json()["state"]
+            check(first["remaining"] == 12, f"office jukebox counts its questions: 12 to come ({first['remaining']})")
+            await client.post(f"/api/runs/{first['runId']}/quit", headers=players["Li Wei"])
+            check(not any(plays for slot, plays in box["songs"] if slot == "song_or_jargon"),
+                  "office jukebox: nothing plays while Song or Synergy? is decided (it would give the answer away)")
+            check(all(plays == (right == 0) for slot, right, plays in box["rewards"] if slot == "song_or_jargon"),
+                  "office jukebox: once answered, Song or Synergy? plays the song - when it was one")
+            await jukebox_song_trouble(client, slug, players["Omar Haddad"])
 
             print("== Speed Run ==")
             r = await client.post(f"/api/quiz/{slug}/runs", json={"mode": "speed"}, headers=players["Li Wei"])

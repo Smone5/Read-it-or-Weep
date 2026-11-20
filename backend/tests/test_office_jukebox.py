@@ -1,6 +1,8 @@
 """Office Jukebox, the music side game: its rounds, its points, and its questions."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from services import engine, jukebox, settings_store
 
 RULES = settings_store.clean_game({})
@@ -33,6 +35,29 @@ def test_nothing_costs_points():
     assert engine._points(run, RULES, item, True, False, 1.0) == 100 + 20
     closing = {"slot": "music", "points_multiplier": 2, "wager": None}
     assert engine._points({**run, "streak": 0}, RULES, closing, True, False, 1.0) == 200
+
+
+async def test_a_jargon_title_plays_its_song_and_song_or_synergy_is_decided_without_one():
+    # The song a question is about plays under it, so the background music never stands in for it (user,
+    # 2026-11-20) - except in Song or Synergy?, where hearing it would give the answer away.
+    served = datetime.now(timezone.utc)
+
+    def item(slot: str, **payload) -> dict:
+        return {"id": "i-1", "position": 4, "slot": slot, "round_no": 2, "round_name": "Jargon Jukebox",
+                "section_id": None, "time_limit_sec": 30, "points_multiplier": 1, "lifelines_used": [], "wager": None,
+                "served_at": served, "payload": {"title": "Translate from Corporate", "text": "Cardiac Glass Ceiling",
+                                                 "options": ["Heart of Glass", "b", "c", "d"], **payload}}
+
+    run = {"mode": "jukebox"}
+    riddle = await engine.public_item(item("jargon", preview_url="https://p/1"), run)
+    assert riddle["music"] == {"previewUrl": "https://p/1", "asks": "title"}
+    card = await engine.public_item(item("jargon", preview_url="https://p/1", sealed=True), run)
+    assert card["text"] is None and card["music"]["previewUrl"] == "https://p/1"    # loads during the title card
+    assert "music" not in await engine.public_item(item("song_or_jargon", preview_url="https://p/1"), run)
+    # A browser that cannot play the songs gets the titles without them (see the media-error route).
+    assert "music" not in await engine.public_item(item("jargon", preview_url="https://p/1", no_clip=True), run)
+    assert engine._grace_ms(item("jargon")) == engine.MUSIC_GRACE_MS              # its clock waits for the song
+    assert engine._grace_ms(item("song_or_jargon")) == engine.GRACE_MS
 
 
 def test_titles_are_shown_as_people_know_them():

@@ -514,6 +514,20 @@ async def test_a_round_is_announced_short_and_a_music_break_ends_on_the_throw(mo
     assert _limit(after_lightning) == 18 and "2 out of 6" in after_lightning
 
 
+async def test_the_jargon_round_throws_to_its_song_and_back_announces_it_over_the_top(monkeypatch):
+    # The song now plays under the jargon title (user, 2026-11-20: the background music was playing instead of it).
+    jukebox_run = {**RUN, "mode": "jukebox"}
+    intro = await _direction(monkeypatch, "round", _item(slot="jargon", round_name="Jargon Jukebox", round_no=2,
+                                                         answered_at=None), run=jukebox_run)
+    assert "\"Jargon Jukebox!\"" in intro and "Roll it!" in intro and "plays the moment you stop" in intro
+    riddle = _item(slot="jargon", round_name="Jargon Jukebox", music_track_id="t-1",
+                   payload={"text": "Cardiac Glass Ceiling", "options": ["Heart of Glass", "b", "c", "d"]}, correct_index=0)
+    reaction = await _direction(monkeypatch, "result", riddle, run=jukebox_run,
+                                track={"title": "Heart of Glass", "artist": "Blondie"})
+    assert _limit(reaction) == 16 and "Heart of Glass" in reaction and "it is playing under you" in reaction
+    assert "plays the moment you stop" not in reaction
+
+
 async def test_the_sign_off_ends_on_the_show_s_name_and_knows_what_the_screen_says(monkeypatch):
     first_game = await _direction(monkeypatch, "summary", best=None)
     assert _limit(first_game) == 24 and "show's name as your very last words" in first_game

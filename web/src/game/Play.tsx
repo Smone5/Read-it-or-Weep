@@ -205,9 +205,15 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   // player is still on the question or on its answer. ("The music trivia question should finish playing its 30
   // seconds and new music should keep going.")
   const [clipOver, setClipOver] = useState(false)
+  // A question that plays its song: a clip question, or an Office Jukebox jargon title with the song behind it.
+  const hasClip = Boolean(item?.music)
+  // Song or Synergy? is decided with nothing playing: any song under it would be taken for the one it is about,
+  // and the real one would give the answer away. ("The background music for the game is playing instead of the
+  // music from the actual song.")
+  const decidedInSilence = item?.slot === 'song_or_jargon'
   // ...and in Office Jukebox the song that was being worked out plays once it has been answered: the reward.
   const rewardClip = phase === 'reveal' ? reveal?.music?.previewUrl : undefined
-  const clipHasFloor = (item?.slot === 'music' || Boolean(rewardClip)) && !clipOver
+  const clipHasFloor = (hasClip || Boolean(rewardClip)) && !clipOver
   useEffect(() => {
     setAfterHost(false)
     setLingering(false)
@@ -237,17 +243,18 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
     // What is under a question (or the betting screen).
     const bed = quick || item?.needsWager ? 'gap' : 'think'
     if (phase === 'card') {
-      if (handover === 'bed') setJukeboxLevel(item?.slot === 'music' ? 'out' : bed)
+      if (handover === 'bed') setJukeboxLevel(hasClip || decidedInSilence ? 'out' : bed)
       else if (opening) setJukeboxLevel('intro')
       else setJukeboxLevel(titleUp ? 'title' : 'think')
     } else if (clipHasFloor) setJukeboxLevel('out')
     else if (phase === 'wager') setJukeboxLevel('gap')
-    else if (phase === 'question') setJukeboxLevel(bed)
-    else if (leaving) setJukeboxLevel(bed)
+    else if (phase === 'question') setJukeboxLevel(decidedInSilence ? 'out' : bed)
+    // (After Song or Synergy? comes another one, or a round card that opens quiet: no dip on the way.)
+    else if (leaving) setJukeboxLevel(decidedInSilence ? 'out' : bed)
     else if (bigMoment && !quick) setJukeboxLevel('swell')
     else if (afterHost && !quick) setJukeboxLevel(lingering ? 'linger' : 'wait')
     else setJukeboxLevel('gap')
-  }, [phase, item?.slot, item?.needsWager, quick, bigMoment, opening, titleUp, handover, afterHost, lingering, leaving, clipHasFloor])
+  }, [phase, item?.needsWager, quick, bigMoment, opening, titleUp, handover, afterHost, lingering, leaving, clipHasFloor, hasClip, decidedInSilence])
 
   // On a phone the explanation lands below the answers: bring it into view, and return to the
   // top for each new question.
@@ -299,7 +306,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       window.setTimeout(() => setBanner(''), 1800)
     }
     setPhase(next.needsWager ? 'wager' : 'question')
-    if (next.slot !== 'music') blip('question') // a clip is its own arrival
+    if (!next.music) blip('question') // a clip is its own arrival
     trace('show', { slot: next.slot, round: next.round.name, wager: Boolean(next.needsWager) })
   }, [])
 
@@ -371,8 +378,8 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       )
       if (opening) stopOpeningWatch.current() // the opening is over: its moment no longer depends on the music
       if (!aliveRef.current || doneRef.current) return
-      if (next.slot === 'music') {
-        // The soundtrack stops dead on his last word ("Roll it!"), and the mystery song starts out of the silence.
+      if (next.music) {
+        // The soundtrack gives way on his last word ("Roll it!"), and the question's song comes in as it goes.
         setHandover('bed')
         await new Promise((resolve) => window.setTimeout(resolve, CLIP_GAP_MS))
       } else if (why === 'host finished' && mode !== 'speed') {
@@ -546,10 +553,10 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
 
   // A music question's clock waits for its clip to be heard – but not for ever.
   useEffect(() => {
-    if (phase !== 'question' || item?.slot !== 'music' || clipStarted) return
+    if (phase !== 'question' || !hasClip || clipStarted) return
     const timer = window.setTimeout(() => setClipStarted(true), CLIP_WAIT_MS)
     return () => window.clearTimeout(timer)
-  }, [phase, item?.id, item?.slot, clipStarted])
+  }, [phase, item?.id, hasClip, clipStarted])
 
   const clockMs = useDeadline(mode === 'speed' ? state.deadlineAt : undefined, () => {
     if (phase === 'question' && !busy) void pull()
@@ -810,10 +817,10 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
                 totalMs={item.timeLimitSec * 1000}
                 remainingMs={item.remainingMs ?? item.timeLimitSec * 1000}
                 running={!busy}
-                hold={item.slot === 'music' && !clipStarted}
+                hold={hasClip && !clipStarted}
                 onExpire={() => void submit(null)}
                 onSecond={setSecondsLeft}
-                quiet={item.slot === 'music'}
+                quiet={hasClip}
               />
             )}
 
@@ -888,7 +895,8 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       {/* Lightning statements and speed runs move on by themselves – unless that failed, when the button is the way out. */}
       {phase === 'reveal' && reveal && (!quick || Boolean(error)) && (
         <footer className="sticky bottom-0 z-[45] -mx-1 flex items-center gap-2 px-1 pb-1 pt-2" style={{ background: 'linear-gradient(transparent, var(--page) 38%)' }}>
-          {item?.slot !== 'music' && (
+          {/* Only the report's questions can be flagged (the music ones are not written from it). */}
+          {item && item.slot !== 'music' && item.slot !== 'jargon' && item.slot !== 'song_or_jargon' && (
             <button className="btn btn-ghost btn-sm" disabled={flagged} onClick={() => setFlagging(true)} title="Tell the organiser this question is not right">
               {flagged ? 'Flagged' : '⚑ Flag'}
             </button>
