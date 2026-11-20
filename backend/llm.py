@@ -118,6 +118,21 @@ async def parse(
     raise AIUnavailable(str(last_error) if last_error else "AI request failed")
 
 
+def final_text(response: Any) -> str:
+    """The model's answer: the text of its last final message.
+
+    Not ``response.output_text``, which joins every message in the reply - and a model may send a draft or a
+    remark (a "commentary" message) before its final answer, or the final answer twice. Joined, that made the
+    host say his line twice in a row, sometimes followed by the model's own word count.
+    """
+    messages = [item for item in (getattr(response, "output", None) or []) if getattr(item, "type", "") == "message"]
+    finals = [m for m in messages if getattr(m, "phase", None) in (None, "final_answer")]
+    chosen = (finals or messages)[-1:]
+    if not chosen:
+        return (getattr(response, "output_text", "") or "").strip()
+    return "".join(getattr(part, "text", "") or "" for part in (getattr(chosen[0], "content", None) or [])).strip()
+
+
 async def text(
     *,
     model: str,
@@ -133,7 +148,7 @@ async def text(
             reasoning={"effort": effort},
             max_output_tokens=max_output_tokens,
         )
-    return (response.output_text or "").strip()
+    return final_text(response)
 
 
 async def embed(texts: Sequence[str], batch_size: int = 64) -> np.ndarray:

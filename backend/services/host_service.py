@@ -32,10 +32,13 @@ be short: the game is standing still while he says it.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import io
 import logging
 import re
+import time
 import wave
 from typing import AsyncIterator
 
@@ -44,7 +47,7 @@ import numpy as np
 import db
 import llm
 from config import config
-from services import settings_store
+from services import eleven, settings_store
 from services.settings_store import MODES
 
 log = logging.getLogger("host")
@@ -141,10 +144,70 @@ def sarcasm_style(level: int) -> str:
     return next(text for ceiling, text in _SARCASM if level <= ceiling)
 
 
+# --------------------------------------------------------------------------- lines that are written, then performed
+# With an ElevenLabs voice (see services/eleven.py) the model that writes a line does not speak it: it directs
+# the performance inside the line, with a short tag in square brackets at the start of each beat. Measured on
+# identical scripts, a note for every beat was what made a line sound acted rather than read, and the
+# organiser judged it so by ear ("P5 tone and diction is right").
+
+# Each manner's usual tags. The writer may use others; these set the colour.
+TAG_PALETTE = {
+    "wiseguy": "[smug], [teasing], [amused], [mock-impressed], [grinning], [dry]",
+    "deadpan": "[deadpan], [dry], [flat], [unimpressed], [sardonic] - and let the words be the funny part",
+    "showman": "[booming], [excited], [theatrical], [dramatic], [delighted] - then drop to [aside] for the joke",
+}
+
+
+def _performance_notes(name: str, manner: str, warm: bool, style: str | None) -> str:
+    """The "how you sound" section for a host whose lines are performed by someone else."""
+    return (
+        "# How your lines are performed - this matters as much as the words\n"
+        "A voice actor performs every line you write, and you direct them inside the line itself: a short delivery tag "
+        "in square brackets at the start of each beat, saying HOW that beat is played. The actor never says a tag.\n"
+        "- Two to four beats in a line, one tag each. Tags are one to three words: [amused], [deadpan], [teasing], "
+        "[mock-impressed], [building], [excited], [sarcastic], [wincing], [delighted], [suspicious], [whispering].\n"
+        f"- {name}'s usual colours: {TAG_PALETTE.get(manner, TAG_PALETTE[DEFAULT_MANNER])}.\n"
+        "- CHANGE GEAR between beats: the attitude must move - up for mock excitement, down for the dry aside.\n"
+        "- A beat of silence is \"...\" in the text. Put one before a punchline.\n"
+        "- A sound you make can be a tag on its own - [laughs], [chuckles], [sighs], [scoffs] - at most one a line.\n"
+        "- Never a sound effect such as [applause], [drumroll] or [buzzer]: the game plays its own.\n"
+        "- The name of a round is a TITLE. Give it a run-up and its own beat, announced: \"[building] It's the... "
+        "[announcing, big] Warm-Up Round!\", \"[building] Hold on to something... [announcing] the Lightning Round!\" - "
+        "a different run-up every time, never the same one twice in a row."
+        + ("\n- At this sarcasm setting the teasing is gone: you are on their side, delighted when they get one right "
+           "and sympathetic when they do not. Keep all of the energy and the timing." if warm else "")
+        + (f"\n- {name} in particular: {style}" if style else ""))
+
+
+_TAGGED_SHAPES = (
+    "# The shape to aim for (never these exact words)\n"
+    "\"[deadpan] Nope - [plainly] 184 million. [amused] ... Bold guess, though. I respect bold.\"\n"
+    "\"[delighted] Correct! [dry] Somebody actually opened the attachment.\"\n"
+    "\"[impressed] Yes! And fast. [suspicious] ... Suspiciously fast.\"\n"
+    "\"[wincing] Ohh, that's time - [plainly] Phoenix. [dry] The clock didn't read it either.\"\n"
+    "\"[smooth] Yes! [delighted] Pure eighties gold... [announcing] Blondie, 'Heart of Glass.'\"\n"
+    "\"[building] Hold on... [announcing, big] the Lightning Round! [teasing] Fact or fake, no thinking... "
+    "[dry] your specialty.\"")
+
+_TAG = re.compile(r"\[[^\[\]]{0,60}\]")
+
+
+def spoken_text(line: str) -> str:
+    """A written line as it is heard: the delivery tags taken out (that is what the host box shows)."""
+    text = _TAG.sub(" ", line)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+([,!?]|\.(?!\.))", r"\1", text)      # "Sam !" -> "Sam!", but a "..." keeps its space
+    return text.strip(" \"'")
+
+
 def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, room: bool = False,
                   quiz_title: str | None = None, outline: list[str] | None = None, custom: str | None = None,
-                  style: str | None = None, manner: str | None = None) -> str:
-    """The host's character, delivery and rules, as instructions for the voice model."""
+                  style: str | None = None, manner: str | None = None, tags: bool = False) -> str:
+    """The host's character, delivery and rules, as instructions for the voice model.
+
+    With ``tags`` the instructions are for a model that writes lines for someone else to perform: it
+    directs the delivery with tags in square brackets instead of performing it itself.
+    """
     acting = MANNERS.get(manner or "", MANNERS[DEFAULT_MANNER])
     if room:
         role = (f"You are {name}, host of \"{game_title}\", a comedy trivia game. You are running a LIVE game on the big "
@@ -167,11 +230,12 @@ def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, roo
         "- It is very funny to you that tonight's big show is a quiz about a business report, and you play that "
         "completely straight.\n"
         f"- {across}",
-        "# How you sound - this matters more than the words\n"
-        + acting["sound"]
-        + ("\n- At this sarcasm setting the teasing is gone: you are on their side, delighted when they get one right "
-           "and sympathetic when they do not. Keep all of the energy and the timing." if warm else "")
-        + (f"\n- {name} in particular: {style}" if style else ""),
+        _performance_notes(name, manner or DEFAULT_MANNER, warm, style) if tags else (
+            "# How you sound - this matters more than the words\n"
+            + acting["sound"]
+            + ("\n- At this sarcasm setting the teasing is gone: you are on their side, delighted when they get one right "
+               "and sympathetic when they do not. Keep all of the energy and the timing." if warm else "")
+            + (f"\n- {name} in particular: {style}" if style else "")),
         f"# How sarcastic (the organiser's setting: {sarcasm} out of 10)\n{sarcasm_style(sarcasm)}",
         "# The jokes\n"
         "You are funny the way the host of an irreverent comedy quiz is funny. Your tools:\n"
@@ -185,34 +249,44 @@ def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, roo
         "how a round works, is not a joke.\n"
         "Surprise them: if a joke is the first one anybody would think of, find the second one. Never explain a joke.",
         "# Reacting to an answer\n"
-        "The verdict first, in your own way, and it must match what happened - right: \"Correct.\", \"Yes.\", \"Well, look "
-        "at you.\"; wrong: \"Nope.\", \"Ohhh, no.\", \"Yeah... no.\"; out of time: \"And that's time.\" - then ONE short "
-        "joke about what just happened, then, if they were wrong or out of time, the right answer, said plainly.\n"
+        "The music comes up the moment you stop, so your LAST word is the button: the funniest word of the joke, a "
+        "title, a song. Never end on filler (\"good luck\", \"let's go\"), on a question, or on an answer they can "
+        "already read on their screen.\n"
+        "- The verdict first, in your own way, and it must match what happened - right: \"Correct.\", \"Yes.\", \"Well, "
+        "look at you.\"; wrong: \"Nope.\", \"Ohhh, no.\", \"Yeah... no.\"; out of time: \"And that's time.\"\n"
+        "- Wrong or out of time: the right answer goes INSIDE the verdict, said plainly (\"Nope - Phoenix.\"); then ONE "
+        "short joke, ending on its funniest word.\n"
+        "- Right: the verdict, then ONE short joke, ending on its funniest word.\n"
+        "- A song: end on its title and artist, the way a DJ would.\n"
         "That is the whole line. No second joke. No pep talk. No summary.\n"
         "A verdict is ONLY for reacting to an answer. A welcome, a round announcement, a hint or a sign-off never "
         "starts with one.",
         "# Length\n"
-        "The game waits while you talk, so be brief - brief in WORDS, never by talking faster. Reactions: under 18 words "
-        "in total. Round announcements: under 12 words. Welcomes: under 16 words. Sign-offs: under 22 words. Each stage "
-        "direction gives the exact limit; never go over it.\n"
+        "The game waits while you talk, so be brief - brief in WORDS, never by talking faster. Reactions: 10 words when "
+        "they are right, 14 when they are wrong or out of time, 16 for a song. Round announcements: 12 words. Sign-offs: "
+        "24 words. The show's opening is the one place you take your time. Each stage direction gives the exact limit; "
+        "never go over it.\n"
         "Say numbers the short way: \"184 million\", not \"one hundred eighty-four point two million dollars\".",
         "# Variety\n"
         "Never open two lines in a row the same way. Never reuse a joke or comparison. Use a contestant's name in at "
         "most one line in four, and never as the first word.",
         "# Hard rules\n"
-        "- Spoken words only. Never say a stage direction or a sound effect out loud as words.\n"
+        + ("- Write only the words you say out loud, plus the delivery tags in square brackets. No quotation marks, no "
+           "stage directions in parentheses, no asterisks, no emoji. Word limits count spoken words, not tags.\n" if tags
+           else "- Spoken words only. Never say a stage direction or a sound effect out loud as words.\n") +
         "- Jokes target the answer, the situation, corporate life or yourself. Never a person's intelligence, job, "
         "looks or identity. Workplace-safe. No profanity.\n"
         "- Never reveal or hint at an answer before it has been given, unless you are asked to deliver a hint.\n"
         "- Report facts come only from what you are told. Never invent them.\n"
         "- Do not name real game shows or their hosts, and never say you are an AI.",
-        "# The shape to aim for (never these exact words)\n"
-        "\"Nope. ... Bold, though. I respect bold. It was 184 million.\"\n"
-        "\"Correct. Somebody actually opened the attachment.\"\n"
-        "\"Yes! And fast. ... Suspiciously fast.\"\n"
-        "\"Ohh, and that's time. To be fair, the clock didn't read it either. It was Phoenix.\"\n"
-        "\"Lightning Round! Fact or fake, no thinking allowed... so you should be fine.\"\n"
-        "\"Picture Round! Charts, graphs, and the diagram somebody lost a weekend to.\"",
+        _TAGGED_SHAPES if tags else (
+            "# The shape to aim for (never these exact words)\n"
+            "\"Nope - 184 million. ... Bold guess, though. I respect bold.\"\n"
+            "\"Correct. Somebody actually opened the attachment.\"\n"
+            "\"Yes! And fast. ... Suspiciously fast.\"\n"
+            "\"Ohh, that's time - Phoenix. The clock didn't read it either.\"\n"
+            "\"Hold on... Lightning Round! Fact or fake, no thinking... your specialty.\"\n"
+            "\"Next up... Picture Round! The diagram somebody lost a weekend to.\""),
     ]
     if quiz_title:
         context = f"# Tonight\nThe quiz: \"{quiz_title}\"."
@@ -248,8 +322,8 @@ async def persona(quiz: dict | None, *, straight: bool = False, host_id: str | N
     character = settings["hosts"][0]
     if host_id and settings["player_can_choose"]:
         character = next((c for c in settings["hosts"] if c["id"] == host_id), character)
-    host = {**settings, "name": character["name"], "voice": character["voice"], "style": character.get("style") or "",
-            "manner": character.get("manner") or DEFAULT_MANNER}
+    host = {**settings, "name": character["name"], "style": character.get("style") or "",
+            "manner": character.get("manner") or DEFAULT_MANNER, **resolve_voice(character["voice"])}
     outline: list[str] = []
     if quiz:
         rows = await db.fetch(
@@ -260,8 +334,27 @@ async def persona(quiz: dict | None, *, straight: bool = False, host_id: str | N
         name=host["name"], game_title=branding["game_title"], company=branding["company_name"],
         sarcasm=1 if straight else int(host["sarcasm"]), room=room,
         quiz_title=quiz["title"] if quiz else None, outline=outline, custom=host["custom_instructions"] or None,
-        style=None if straight else (host["style"] or None), manner=host["manner"])
+        style=None if straight else (host["style"] or None), manner=host["manner"], tags=host["engine"] == "eleven")
     return instructions, host
+
+
+def resolve_voice(voice: str) -> dict:
+    """Who will perform a character's voice: ElevenLabs when it is an ElevenLabs voice and a key is set;
+    otherwise the realtime model, with the OpenAI voice that stands in for it."""
+    if eleven.is_eleven(voice):
+        if eleven.configured():
+            return {"engine": "eleven", "voice": voice}
+        return {"engine": "realtime", "voice": eleven.BY_ID[voice].fallback}
+    return {"engine": "realtime", "voice": voice}
+
+
+def open_voice(instructions: str, host: dict, speak: bool) -> "AnyVoice":
+    """The voice session for a host, as persona() described it."""
+    pace = host.get("pace", "snappy")
+    if host.get("engine") == "eleven":
+        return WrittenHostVoice(instructions, eleven.BY_ID[host["voice"]], speak, pace=pace,
+                                manner=host.get("manner") or DEFAULT_MANNER)
+    return HostVoice(instructions, host["voice"], speak, model=voice_model(host), pace=pace)
 
 
 def voice_model(host: dict) -> str:
@@ -285,30 +378,160 @@ _ROUND_ANGLE = {
 }
 
 
-async def _welcome(run: dict, player: dict | None, name: str) -> str:
-    """The opening line. It also starts the first round, so the game needs only one line before question one."""
-    returning = bool(player and player["games_played_count"])
-    if run["mode"] in ("speed", "sudden_death"):
-        quiz = await db.fetchrow("select * from quizzes where id = $1", run["quiz_id"])
-        rules = await settings_store.quiz_rules(quiz)
-        if run["mode"] == "speed":
-            # A race should start like one: a line of clauses ("ninety seconds, maximum chaos, minimum excuses")
-            # was measured at six to nine seconds, most of it the pauses between them.
-            return (f"Open the show. {name} is about to start a Speed Run: {int(rules['speed']['clock_sec'])} seconds on "
-                    "the clock, as many answers as they can manage. ONE quick remark of eight words or fewer - a single "
-                    "phrase, not a list - and then \"Go!\". The clock starts as you finish.")
-        return (f"Open the show. {name} is playing Sudden Death: {int(rules['sudden_death']['strikes'])} wrong answers "
-                "and the game is over. " + ("They have played before. " if returning else "")
-                + "ONE sentence, under 14 words. The first question appears as you finish.")
-    first = await db.fetchval("select round_name from run_items where run_id = $1 order by position limit 1", run["id"])
-    first = first or (run["plan"][0]["name"] if run["plan"] else "the first round")
-    # The first question appears the moment this line ends, so it is one breath long and ends on the round's name.
+# --------------------------------------------------------------------------- the opening
+# The show's big moment, and the one place the host takes his time: he opens the show by name, introduces
+# himself and the contestant, explains how the game works, and leads into the first round. (The organiser,
+# 2026-11-20: "the host needs to explain the game show before the game starts ... better introduction and
+# leading into the game. Needs to change each game too.") A returning player gets a shorter one, and anyone can
+# skip it. Every opening gets a different angle, and the host is shown the player's last openings.
+
+_LIFELINE_WORDS = {"fifty": "50/50 (two wrong answers removed)", "peek": "a peek at the report's passage, for half points",
+                   "hint": "a hint from you, the host"}
+
+
+def _how_it_works(run: dict, rules: dict, rounds: list[str]) -> str:
+    """The rules of this game, as facts for the host to put in his own words."""
+    mode = run["mode"]
+    if mode == "show":
+        cfg = rules["show"]
+        facts = [f"{len(rounds)} rounds tonight, in this order: {', '.join(rounds)}.",
+                 f"About {int(cfg['timer_sec'])} seconds a question. The faster a right answer, the more points; a streak "
+                 "of right answers adds a bonus; a wrong answer costs a few points."]
+        if "Music Break" in rounds:
+            facts.append("Music Break: a song plays, name that tune.")
+        if "Lightning Round" in rounds:
+            facts.append("Lightning Round: quick statements, call each one Fact or Fake.")
+        if "Second Chance" in rounds:
+            facts.append("Second Chance: questions they missed come back, and can only help.")
+        if "Final Wager" in rounds:
+            facts.append("Final Wager: they bet their points on one last question.")
+        lifelines = [_LIFELINE_WORDS[kind] for kind, left in (run["lifelines"] or {}).items() if left and kind in _LIFELINE_WORDS]
+        if lifelines:
+            facts.append("Lifelines, once each: " + "; ".join(lifelines) + ".")
+        return " ".join(facts)
+    if mode == "sudden_death":
+        cfg = rules["sudden_death"]
+        return (f"{int(cfg['strikes'])} wrong answers and the game is over. The questions keep coming and the clock gets "
+                f"shorter, from {int(cfg['timer_start_sec'])} seconds down to {int(cfg['timer_min_sec'])}. Every so often "
+                "a song plays: name that tune and win a strike back. One 50/50 lifeline.")
+    if mode == "speed":
+        cfg = rules["speed"]
+        return (f"{int(cfg['clock_sec'])} seconds on one clock for the whole game, as many answers as they can manage. "
+                f"A wrong answer costs {int(cfg['wrong_penalty_sec'])} seconds.")
+    cfg = rules["straight"]
+    return (f"No clock, no jokes, no tricks: questions from every section of the report, and {int(cfg['pass_mark'])}% "
+            "to pass.")
+
+
+def _when(moment) -> str | None:
+    """A meeting time, the way a person would say it."""
+    if moment is None:
+        return None
+    import datetime as _dt
+    today = _dt.datetime.now(moment.tzinfo).date() if moment.tzinfo else _dt.date.today()
+    days = (moment.date() - today).days
+    if days < 0:
+        return None
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "tomorrow"
+    if days < 7:
+        return f"on {moment.strftime('%A')}"
+    return f"on {moment.strftime('%B')} {moment.day}"
+
+
+async def _opening_angle(run: dict, player: dict | None, quiz: dict, returning: bool) -> str:
+    """One thing to make this opening about, different each game."""
+    import random as _random
+    angles = [
+        "a fake sponsor from office life (the jammed printer, the 4 pm meeting, reply-all...): one quick line",
+        "mock-epic stakes: treat this like a championship final, for a quiz about a business report",
+        "the show's production values: no budget, no prizes, all the glory",
+        f"the report itself, \"{quiz['title']}\", and how many people swear they read every page",
+    ]
+    meeting = _when(quiz["meeting_at"])
+    if meeting:
+        angles.append(f"the meeting this report is for, {meeting}: this is their chance to walk in ready")
+    if run["decade"]:
+        angles.append(f"tonight's soundtrack: hits from the {run['decade']}")
+    if player and player["team"]:
+        angles.append(f"the contestant's team, {player['team']}, and its reputation riding on this")
     if returning:
-        return (f"Open the show. The contestant is {name}, who has played before. Welcome them back in six words or "
-                f"fewer, then announce the first round by its name - \"{first}!\" - and stop. Under 12 words in total.")
-    return (f"Open the show. The contestant is {name}, and this is their first game. Welcome them in ten words or "
-            f"fewer, then announce the first round by its name - \"{first}!\" - and stop. Under 16 words in total. Do "
-            "not explain the rules.")
+        angles += ["a rematch: the report and the contestant meet again",
+                   "the contestant's record so far (see the facts), and whether tonight beats it"]
+    return _random.choice(angles)
+
+
+async def _welcome(run: dict, player: dict | None, name: str) -> str:
+    """The opening: the show, the host, the contestant, how it works, then the first round. One line, so the game
+    needs nothing else before question one; long enough to set the show up, never so long that it drags."""
+    returning = bool(player and player["games_played_count"])
+    quiz = await db.fetchrow("select * from quizzes where id = $1", run["quiz_id"])
+    rules = await settings_store.quiz_rules(quiz)
+    branding = await settings_store.get("branding")
+    dealt = [r["round_name"] for r in await db.fetch("select round_name from run_items where run_id = $1 order by position",
+                                                     run["id"])]
+    rounds: list[str] = []
+    for round_name in dealt + [slot.get("name") for slot in (run["plan"] or [])]:
+        if round_name and round_name not in rounds:
+            rounds.append(round_name)
+    first = rounds[0] if rounds else "the first round"
+    company = branding["company_name"]
+    company = "" if company.strip().lower() in ("", settings_store.DEFAULTS["branding"]["company_name"].lower()) else company
+    facts = [f"The show: \"{branding['game_title']}\", where {company + ' ' if company else ''}colleagues prove they read the "
+             f"report \"{quiz['title']}\". The style of play tonight: {MODES.get(run['mode'], {}).get('name', run['mode'])}.",
+             f"The contestant: {name}" + (f", from {player['team']}" if player and player["team"] else "") + "."]
+    if returning:
+        best = await db.fetchval("select max(score) from runs where player_id = $1 and quiz_id = $2 and mode = $3"
+                                 " and status = 'completed'", run["player_id"], run["quiz_id"], run["mode"])
+        facts.append(f"They have played {player['games_played_count']} game"
+                     f"{'' if player['games_played_count'] == 1 else 's'} before"
+                     + (f"; their best score at this style of play is {best}." if best else "."))
+    facts.append("How it works: " + _how_it_works(run, rules, rounds))
+    recent = [r["host_opening"] for r in await db.fetch(
+        "select host_opening from runs where player_id = $1 and host_opening is not null and id <> $2"
+        " order by started_at desc limit 3", run["player_id"], run["id"])] if player else []
+    angle = await _opening_angle(run, player, quiz, returning)
+
+    # Spoken words: a first game gets the full opening (about 20 to 25 seconds), a returning player a short one.
+    # Measured: asked for "50 to 70 words", the writer gave 94 to 115 - so the limit is stated as a hard one, and
+    # WrittenHostVoice asks for one rewrite of anything well over it.
+    limit = {("show", False): 65, ("show", True): 35, ("sudden_death", False): 55, ("sudden_death", True): 30,
+             ("speed", False): 40, ("speed", True): 20, ("straight", False): 35, ("straight", True): 20}[
+        (run["mode"] if run["mode"] in ("show", "sudden_death", "speed", "straight") else "show", returning)]
+    if run["mode"] == "speed":
+        ending = "the rules in one breath" if not returning else "a one-line reminder of the rules"
+        finish = "End on \"Go!\" - the clock starts the moment you finish."
+    elif run["mode"] == "straight":
+        ending = "how it works" if not returning else "a one-line reminder"
+        finish = "End by inviting them to begin; the first question appears as you finish. Calm and encouraging."
+    else:
+        ending = ("how it works, picking only the two or three things that matter most" if not returning
+                  else "a quick \"you know the drill\" reminder of one or two rules")
+        # A Sudden Death game's card says "Sudden Death", not its first level: the opening ends on the game's name.
+        title = "Sudden Death" if run["mode"] == "sudden_death" else first
+        finish = (f"Lead into the first round with a run-up and end on its name as a title - \"{title}!\" - and stop. "
+                  "The first question appears as you finish.")
+    parts = [
+        "Open the show. This is the big opening, the one moment you take your time - but it must never drag: "
+        f"{limit} spoken words AT MOST, in four to six short beats. Count them.",
+        "You start over the theme music as it fades down, so your first two or three words are half heard: begin with "
+        "a [building] run-up in your own words (never a name - not the show's, not yours, not theirs), then open the "
+        "show by name, like the top of a broadcast. Then, in this order: "
+        + ("introduce yourself in a line; " if not returning else "welcome them back - you have met before; ")
+        + f"introduce tonight's contestant like a contestant on a show; then {ending}, in plain words, as a host "
+        "talks - never as a list; then tonight's angle as one joke, so the run-up into the game starts from a laugh. "
+        + finish + " Say the word \"welcome\" once at most in the whole opening: a contestant must never feel welcomed "
+        "twice.",
+        f"Tonight's angle - the one joke the opening is about, in your own way: {angle}.",
+        "The facts, for you (use what helps, never recite them):\n" + "\n".join(f"- {fact}" for fact in facts),
+    ]
+    if recent:
+        parts.append("Your last openings for this contestant. This one must be completely different - not their jokes, "
+                     "not their words, not their shape:\n" + "\n".join(f"- \"{line[:300]}\"" for line in recent))
+    parts.append(f"Word limit: {limit}.")
+    return "\n\n".join(parts)
 
 
 async def _lightning_tally(run: dict, item: dict) -> str:
@@ -332,9 +555,18 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
         return await _welcome(run, player, name)
     if cue == "summary" and run:
         accuracy = round(100 * run["report_correct"] / run["report_answered"]) if run["report_answered"] else 0
+        best = await db.fetchval("select max(score) from runs where player_id = $1 and quiz_id = $2 and mode = $3"
+                                 " and status = 'completed' and id <> $4", run["player_id"], run["quiz_id"], run["mode"],
+                                 run["id"])
+        # The results screen says "New high score!" exactly when this is true (see stats.summary and Summary.tsx).
+        record = run["score"] > 0 and run["status"] == "completed" and (best is None or run["score"] > best)
+        screen = (" Their screen also says \"New high score!\"" + (" (it is their first game)." if best is None else ".")
+                  if record else "")
         return (f"The game is over. {name} scored {run['score']} points and got {accuracy}% of the report questions right "
-                f"(best streak {run['streak_max']}), earning the title '{run['badge']}'. Sign off, speaking to them directly "
-                "(\"you\"), in two short sentences, under 22 words: announce the title they earned, then one last joke.")
+                f"(best streak {run['streak_max']}), earning the title '{run['badge']}'. The title is on their screen."
+                f"{screen} Sign off, speaking to them directly (\"you\"), in three short beats: the title, announced like an "
+                "award; one last joke; then the show's name as your very last words, like the end of a broadcast - the "
+                "music comes up under it. Word limit: 24.")
     if not run:
         return None
     if cue == "round" and not item_id:
@@ -351,19 +583,29 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
 
     if cue == "round":
         round_name = item["round_name"]
+        # The song plays the moment he stops, so a music break ends on the throw that starts it.
+        throw = ("End on a two- or three-word throw that starts the song (\"Roll it!\", \"Hit it!\"): it plays the "
+                 "moment you stop.")
         if item["slot"] == "music":
             if run["mode"] == "sudden_death":
                 return (f"Announce a bonus music break. Its name first, as a headline - \"Music Break!\" - then, in ten "
-                        f"words or fewer: name the tune - a hit from the {run['decade']} - and win back a life. Do not "
-                        "say the contestant's name, the song or the artist.")
+                        f"words or fewer: name the tune - a hit from the {run['decade']} - and win back a life. {throw} "
+                        "Do not say the contestant's name, the song or the artist. Word limit: 14.")
             round_name, angle = "Music Break", f"name that tune, hits from the {run['decade']}"
+            ending = f"then, if you like, ONE joke of five words or fewer. {throw}"
+        elif round_name == "Final Wager":
+            angle = _ROUND_ANGLE.get(round_name, "a new round")
+            ending = ("then ONE joke of six words or fewer, and end by putting the bet to them in three words or fewer "
+                      "(\"Place your bet!\"): the betting screen is next.")
         else:
             angle = _ROUND_ANGLE.get(round_name, "a new round")
+            ending = "then ONE joke of six words or fewer about it, ending on its funniest word."
         tally = await _lightning_tally(run, item)
-        return (f"{tally}Announce the next round. Its name first, as a headline - \"{round_name}!\" - then ONE quick "
-                f"joke of eight words or fewer about it. (What the round is, for your information only - do not recite "
-                f"it: {angle}.) Do not say the contestant's name. The game is waiting for you: no more than 12 words"
-                + (" after the score remark." if tally else "."))
+        limit = 12 + (6 if tally else 0) + (2 if round_name == "Final Wager" else 0)
+        return (f"{tally}Announce the next round: a run-up of two or three words, then its name as a headline - "
+                f"\"{round_name}!\" - "
+                f"{ending} (What the round is, for your information only - do not recite it: {angle}.) Do not say the "
+                f"contestant's name. The game is waiting for you. Word limit: {limit}.")
     if payload.get("sealed"):
         return None                                   # not on screen yet: there is nothing to say about it
     if cue == "hint" and item["answered_at"] is None and payload.get("hint"):
@@ -382,26 +624,30 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
             life = " That wins them a life back." if run["mode"] == "sudden_death" and item["is_correct"] else ""
             if item["timed_out"]:
                 return (f"Music break. The track was {song}. The contestant ran out of time without answering. React: "
-                        "verdict, one quick joke, then name the track.")
+                        "the verdict, one quick joke, and end on the track's title and artist, like a DJ. Word limit: 16.")
             if item["is_correct"]:
                 return (f"Music break. The track was {song}, and the contestant got it RIGHT.{speed}{life} React: a verdict "
-                        "call for a correct answer, then one quick joke about the song or the era.")
+                        "call for a correct answer, one quick joke about the song or the era, and end on the song's title "
+                        "and artist, like a DJ. Word limit: 16.")
             return (f"Music break. The track was {song}; the contestant guessed \"{_chosen(item)}\", which is WRONG.{speed} "
-                    "React: verdict, one quick joke, then name the track.")
+                    "React: the verdict, one quick joke about that guess, and end on the track's title and artist, like a "
+                    "DJ. Word limit: 16.")
         first = " This is their first answer of the game." if run["questions_answered"] <= 1 else ""
-        # A long answer read out in full stalls the game: ask for its gist instead.
-        short = " When you give the right answer, say only its gist, in six words or fewer." if len(correct_answer.split()) > 7 else ""
+        # A long answer read out in full stalls the game, and it is on their screen anyway: its gist will do.
+        short = " The right answer is long: say only its gist, in four words or fewer." if len(correct_answer.split()) > 4 else ""
         about = f"Question: \"{payload['text']}\" Correct answer: \"{correct_answer}\".{first}"
         if item["timed_out"]:
-            return f"{about} {name} ran out of time. React: verdict, one quick joke, then the right answer.{short}"
+            return (f"{about} {name} ran out of time. React: the verdict with the right answer inside it, then one quick "
+                    f"joke, ending on its funniest word.{short} Word limit: 14.")
         if item["is_correct"]:
             streak = f" That is {run['streak']} in a row." if run["streak"] >= 3 else ""
             wager = f" They had wagered {item['wager']} points and won them." if item["wager"] else ""
-            return (f"{about} {name} got it RIGHT.{speed}{helped}{streak}{wager} React: verdict, then one quick joke that "
-                    "plays on the answer itself.")
+            return (f"{about} {name} got it RIGHT.{speed}{helped}{streak}{wager} React: the verdict, then one quick joke "
+                    "that plays on the answer itself, ending on its funniest word. Word limit: 10.")
         wager = f" They had wagered {item['wager']} points and lost them." if item["wager"] else ""
-        return (f"{about} {name} answered \"{_chosen(item)}\", which is WRONG.{speed}{helped}{wager} React: verdict, one "
-                f"quick joke about that specific wrong answer, then the right answer.{short}")
+        return (f"{about} {name} answered \"{_chosen(item)}\", which is WRONG.{speed}{helped}{wager} React: the verdict "
+                f"with the right answer inside it, then one quick joke about that specific wrong answer, ending on its "
+                f"funniest word.{short} Word limit: 14.")
     return None
 
 
@@ -409,6 +655,10 @@ def _chosen(item: dict) -> str:
     index = item["selected_index"]
     options = item["payload"]["options"]
     return options[index] if index is not None and 0 <= index < len(options) else "nothing"
+
+
+REWRITE_IF_WITHIN_SEC = 4.0    # a draft slower than this is used as it is, even if long (see WrittenHostVoice._write)
+_clock = time.monotonic        # (the tests set the clock)
 
 
 class TightEdit:
@@ -574,6 +824,235 @@ class HostVoice:
                 raise RuntimeError(message)
 
 
+# --------------------------------------------------------------------------- the host as writer and performer
+
+# The longest pause left inside a written line. A little more room than the realtime host gets: these lines
+# carry their own "..." beats, and a beat before a punchline is half the joke.
+WRITTEN_PAUSE_CAP_SEC = {"relaxed": None, "snappy": 0.5, "rapid": 0.35}
+WORDS_IN_AUDIO = "their words are in the audio that follows"
+# The backup voice speaks through the text-to-speech model, which may not have every realtime voice.
+_SPEECH_VOICE = {"cedar": "ash", "marin": "sage"}
+
+
+def wav_file(pcm: bytes) -> bytes:
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(SAMPLE_RATE)
+        wav.writeframes(pcm[:len(pcm) - len(pcm) % 2])
+    return out.getvalue()
+
+
+async def transcribe(pcm: bytes) -> str:
+    """What the contestant said into the microphone, as text."""
+    reply = await llm.client().audio.transcriptions.create(model=config.model_transcribe,
+                                                           file=("talk.wav", wav_file(pcm)), language="en")
+    return (getattr(reply, "text", "") or "").strip()
+
+
+_FOREIGN = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uff00-\uffef]")   # CJK and full-width: never in a line
+_LEAKS = re.compile(r"</?final>|\bword count\b|\b\d+ words\. count\b|\bcount: ", re.I)  # the writer's notes to itself
+
+
+def tidy_line(line: str) -> str:
+    """A safety net for what the writer returns: one line, said once, with nothing after it.
+
+    The writer has been seen to return its line twice, back to back, and to add its own word count or stray
+    characters after it. Whatever produced that, the host must never say it.
+    """
+    line = re.sub(r"\s+", " ", line).strip().strip("\"'")
+    for pattern in (_FOREIGN, _LEAKS):
+        found = pattern.search(line)
+        if found:
+            line = line[:found.start()].rstrip(" ,;:-")
+    # The same line twice in a row: keep one.
+    for middle in [i for i, ch in enumerate(line) if ch == " "]:
+        first, second = line[:middle].strip(), line[middle:].strip()
+        if first and first == second:
+            return first
+    return line
+
+
+async def write_line(instructions: str, history: list[dict]) -> str:
+    """A line for a host whose lines are performed by someone else: the words, with delivery tags."""
+    request = {"model": config.model_host_writer, "instructions": instructions, "input": history,
+               "max_output_tokens": 800}
+    try:
+        response = await llm.client().responses.create(**request, reasoning={"effort": config.host_writer_effort})
+    except Exception as exc:  # noqa: BLE001
+        if "reasoning" not in str(exc).lower():
+            raise
+        response = await llm.client().responses.create(**request)     # a writer that does not reason
+    return tidy_line(llm.final_text(response))
+
+
+class WrittenHostVoice:
+    """The host as a writer and a performer: a text model writes each line, with a delivery tag for every
+    beat, and ElevenLabs performs it. The same interface as HostVoice, so the host channel does not care
+    which one it has.
+
+    When ElevenLabs fails (no answer, refused, out of credit) the line is spoken by the OpenAI voice that
+    stands in for this one, and after a refusal or two failures in a row, so is the rest of the session:
+    the host loses some polish, never his voice.
+    """
+
+    KEEP = 40                     # messages remembered besides the brief: enough not to repeat a joke
+
+    def __init__(self, instructions: str, voice: eleven.Voice, speak: bool, *, pace: str = "snappy",
+                 manner: str = DEFAULT_MANNER):
+        self.instructions = instructions
+        self.voice = voice
+        self.speak = speak
+        self.manner = manner
+        self.pause_cap = WRITTEN_PAUSE_CAP_SEC.get(pace, WRITTEN_PAUSE_CAP_SEC["snappy"])
+        self.history: list[dict] = []
+        self.heard = bytearray()
+        self.stopped = False      # interrupt() was called for the line being said (cleared when the line ends)
+        self.failures = 0         # ElevenLabs failures in a row
+        self.backup_only = False  # ElevenLabs is not used again in this session
+        self.timings: list[dict] = []
+
+    async def __aenter__(self) -> "WrittenHostVoice":
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        return None
+
+    def _remember(self, role: str, text: str) -> None:
+        self.history.append({"role": role, "content": text})
+        del self.history[:-self.KEEP]
+
+    async def note(self, text: str) -> None:
+        self._remember("user", text)
+
+    async def hear(self, pcm: bytes) -> None:
+        self.heard.extend(pcm)
+
+    async def forget_heard(self) -> None:
+        self.heard.clear()
+
+    async def interrupt(self) -> None:
+        self.stopped = True
+
+    async def say(self, direction: str) -> AsyncIterator[tuple[str, bytes | str]]:
+        await self.note(direction)
+        async for piece in self._respond():
+            yield piece
+
+    async def reply(self, stage_note: str) -> AsyncIterator[tuple[str, bytes | str]]:
+        """Answer what the contestant just said into the microphone: it is written down first."""
+        pcm, self.heard = bytes(self.heard), bytearray()
+        try:
+            words = await transcribe(pcm)
+        except Exception as exc:  # noqa: BLE001 – a host who did not catch that is better than no game
+            log.warning("could not make out what the contestant said: %s", exc)
+            words = ""
+        if not words:
+            self.stopped = False
+            return
+        await self.note(stage_note.replace(WORDS_IN_AUDIO, "what they said is below")
+                        + f"\nWhat they said: \"{words[:600]}\"")
+        async for piece in self._respond():
+            yield piece
+
+    async def _write(self) -> str:
+        """The next line, with its delivery tags. A line well over the word limit its direction states is sent back
+        once for a shorter version: the game is standing still while the host talks."""
+        began = _clock()
+        line = await write_line(self.instructions, self.history)
+        took = _clock() - began
+        asked = self.history[-1]["content"] if self.history and self.history[-1]["role"] == "user" else ""
+        found = re.search(r"Word limit: (\d+)\.", asked)
+        if found and line:
+            limit, words = int(found.group(1)), len(spoken_text(line).split())
+            # Only a line far over, and only if the first draft came back quickly: a rewrite doubles the wait before
+            # he speaks, and a slow one could make him miss his moment altogether (the opening gives up after 12 s).
+            if words > limit + 15 and took < REWRITE_IF_WITHIN_SEC:
+                shorter = await write_line(self.instructions, self.history + [
+                    {"role": "assistant", "content": line},
+                    {"role": "user", "content": f"That was {words} words; the limit is {limit}. Say it again in {limit} "
+                                                "words or fewer - same order, same ending, every word earning its place."}])
+                if shorter and len(spoken_text(shorter).split()) < words:
+                    line = shorter
+        return line
+
+    async def _audio(self, line: str) -> AsyncIterator[bytes]:
+        """The line performed: by ElevenLabs, or by the backup voice when ElevenLabs cannot."""
+        if not self.backup_only:
+            sent = False
+            try:
+                async with contextlib.aclosing(eleven.perform(line, self.voice)) as audio:
+                    async for chunk in audio:
+                        sent = True
+                        yield chunk
+                self.failures = 0
+                return
+            except eleven.ElevenError as exc:
+                self.failures += 1
+                if exc.permanent or self.failures >= 2:
+                    self.backup_only = True
+                log.warning("ElevenLabs failed (%s); the backup voice %s", exc,
+                            "takes over for this session" if self.backup_only else "says this line")
+                if sent:
+                    return            # half a line was heard: do not start it again in another voice
+        async with contextlib.aclosing(self._backup(spoken_text(line))) as audio:
+            async for chunk in audio:
+                yield chunk
+
+    async def _backup(self, words: str) -> AsyncIterator[bytes]:
+        """The OpenAI voice that stands in for this one, performing the line from its words."""
+        speech_voice = _SPEECH_VOICE.get(self.voice.fallback, self.voice.fallback)
+        async with llm.client().audio.speech.with_streaming_response.create(
+                model=config.model_speech, voice=speech_voice, input=words,
+                instructions=MANNERS.get(self.manner, MANNERS[DEFAULT_MANNER])["sound"],
+                response_format="pcm") as response:
+            async for chunk in response.iter_bytes():
+                yield chunk
+
+    async def _respond(self) -> AsyncIterator[tuple[str, bytes | str]]:
+        began = time.monotonic()
+        try:
+            # A line cut off while it is still being written is abandoned at once, so the next one (the reaction to
+            # an answer, a round's introduction) is not kept waiting for words nobody will hear.
+            writing = asyncio.ensure_future(self._write())
+            while not writing.done():
+                if self.stopped:
+                    writing.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await writing
+                    return
+                await asyncio.wait({writing}, timeout=0.05)
+            line = writing.result()
+            wrote = time.monotonic()
+            if not line or self.stopped:
+                return
+            self._remember("assistant", line)
+            yield "text", spoken_text(line)
+            if not self.speak:
+                return
+            edit, first = TightEdit(self.pause_cap), None
+            async with contextlib.aclosing(self._audio(line)) as audio:
+                async for chunk in audio:
+                    if self.stopped:
+                        return
+                    out = edit.feed(chunk)
+                    if out:
+                        first = first or time.monotonic()
+                        yield "audio", out
+            tail = edit.finish()
+            if tail and not self.stopped:
+                yield "audio", tail
+            self.timings.append({"write_sec": round(wrote - began, 2),
+                                 "first_sound_sec": round((first or time.monotonic()) - began, 2),
+                                 "by": "backup" if self.backup_only or self.failures else "eleven", "line": line})
+        finally:
+            self.stopped = False
+
+
+AnyVoice = HostVoice | WrittenHostVoice
+
+
 # --------------------------------------------------------------------------- hints
 
 _STOP_WORDS = {"the", "and", "for", "with", "that", "this", "from", "was", "were", "are", "its", "their", "than",
@@ -634,9 +1113,10 @@ _SAMPLE_SCENE = ("Question: \"What was quarterly revenue?\" Correct answer: \"18
                  "wrong answer, then the right answer.")
 
 
-def _sample_persona(sarcasm: int, name: str, style: str | None = None, manner: str | None = None) -> str:
+def _sample_persona(sarcasm: int, name: str, style: str | None = None, manner: str | None = None,
+                    tags: bool = False) -> str:
     return build_persona(name=name, game_title="the quiz", company="the company", sarcasm=sarcasm, style=style or None,
-                         manner=manner)
+                         manner=manner, tags=tags)
 
 
 async def sample_line(sarcasm: int, name: str) -> str:
@@ -649,9 +1129,9 @@ async def sample_audio(sarcasm: int, name: str, voice: str, *, quality: str = "s
                        style: str | None = None, manner: str | None = None) -> tuple[str, bytes]:
     """The same sample, spoken: returns (the words, a WAV file) so an admin can hear a voice."""
     words, pcm = "", bytearray()
-    model = voice_model({"voice_quality": quality})
-    async with HostVoice(_sample_persona(sarcasm, name, style, manner), voice, speak=True, model=model,
-                         pace=pace) as session:
+    host = {"voice_quality": quality, "pace": pace, "manner": manner or DEFAULT_MANNER, **resolve_voice(voice)}
+    persona = _sample_persona(sarcasm, name, style, manner, tags=host["engine"] == "eleven")
+    async with open_voice(persona, host, True) as session:
         async for kind, data in session.say(_SAMPLE_SCENE):
             if kind == "audio":
                 pcm.extend(data)  # type: ignore[arg-type]
@@ -680,7 +1160,7 @@ async def talk_note(run: dict, player: dict | None) -> str:
     lifelines = ", ".join(f"{kind} x{left}" for kind, left in (run["lifelines"] or {}).items() if left)
     if lifelines:
         facts.append(f"lifelines left: {lifelines}")
-    parts = [f"(Stage note, not spoken aloud: {name} just spoke to you; their words are in the audio that follows. "
+    parts = [f"(Stage note, not spoken aloud: {name} just spoke to you; {WORDS_IN_AUDIO}. "
              f"Game so far: {'; '.join(facts)}."]
     on_screen = (item is not None and item["answered_at"] is None and item["payload"].get("text")
                  and not (item["slot"] == "final" and item["wager"] is None) and not item["payload"].get("sealed"))

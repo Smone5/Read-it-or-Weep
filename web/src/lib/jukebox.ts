@@ -16,8 +16,12 @@ import { audioContext, onSoundChange, soundOn } from './sound'
 import { trace } from './trace'
 import type { PartyTrack } from './types'
 
-/** Where the game is: reading a question, between questions, on the results screen, or silent. */
-export type JukeboxLevel = 'think' | 'gap' | 'party' | 'out'
+/**
+ * Where the game is: reading a question ('think'), between things ('gap'), waiting for Next after the host ('wait',
+ * easing back to 'linger' if the player stays there), a streak ('swell'), a round's title card ('title'), the show's
+ * opening ('intro'), the results screen ('party'), or a "name that tune" clip ('out').
+ */
+export type JukeboxLevel = 'think' | 'gap' | 'wait' | 'linger' | 'swell' | 'title' | 'intro' | 'party' | 'out'
 
 /** How loud the organiser wants the music behind the questions. */
 export type JukeboxVolume = 'quiet' | 'medium' | 'loud'
@@ -33,18 +37,63 @@ export type JukeboxState = {
 }
 
 // Levels are the gain on songs that have each been brought to the same loudness first.
-const LEVELS: Record<JukeboxVolume, { think: number; gap: number }> = {
-  quiet: { think: 0.16, gap: 0.34 },
-  medium: { think: 0.28, gap: 0.5 },
-  loud: { think: 0.42, gap: 0.7 },
+// Out of the way while a question is on screen, so players can concentrate; back up between questions; a swell
+// for the big moments: the opening, each round's title card, a streak. (The organiser's calls, 2026-11-20: first
+// "quieter, sort of background unless they want to turn it up"; then "still a little loud in the question" and
+// "come up later, sort of between questions or key parts of the game".) "think" now sits barely above the level
+// the music drops to under the host's voice.
+// "intro" is the show's first seconds, before the host speaks: loud, on its own, like a theme. (The organiser,
+// 2026-11-20: "start with loud music, then get quiet as the host speaks. The music can be louder in the background
+// when the host is talking or between questions." Until then the first song faded in and reached its peak just as
+// the host started, so there was no loud start at all.)
+// After an answer: "gap" while the result is shown and the host reacts, then "wait" - up - once he has finished
+// and the player is deciding when to tap Next. (The organiser, 2026-11-20: "make the music what is now at the end
+// of the question, but raise it while the user is waiting to push next.") If the player stays on the answer, the
+// music eases back down to the "gap" level ("linger": "...then fade away, but be abrupt when they click next").
+// A round's title card is the loudest moment after the opening: louder than the wait for Next (a game-show producer's
+// review, 2026-11-20: "a round's title should be louder than the wait between questions"). A streak swells a little less.
+const LEVELS: Record<JukeboxVolume, { think: number; gap: number; wait: number; swell: number; title: number; intro: number }> = {
+  quiet: { think: 0.05, gap: 0.26, wait: 0.5, swell: 0.48, title: 0.6, intro: 0.6 },
+  medium: { think: 0.08, gap: 0.42, wait: 0.8, swell: 0.7, title: 0.85, intro: 0.85 },
+  loud: { think: 0.13, gap: 0.6, wait: 1, swell: 0.92, title: 1, intro: 1 },
 }
 const PARTY = 0.45 // a bed to read your results by, not a performance
-const UNDER_HOST = 0.06 // measured: keeps the music about 12 dB under a host voice, which is where speech stays easy to follow
+// Under the host's voice the music dips, but stays audible: the organiser asked for it "a little louder ... not so
+// loud you can't understand the host" (2026-11-20). Measured in a game, voice against music: at 0.06 (before) his
+// voice was about 20 dB above the music; at 0.14, 13 dB; 0.17 leaves about 10 dB - plainly there, still clear. The
+// songs have singers in them, which compete with speech far more than an instrumental would: keep 10 dB.
+// Since 2026-11-20 the music is also *carved* under him rather than only turned down (see CARVE below), which leaves
+// room for it to sit higher. Measured over a whole game at 0.30 with the carve: his voice a median 8.6 dB above the
+// music, 11 dB in the 1-4 kHz band where speech is understood - just short of the 12 dB a broadcast mixer asks for,
+// so it sits at 0.26: still fuller than the 0.22 before the carve, and clearer.
+const UNDER_HOST = 0.26 // (0.17 left his voice 10 dB above the music; the organiser wanted the music up a little more)
+// The big moments keep the music up under the host, so the show's opening and a round's title card sound like a
+// broadcast. (The organiser: "music needs to be louder when the game starts and the host is speaking, but then get
+// quieter for the question.") Measured in a game: at 0.12 it sat only 1.5 dB above the question level; at 0.22 it is
+// clearly up with his voice about 8 dB above it; at 0.28 his voice was only 6 dB above it - too close for the opening,
+// where he is explaining the rules over songs with singers in them.
+const UNDER_HOST_BIG = 0.26
+// Under the show's opening the music goes further down, and glides there (see ride): the theme hands over to the
+// host. ("Need the music to fade out and the host to fade in more in the intro.")
+const UNDER_HOST_INTRO = 0.14
+// Turning the music up with ♫ raises it under the host too, but only a little (about 2 dB), so he stays clear.
+const UNDER_HOST_PLAYER_MAX = 1.26
+// The carve: while his voice sounds, the music loses some of the band where speech is understood (consonants,
+// 1.5-4 kHz - also where a phone speaker is loudest and where the songs' singers sit). That buys more clarity than
+// turning the whole song down would, so the song can stay fuller underneath him.
+const CARVE_HZ = 2500
+const CARVE_Q = 0.8
+const CARVE_DB = -8
 const TARGET_RMS = 0.16 // every song is brought to about this loudness, so an old recording is not lost behind a new one
+const PEAK_ROOM = 0.98 // ...but never so far that its loudest moment would clip
+// After his last word the music waits a moment before coming back up: whatever the game does next (a question,
+// silence for a clip, the title's button) decides where it goes, so it never starts up only to be pulled down again.
+const RELEASE_HOLD_MS = 150
 
 const CROSSFADE_SEC = 3 // the next song comes in over the last three seconds of this one
 const SKIP_FADE_SEC = 0.7
 const SWELL_SEC = 1.6 // from silence: it arrives, it does not pounce
+const INTRO_SEC = 0.3 // ...except the show's opening and a round's title, which hit
 const LOOKAHEAD_SEC = 1.5 // the next song is lined up this long before it is due
 const TICK_MS = 250
 const REST_AFTER_MS = 1500 // faded right down, a song is stopped rather than left running unheard
@@ -63,6 +112,11 @@ let on = false
 let paused = false
 let needsTap = false
 let master: GainNode | null = null
+let carve: BiquadFilterNode | null = null
+let carved = false
+let voiceWas = false
+let voiceEndedAt = -Infinity
+let releaseTimer = 0
 let riding = 0 // the level the master gain was last sent towards
 let current: Voice | null = null
 let leaving: Voice[] = [] // songs fading out under the one that replaced them
@@ -78,44 +132,75 @@ const heard = new Set<string>()
 const decoded = new Map<string, Promise<Decoded | null>>()
 const listeners = new Set<(state: JukeboxState) => void>()
 
-// --------------------------------------------------------------------------- the player's own switch
+// --------------------------------------------------------------------------- the player's own volume
+// Each player can turn the background music up or down for themselves, remembered on their device. It
+// scales the organiser's setting rather than replacing it: 50 is the music exactly as the organiser set it,
+// 0 is off, 100 is about four times as loud (never past full scale). The host and the sound effects are
+// not affected, and the music still dips under the host and steps aside for a "name that tune" clip.
 
-const KEY = 'quiz.music'
-const musicListeners = new Set<(on: boolean) => void>()
+const KEY = 'quiz.music' // before there was a volume: 'on' | 'off'
+const VOLUME_KEY = 'quiz.music.volume'
+const AS_SET = 50
+const volumeListeners = new Set<(level: number) => void>()
 
-let musicWanted = (() => {
+const clampLevel = (value: number) => Math.max(0, Math.min(100, Math.round(Number.isFinite(value) ? value : AS_SET)))
+
+let musicLevel = (() => {
   try {
-    return localStorage.getItem(KEY) !== 'off'
+    const saved = localStorage.getItem(VOLUME_KEY)
+    if (saved !== null) return clampLevel(Number(saved))
+    return localStorage.getItem(KEY) === 'off' ? 0 : AS_SET
   } catch {
-    return true
+    return AS_SET
   }
 })()
+let lastHeard = musicLevel || AS_SET
 
-/** Background music can be switched off by itself, leaving the host and the sound effects. */
-export function musicOn(): boolean {
-  return musicWanted
+/** The player's music volume, 0 (off) to 100; 50 is as the organiser set it. */
+export function musicVolume(): number {
+  return musicLevel
 }
 
-export function setMusicOn(value: boolean) {
-  musicWanted = value
+export function setMusicVolume(value: number) {
+  musicLevel = clampLevel(value)
+  if (musicLevel > 0) lastHeard = musicLevel
   try {
-    localStorage.setItem(KEY, value ? 'on' : 'off')
+    localStorage.setItem(VOLUME_KEY, String(musicLevel))
   } catch {
     /* ignore */
   }
-  musicListeners.forEach((listener) => listener(value))
+  volumeListeners.forEach((listener) => listener(musicLevel))
+  trace('jukebox.volume', { level: musicLevel })
   sync()
 }
 
+export function onMusicVolumeChange(listener: (level: number) => void): () => void {
+  volumeListeners.add(listener)
+  return () => volumeListeners.delete(listener)
+}
+
+/** How much the player's volume scales the organiser's: squared, so the slider feels even to the ear. */
+function playerScale(): number {
+  return (musicLevel / AS_SET) ** 2
+}
+
+/** Background music can be switched off by itself, leaving the host and the sound effects. */
+export function musicOn(): boolean {
+  return musicLevel > 0
+}
+
+export function setMusicOn(value: boolean) {
+  setMusicVolume(value ? lastHeard : 0)
+}
+
 export function onMusicChange(listener: (on: boolean) => void): () => void {
-  musicListeners.add(listener)
-  return () => musicListeners.delete(listener)
+  return onMusicVolumeChange((level) => listener(level > 0))
 }
 
 // --------------------------------------------------------------------------- state
 
 function wanted(): boolean {
-  return on && level !== 'out' && !paused && soundOn() && musicWanted && queue.length > 0
+  return on && level !== 'out' && !paused && soundOn() && musicLevel > 0 && queue.length > 0
 }
 
 function snapshot(): JukeboxState {
@@ -137,34 +222,111 @@ export function onJukeboxChange(listener: (state: JukeboxState) => void): () => 
 
 function goal(): number {
   if (!wanted()) return 0
-  const base = level === 'party' ? PARTY : LEVELS[volume][level === 'think' ? 'think' : 'gap']
-  return voiceIsOver() ? Math.min(base, UNDER_HOST) : base
+  const levels = LEVELS[volume]
+  const base =
+    level === 'party'
+      ? PARTY
+      : level === 'think' || level === 'wait' || level === 'swell' || level === 'title' || level === 'intro'
+        ? levels[level]
+        : levels.gap // 'gap' and 'linger'
+  const scale = playerScale()
+  if (!voiceIsOver()) return Math.min(1, base * scale)
+  const duck = level === 'intro' ? UNDER_HOST_INTRO : level === 'swell' || level === 'title' ? UNDER_HOST_BIG : UNDER_HOST
+  return Math.min(1, base * scale, duck * Math.min(scale, UNDER_HOST_PLAYER_MAX))
 }
 
-/** Send the volume towards where it should be now: down quickly, back up slowly. */
+/** Seconds to cover about two thirds of the way to a new level. Each kind of move has its own speed. */
+function settleFor(target: number): number {
+  if (target === 0) return level === 'out' ? 0.08 : 0.3 // a music break cuts the song for the clip; anything else fades
+  if (target < riding) {
+    if (voiceIsOver()) return level === 'intro' ? 0.35 : 0.07 // the opening hands over to the host in a glide; a duck is quick
+    if (level === 'linger') return 1.5 // the player is lingering on the answer: the music eases away
+    if (level === 'party') return 0.5 // from the finale down to the after-party bed
+    return 0.07 // a question arriving, or Next: out of the way at once
+  }
+  if (level === 'intro') return 0.08 // the theme hits
+  if (level === 'title') return 0.12 // ...and so does a round's title, after its sting
+  return 0.5 // otherwise the music comes up gently
+}
+
+/** The carve under the host's voice: in as he starts, out again (more slowly) once he has finished. */
+function carveRide() {
+  if (!carve) return
+  const want = voiceIsOver()
+  if (want === carved) return
+  carved = want
+  const now = audioContext().currentTime
+  carve.gain.cancelScheduledValues(now)
+  carve.gain.setTargetAtTime(want ? CARVE_DB : 0, now, want ? (level === 'intro' ? 0.35 : 0.07) : 0.4)
+}
+
+/** Send the volume towards where it should be now. */
 function ride() {
   if (!master) return
+  carveRide()
   const context = audioContext()
   const target = goal()
   if (target === riding) return
-  const settle = target === 0 ? 0.3 : target < riding ? 0.07 : 0.5 // seconds to cover about two thirds of the distance
+  if (target > riding) {
+    const wait = RELEASE_HOLD_MS - (performance.now() - voiceEndedAt)
+    if (wait > 0) {
+      window.clearTimeout(releaseTimer)
+      releaseTimer = window.setTimeout(ride, wait)
+      return
+    }
+  }
+  const settle = settleFor(target)
   master.gain.cancelScheduledValues(context.currentTime)
   master.gain.setTargetAtTime(target, context.currentTime, settle)
   riding = target
+  // The exact level set, and how fast (for checks without ears).
+  trace('jukebox.gain', { level, target: Math.round(target * 1000) / 1000, settle, under: voiceIsOver() })
 }
 
 // --------------------------------------------------------------------------- songs
 
 function loudnessGain(buffer: AudioBuffer): number {
-  const samples = buffer.getChannelData(0)
+  // Both channels: a 1960s stereo mix can have whole instruments on one side only.
   let sum = 0
   let count = 0
-  for (let i = 0; i < samples.length; i += 16) {
-    sum += samples[i] * samples[i]
-    count += 1
+  let peak = 0
+  for (let channel = 0; channel < Math.min(2, buffer.numberOfChannels); channel += 1) {
+    const samples = buffer.getChannelData(channel)
+    for (let i = 0; i < samples.length; i += 4) {
+      const value = samples[i]
+      if (i % 16 === 0) {
+        sum += value * value
+        count += 1
+      }
+      const size = value < 0 ? -value : value
+      if (size > peak) peak = size
+    }
   }
   const rms = Math.sqrt(sum / Math.max(1, count))
-  return rms > 0.001 ? Math.min(1.4, Math.max(0.4, TARGET_RMS / rms)) : 1
+  const gain = rms > 0.001 ? Math.min(1.4, Math.max(0.4, TARGET_RMS / rms)) : 1
+  return peak > 0 ? Math.min(gain, PEAK_ROOM / peak) : gain
+}
+
+/**
+ * An equal-power fade (a quarter sine), drawn as short straight segments: two songs crossing keep the
+ * same loudness all the way through, where a straight-line crossfade dips by 3 dB in the middle.
+ * (Segments rather than a value curve, because a curve cannot be cut short if the player skips.)
+ */
+function powerFade(param: AudioParam, from: number, to: number, at: number, seconds: number) {
+  const steps = 8
+  param.setValueAtTime(from, at)
+  for (let step = 1; step <= steps; step += 1) {
+    const x = step / steps
+    // In along sin, out along cos: at the midpoint each is at 0.71 of its level, so their powers add up to one.
+    const value = to > from ? from + (to - from) * Math.sin((x * Math.PI) / 2) : to + (from - to) * Math.cos((x * Math.PI) / 2)
+    param.linearRampToValueAtTime(value, at + seconds * x)
+  }
+}
+
+/** How far a song's own fade-in had got by a given moment (it rises along a quarter sine). */
+function reachedAt(voice: Voice, at: number): number {
+  const x = Math.min(1, Math.max(0, (at - voice.startsAt) / voice.fadeIn))
+  return voice.level * Math.sin((x * Math.PI) / 2)
 }
 
 /** Fetch a song and decode it; resolves null if it cannot be played. */
@@ -215,7 +377,14 @@ function begin(track: PartyTrack, song: Decoded, fadeSec: number, notBefore = 0)
   if (!master) {
     master = context.createGain()
     master.gain.value = 0
-    master.connect(context.destination)
+    carve = context.createBiquadFilter()
+    carve.type = 'peaking'
+    carve.frequency.value = CARVE_HZ
+    carve.Q.value = CARVE_Q
+    carve.gain.value = 0
+    carved = false
+    master.connect(carve)
+    carve.connect(context.destination)
     riding = 0
   }
   const at = Math.max(context.currentTime + 0.06, notBefore)
@@ -224,8 +393,7 @@ function begin(track: PartyTrack, song: Decoded, fadeSec: number, notBefore = 0)
   const source = context.createBufferSource()
   source.buffer = song.buffer
   const gain = context.createGain()
-  gain.gain.setValueAtTime(0, at)
-  gain.gain.linearRampToValueAtTime(song.gain, at + fade)
+  powerFade(gain.gain, 0, song.gain, at, fade)
   source.connect(gain)
   gain.connect(master)
   const voice: Voice = { source, gain, track, level: song.gain, startsAt: at, fadeIn: fade, endsAt: at + song.buffer.duration }
@@ -239,10 +407,9 @@ function begin(track: PartyTrack, song: Decoded, fadeSec: number, notBefore = 0)
   source.start(at)
   if (old) {
     // Wherever the old song's own fade-in had got to, it leaves from there.
-    const reached = old.level * Math.min(1, Math.max(0, (at - old.startsAt) / old.fadeIn))
+    const reached = reachedAt(old, at)
     old.gain.gain.cancelScheduledValues(at)
-    old.gain.gain.setValueAtTime(reached, at)
-    old.gain.gain.linearRampToValueAtTime(0, at + fade)
+    powerFade(old.gain.gain, reached, 0, at, fade)
     old.source.onended = () => {
       old.source.disconnect()
       old.gain.disconnect()
@@ -325,7 +492,7 @@ function sync() {
   window.clearTimeout(restTimer)
   ride()
   if (wanted()) {
-    if (!current && !busy) void advance(SWELL_SEC)
+    if (!current && !busy) void advance(level === 'intro' || level === 'title' ? INTRO_SEC : SWELL_SEC)
   } else if (current || leaving.length || busy) {
     restTimer = window.setTimeout(() => {
       if (wanted()) return
@@ -342,9 +509,17 @@ function tick() {
   if (audioContext().currentTime >= due - LOOKAHEAD_SEC) void advance(CROSSFADE_SEC, due)
 }
 
+/** A voice started or stopped: note when it stopped (see RELEASE_HOLD_MS), then move the music. */
+function onVoice() {
+  const over = voiceIsOver()
+  if (voiceWas && !over) voiceEndedAt = performance.now()
+  voiceWas = over
+  ride()
+}
+
 function listen() {
   if (timer) return
-  stopListening = [onVoiceOver(ride), onSoundChange(sync)]
+  stopListening = [onVoiceOver(onVoice), onSoundChange(sync)]
   timer = window.setInterval(tick, TICK_MS)
 }
 

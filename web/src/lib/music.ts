@@ -66,14 +66,15 @@ export function unlockMusic() {
 // --------------------------------------------------------------------------- riding the volume
 // The host and the music never compete. The host introduces a music break *before* its clip
 // starts, so a clip normally swells straight up to full. If he speaks while one is playing – his
-// reaction to the answer, or a reply to the player – the clip dips to a bed under him and climbs
+// reaction to the answer, or a reply to the player – the clip dips to a bed under him as his voice
+// starts (not while his line is still being written: the song is the answer's moment) and climbs
 // slowly back once he has finished. Moving on fades it out rather than cutting it dead.
 
 const FULL = 0.9
 const BED = 0.14
 const SWELL_PER_SECOND = 1.2 // a new clip: silence to full in under a second
 const RETURN_PER_SECOND = 0.5 // after the host: the slow rise back up
-const FALL_PER_SECOND = 4 // dip almost at once when the host starts
+const FALL_PER_SECOND = 6 // dip almost at once when the host starts
 
 let ducked = false
 let fadingOut = false
@@ -84,10 +85,8 @@ let timer = 0
 let lastTick = 0
 let adjustable: boolean | null = null
 
-// The jukebox (the music behind the questions) follows a different signal from the clip above. A clip
-// steps back as soon as the host is *about* to speak, so that his first word is never fought. The
-// jukebox is what fills the second or two before he starts, so it dips only when a voice is actually
-// sounding: his, or the player's on the microphone.
+// The jukebox (the music behind the questions) follows the same signal as the clip above: it dips only
+// when a voice is actually sounding - his, or the player's on the microphone.
 
 let voiceOver = false
 const voiceListeners = new Set<() => void>()

@@ -162,7 +162,7 @@ async def _serve(websocket: WebSocket, *, game: str, quiz: dict, player: dict | 
     def unwanted(number: int) -> bool:
         return bool(number) and (number <= floor["void"] or number in gone)
 
-    async def cut_off(voice_session: host_service.HostVoice) -> None:
+    async def cut_off(voice_session: host_service.AnyVoice) -> None:
         if floor["speaking"] and not floor["cut"]:
             floor["cut"] = True
             await voice_session.interrupt()
@@ -175,7 +175,7 @@ async def _serve(websocket: WebSocket, *, game: str, quiz: dict, player: dict | 
         floor["seen"] = max(floor["seen"], number)
         return number
 
-    async def reader(voice_session: host_service.HostVoice) -> None:
+    async def reader(voice_session: host_service.AnyVoice) -> None:
         try:
             while True:
                 message = await websocket.receive()
@@ -226,8 +226,7 @@ async def _serve(websocket: WebSocket, *, game: str, quiz: dict, player: dict | 
 
     reader_task: asyncio.Task | None = None
     try:
-        async with host_service.HostVoice(instructions, host["voice"], speak, model=host_service.voice_model(host),
-                                          pace=host.get("pace", "snappy")) as voice_session:
+        async with host_service.open_voice(instructions, host, speak) as voice_session:
             reader_task = asyncio.create_task(reader(voice_session))
             await websocket.send_json({"type": "ready", "voice": speak, "talk": can_talk,
                                        "sampleRate": host_service.SAMPLE_RATE, "name": host["name"]})
@@ -265,6 +264,7 @@ async def _serve(websocket: WebSocket, *, game: str, quiz: dict, player: dict | 
                 _count_line(game)
                 floor.update(speaking=number, cut=False)
                 await websocket.send_json({"type": "line.start", "id": number, "cue": cue})
+                words: list[str] = []
                 try:
                     async for piece, data in stream:
                         if unwanted(number):
@@ -273,10 +273,15 @@ async def _serve(websocket: WebSocket, *, game: str, quiz: dict, player: dict | 
                             if not talk["open"]:           # never talk over the contestant
                                 await websocket.send_bytes(data)
                         else:
+                            words.append(str(data))
                             await websocket.send_json({"type": "line.text", "id": number, "delta": data})
                 finally:
                     was_cut, floor["speaking"] = floor["cut"], 0
                 await websocket.send_json({"type": "line.end", "id": number, "cut": was_cut})
+                if cue == "welcome" and run_row is not None and words:
+                    # Kept so that the player's next opening can be different (see host_service._welcome).
+                    await db.execute("update runs set host_opening = $2 where id = $1", run_row["id"],
+                                     " ".join("".join(words).split())[:600])
     except WebSocketDisconnect:
         pass
     except Exception as exc:  # noqa: BLE001 – the host is a garnish; the game must carry on without it

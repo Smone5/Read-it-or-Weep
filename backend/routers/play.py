@@ -1,19 +1,21 @@
 """Player-facing API: look up a quiz, join it, play a game."""
 from __future__ import annotations
 
+import logging
 import re
 import time
 from collections import defaultdict, deque
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field
 
 import db
 from dependencies import current_player, optional_player
 from security import TokenError, issue_player_token, read_admin_token
-from services import bank, engine, host_service, music_service, settings_store, stats
+from services import eleven, bank, engine, favorites, host_samples, host_service, music_service, settings_store, stats
 from services.settings_store import MODES
 
+_log = logging.getLogger("play")
 router = APIRouter(prefix="/api", tags=["play"])
 
 # A small in-memory brake on abuse. Generous, because a whole office can share one IP address.
@@ -56,13 +58,15 @@ async def find_quiz(slug: str, admin_token: str | None = None) -> dict:
 
 
 def _host_choices(host: dict) -> list[dict]:
-    """The hosts a player may pick from, described relative to each other (deeper / brighter voice)."""
+    """The hosts a player may pick from. An ElevenLabs voice is described in a few words ("British wit");
+    the others relative to each other (deeper / brighter voice)."""
     hosts = host["hosts"]
     if not host["player_can_choose"] or len(hosts) < 2:
         return []
     pitch = {c["id"]: settings_store.VOICE_FACTS.get(c["voice"], (180, 6))[0] for c in hosts}
     low, high = min(pitch.values()), max(pitch.values())
     return [{"id": c["id"], "name": c["name"],
+             "label": eleven.BY_ID[c["voice"]].short if eleven.is_eleven(c["voice"]) else None,
              "register": "deeper" if pitch[c["id"]] == low and low != high else (
                  "brighter" if pitch[c["id"]] == high and low != high else "middle")} for c in hosts]
 
@@ -126,6 +130,7 @@ async def _player_view(player: dict, quiz: dict, rules: dict) -> dict:
     best = await db.fetch("select mode, max(score) as score from runs where player_id = $1 and quiz_id = $2"
                           " and status = 'completed' group by mode", player["id"], quiz["id"])
     return {"id": player["id"], "name": player["name"], "email": player["email"], "team": player["team"],
+            "favoriteArtist": player.get("favorite_artist"),
             "readiness": await stats.readiness(quiz["id"], player["id"], int(rules["ready_threshold"])),
             "best": {b["mode"]: b["score"] for b in best},
             "unfinishedRun": {"id": unfinished["id"], "mode": unfinished["mode"]} if unfinished else None}
@@ -145,6 +150,53 @@ async def upsert_player(name: str, email: str, team: str | None) -> dict:
         " on conflict (lower(email)) do update set name = excluded.name,"
         " team = coalesce(excluded.team, players.team), last_seen_at = now() returning *",
         email.strip().lower(), name, team or None)
+
+
+@router.get("/quiz/{slug}/hosts/{host_id}/sample")
+async def host_sample(slug: str, host_id: str, request: Request, x_admin_token: str | None = Header(default=None),
+                      if_none_match: str | None = Header(default=None)) -> Response:
+    """A host character introducing themselves, so a player can choose a host by ear.
+
+    Recorded the first time anyone asks, then kept; the other hosts are recorded in the background so the
+    next tap is instant. The address stays the same when a host changes, so the browser checks back (ETag).
+    """
+    throttle(request, "host-sample", 120)
+    await find_quiz(slug, x_admin_token)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,60}", host_id):
+        raise HTTPException(404, "There is no such host.")
+    try:
+        found = await host_samples.sample(host_id)
+    except Exception as exc:  # noqa: BLE001 – the voice services can be down; the lobby carries on without it
+        _log.warning("host sample for %s failed: %s", host_id, exc)
+        raise HTTPException(503, "That host cannot be heard right now. Try again in a minute.") from exc
+    if found is None:
+        raise HTTPException(404, "There is no such host.")
+    host_samples.warm_soon()
+    tag = f'"{found["key"]}"'
+    headers = {"ETag": tag, "Cache-Control": "no-cache"}
+    if if_none_match == tag:
+        return Response(status_code=304, headers=headers)
+    return Response(found["audio"], media_type=found["mime"], headers=headers)
+
+
+class FavouriteBody(BaseModel):
+    artist: str | None = Field(default=None, max_length=80)
+
+
+@router.put("/me/favourite-artist")
+async def set_favourite_artist(body: FavouriteBody, request: Request, player: dict = Depends(current_player)) -> dict:
+    """The player's favourite artist: now and then a song from them, or from artists like them, plays behind their
+    games. Empty clears it. The name is checked against the music catalogue and kept as the catalogue spells it."""
+    throttle(request, "favourite", 30)
+    name = " ".join((body.artist or "").split())
+    if not name:
+        await db.execute("update players set favorite_artist = null where id = $1", player["id"])
+        return {"artist": None, "similar": []}
+    found = await favorites.pool(name)
+    if found is None:
+        raise HTTPException(404, "We could not find that artist. Check the spelling, or try another.")
+    await db.execute("update players set favorite_artist = $2 where id = $1", player["id"], found["artist"])
+    return {"artist": found["artist"], "similar": found["similar"][:4]}
 
 
 @router.post("/quiz/{slug}/join")
@@ -259,6 +311,7 @@ async def run_soundtrack(run_id: str, player: dict = Depends(current_player)) ->
     music_service.ensure_decade(decade)
     asked = await db.fetch("select music_track_id from run_items where run_id = $1 and music_track_id is not null", run_id)
     tracks = await music_service.soundtrack(decade, run["id"], {r["music_track_id"] for r in asked})
+    tracks = favorites.mix(tracks, await favorites.for_player(player["id"]), run["id"], decade)
     return {"decade": decade, "tracks": tracks, "volume": rules["soundtrack_volume"]}
 
 

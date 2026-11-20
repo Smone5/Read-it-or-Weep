@@ -38,8 +38,16 @@ type Line = {
   nextStart: number
   /** The server has sent all of it. */
   complete: boolean
-  /** Some of it was actually played out loud. */
+  /** Some of it was actually played out loud (or is scheduled to be). */
   heard: boolean
+  /** His voice has actually started: the words appear, and the music is down, from this moment. */
+  live: boolean
+  /** The opening only: his voice is about to start, and the music has begun its glide down to make room. */
+  leadIn: boolean
+  leadTimer?: number
+  /** Not to be heard before this time (ms since 1970): the show's opening lets the music play first. */
+  notBefore?: number
+  speakTimer?: number
   /** No longer wanted: ignore whatever else arrives for it. */
   dropped: boolean
   readTimer?: number
@@ -53,6 +61,13 @@ type Incoming = { type: string; id?: number; cue?: string; delta?: string; voice
 const START_TIMEOUT_MS = 5000 // a line that has not begun by now would arrive too late to be wanted
 const CONNECT_TIMEOUT_MS = 8000 // ...with more patience for the very first line, while the host is still arriving
 const FADE_SEC = 0.12 // cutting the host off: a quick fade, not a click
+// The opening's handover from the theme to the host. The music starts down LEAD_IN_SEC before his first word, so it
+// is nearly out of the way when he speaks, and his voice comes up from about half volume: a crossfade you can hear,
+// without a first word buried under the music. (Reviewed 2026-11-20: starting his voice at 15% while the music was
+// still coming down left his first two words about 12 dB under it.)
+const LEAD_IN_SEC = 1.2
+const VOICE_FADE_FROM = 0.45
+const VOICE_FADE_SEC = 0.7
 // If the connection drops mid-game the host comes back by himself. The game never waits for him
 // meanwhile: with no connection there is nobody to ask, so title cards simply move on.
 const RECONNECT_WAITS_MS = [1000, 2000, 4000, 8000, 15000]
@@ -75,6 +90,7 @@ export class HostVoice {
   private abandoned = new Set<number>() // single lines given up on
   private awaited = new Map<number, number>() // asked for, not started yet -> its give-up timer
   private queue: { id: number; text: string }[] = [] // asked for while still connecting
+  private holds = new Map<number, number>() // line id -> not to be heard before this time (see cue)
   private arriving: Line | null = null // the line whose pieces are coming in now
   private sounding = new Set<Line>() // lines that have started and not finished playing
   private quiet: (() => void)[] = []
@@ -156,9 +172,25 @@ export class HostVoice {
     return new Promise((resolve) => this.quiet.push(resolve))
   }
 
-  /** Ask the host to react. Only ids are sent; the server looks up what actually happened. */
-  cue(cue: string, itemId?: string) {
-    this.request({ type: 'cue', cue, itemId }, cue)
+  /**
+   * Ask the host to react. Only ids are sent; the server looks up what actually happened. With `notBefore`
+   * the line is written at once but not heard before that moment (the opening: the music plays first).
+   */
+  cue(cue: string, itemId?: string, options: { notBefore?: number } = {}): number {
+    const id = this.request({ type: 'cue', cue, itemId }, cue)
+    if (id && options.notBefore) this.holds.set(id, options.notBefore)
+    return id
+  }
+
+  /**
+   * Move a held line's moment (see `cue`): later, when the opening music started late; or 0 to let it go as soon as
+   * it is ready, when there is no music to wait for. It only counts until the line's first sound has been scheduled.
+   */
+  holdUntil(at: number) {
+    for (const id of this.holds.keys()) this.holds.set(id, at)
+    const line = this.arriving
+    if (line && !line.heard && line.notBefore) line.notBefore = at
+    trace('host.hold', at ? { inMs: Math.round(at - Date.now()) } : { released: true })
   }
 
   /** The game stopped waiting for a line that had not begun. Counts against the connection's health. */
@@ -329,7 +361,8 @@ export class HostVoice {
     } else if (message.type === 'line.start') {
       this.noLongerAwaited(id)
       if (id === this.replyId) this.listener.onTalk?.('idle', this.canTalk)
-      const line: Line = { id, text: '', gain: null, sources: new Set(), nextStart: 0, complete: false, heard: false, dropped: !this.wanted(id) || this.talking, seconds: 0, gaps: 0 }
+      const line: Line = { id, text: '', gain: null, sources: new Set(), nextStart: 0, complete: false, heard: false, live: false, leadIn: false, notBefore: this.holds.get(id), dropped: !this.wanted(id) || this.talking, seconds: 0, gaps: 0 }
+      this.holds.delete(id)
       this.arriving = line
       trace('host.start', { id, cue: message.cue, dropped: line.dropped })
       if (!line.dropped) {
@@ -349,7 +382,8 @@ export class HostVoice {
       const line = this.arriving
       if (line && !line.dropped && line.id === id) {
         line.text += message.delta ?? ''
-        this.setLine(line.text)
+        // A held line shows its words when he starts saying them (at once if nothing will be heard).
+        if (line.live || !line.notBefore || !this.audible()) this.setLine(line.text)
       }
     } else if (message.type === 'line.end') {
       const line = this.arriving
@@ -392,10 +426,13 @@ export class HostVoice {
     const source = context.createBufferSource()
     source.buffer = buffer
     source.connect(line.gain)
-    // Start a new line a beat late so brief network hiccups never leave a gap mid-sentence;
-    // after that each chunk begins exactly where the previous one ends.
+    // Start a new line a beat late so brief network hiccups never leave a gap mid-sentence; after that each chunk
+    // begins where the previous one ends. A held line (the opening) waits for its moment, and always leaves the
+    // music time to get out of the way first.
     const onTime = line.nextStart > context.currentTime
-    const startAt = onTime ? line.nextStart : context.currentTime + 0.12
+    const held = !line.heard && Boolean(line.notBefore)
+    const hold = held ? Math.max(LEAD_IN_SEC, ((line.notBefore ?? 0) - Date.now()) / 1000) : 0
+    const startAt = onTime ? line.nextStart : context.currentTime + Math.max(0.12, hold)
     if (!onTime && line.heard) line.gaps += 1
     source.start(startAt)
     line.nextStart = startAt + buffer.duration
@@ -403,10 +440,30 @@ export class HostVoice {
     line.sources.add(source)
     if (!line.heard) {
       line.heard = true
-      this.listener.onSpeaking(true)
-      duckEffects(true)
-      trace('host.audio', { id: line.id })
-      this.mix() // his voice is about to sound: the soundtrack dips now, not before
+      if (held) {
+        // The opening fades in over the music rather than starting at full: a handover.
+        line.gain.gain.setValueAtTime(VOICE_FADE_FROM, startAt)
+        line.gain.gain.linearRampToValueAtTime(1, startAt + VOICE_FADE_SEC)
+      }
+      const begin = () => {
+        if (line.dropped) return
+        line.live = true
+        this.listener.onSpeaking(true)
+        duckEffects(true)
+        trace('host.audio', { id: line.id })
+        this.setLine(line.text)
+        this.mix() // his voice is about to sound: the soundtrack dips now, not before
+      }
+      if (held) {
+        const ahead = (startAt - context.currentTime) * 1000
+        line.leadTimer = window.setTimeout(() => {
+          if (line.dropped) return
+          line.leadIn = true
+          trace('host.leadin', { id: line.id })
+          this.mix() // the music starts its glide down now, so it is out of the way by his first word
+        }, Math.max(0, ahead - LEAD_IN_SEC * 1000))
+        line.speakTimer = window.setTimeout(begin, Math.max(0, ahead))
+      } else begin()
     }
     source.onended = () => {
       line.sources.delete(source)
@@ -420,6 +477,8 @@ export class HostVoice {
   private finish(line: Line) {
     if (!this.sounding.delete(line)) return
     window.clearTimeout(line.readTimer)
+    window.clearTimeout(line.speakTimer)
+    window.clearTimeout(line.leadTimer)
     trace('host.done', { id: line.id, words: line.text.split(/\s+/).filter(Boolean).length, seconds: Math.round(line.seconds * 10) / 10, gaps: line.gaps, text: line.text })
     if (this.sounding.size === 0) {
       this.listener.onSpeaking(false)
@@ -442,13 +501,15 @@ export class HostVoice {
     window.clearTimeout(this.clearTimer)
     this.listener.onSpeaking(false)
     this.setLine('')
-    duckEffects(false)
+    duckEffects(false, true) // he was cut off: whatever plays next (the answer's sting) plays at full at once
     this.settled()
   }
 
   private drop(line: Line) {
     line.dropped = true
     window.clearTimeout(line.readTimer)
+    window.clearTimeout(line.speakTimer)
+    window.clearTimeout(line.leadTimer)
     const gain = line.gain
     if (!gain) return
     const now = gain.context.currentTime
@@ -473,14 +534,13 @@ export class HostVoice {
   }
 
   /**
-   * A "name that tune" clip stays down for as long as the host (or the player, on the microphone) has
-   * the floor, including while his line is on its way. The soundtrack is what fills that wait, so it
-   * dips only while a voice can actually be heard.
+   * The music - the soundtrack and a "name that tune" clip alike - dips only while a voice can actually be heard
+   * (or, at the opening, is about to be). The second or two while his line is being written stays music.
    */
   private mix() {
-    duckMusic(this.busy)
     let heard = this.talking
-    for (const line of this.sounding) if (line.heard && !line.dropped) heard = true
+    for (const line of this.sounding) if ((line.live || line.leadIn) && !line.dropped) heard = true
+    duckMusic(heard)
     setVoiceOver(heard)
   }
 

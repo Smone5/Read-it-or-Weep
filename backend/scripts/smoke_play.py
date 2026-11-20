@@ -12,6 +12,7 @@ import asyncio
 import json
 import random
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -136,6 +137,23 @@ async def main() -> None:
             info = (await client.get(f"/api/quiz/{slug}")).json()
             check(info["quiz"]["ready"], f"quiz '{info['quiz']['title']}' is ready with {info['quiz']['questions']} questions")
 
+            print("== hearing the hosts before choosing ==")
+            # Recorded once and kept: after the first run of this test these cost nothing.
+            for choice in info["branding"]["host"]["choices"]:
+                began = time.monotonic()
+                r = await client.get(f"/api/quiz/{slug}/hosts/{choice['id']}/sample")
+                took = time.monotonic() - began
+                check(r.status_code == 200 and r.headers["content-type"] in ("audio/mpeg", "audio/wav") and len(r.content) > 8000,
+                      f"{choice['name']} ({choice.get('label') or choice['register']}) can be heard: "
+                      f"{r.headers.get('content-type')}, {len(r.content) // 1024} KB, {took:.1f}s")
+                if r.status_code == 200:
+                    again = await client.get(f"/api/quiz/{slug}/hosts/{choice['id']}/sample",
+                                             headers={"If-None-Match": r.headers["etag"]})
+                    check(again.status_code == 304, f"  and the browser's copy is used the second time ({again.status_code})")
+            check((await client.get(f"/api/quiz/{slug}/hosts/nobody/sample")).status_code == 404, "an unknown host is not found")
+            check((await client.get("/api/quiz/no-such-quiz/hosts/max/sample")).status_code == 404,
+                  "nor is a host of a quiz that does not exist")
+
             print("== admin ==")
             r = await client.post("/api/admin/login", json={"email": config.bootstrap_admin_email, "password": "wrong-password"})
             check(r.status_code == 401, "wrong admin password is rejected")
@@ -200,6 +218,27 @@ async def main() -> None:
             check(not set(behind) & set(heard), "no song from the soundtrack was used as a name-that-tune question")
             check((await client.get(f"/api/runs/{show['run_id']}/soundtrack", headers=players["Omar Haddad"])).status_code == 404,
                   "another player cannot ask for this game's soundtrack")
+
+            print("== a favourite artist ==")
+            r = await client.put("/api/me/favourite-artist", json={"artist": "  chicago "}, headers=players["Dana Reyes"])
+            liked = r.json() if r.status_code == 200 else {}
+            check(r.status_code == 200 and liked.get("artist") == "Chicago" and liked.get("similar"),
+                  f"a favourite artist is found and kept as the catalogue spells it: {liked}")
+            mixed = (await client.get(f"/api/runs/{show['run_id']}/soundtrack", headers=players["Dana Reyes"])).json()["tracks"]
+            because = [i for i, t in enumerate(mixed, 1) if t.get("because")]
+            check(because and all(i % 4 == 0 for i in because) and len(mixed) > len(music["tracks"]),
+                  f"one song in four is from the favourites ({len(because)} of {len(mixed)}, at {because[:4]}...)")
+            check(all(t["because"] == "Chicago" and t["previewUrl"].startswith("https://") for t in mixed if t.get("because")),
+                  "each says why it is there, and has a preview")
+            me = (await client.get(f"/api/quiz/{slug}", headers=players["Dana Reyes"])).json()["player"]
+            check(me.get("favoriteArtist") == "Chicago", "the lobby remembers it")
+            r = await client.put("/api/me/favourite-artist", json={"artist": "zzqx nobody by this name"}, headers=players["Dana Reyes"])
+            check(r.status_code == 404, "an artist nobody has heard of is refused, kindly")
+            r = await client.put("/api/me/favourite-artist", json={"artist": ""}, headers=players["Dana Reyes"])
+            plain = (await client.get(f"/api/runs/{show['run_id']}/soundtrack", headers=players["Dana Reyes"])).json()["tracks"]
+            check(r.status_code == 200 and not any(t.get("because") for t in plain), "clearing it brings back the decade alone")
+            check((await client.put("/api/me/favourite-artist", json={"artist": "Chicago"})).status_code == 401,
+                  "only a signed-in player can set one")
             await play(client, slug, players["Omar Haddad"], "show", 0.4, label="show/Omar")
             second = await play(client, slug, players["Dana Reyes"], "show", 0.9, label="show/Dana again")
             first_ids = {r["question_id"] for r in await db.fetch(

@@ -22,9 +22,12 @@ different songs.
   characters, and they can hold a button to talk back to him.
 - Lifelines (50/50, a peek at the passage, a hint), streaks, badges, a readiness map of the
   report's sections, and high scores by player and by team.
-- Music all the way through: hits from a chosen decade play quietly behind the questions (up in
-  the gaps, down under the host), stop for the "name that tune" breaks, and carry on as a
-  playlist behind the results. Players can switch the background music off for themselves.
+- Music all the way through: hits from a chosen decade play as a quiet bed under the game that
+  swells for the big moments (the opening, each round's title card, a streak), dips under the
+  host, stops for the "name that tune" breaks, and carries on as a playlist behind the results.
+  Players can turn the background music up, down or off for themselves, and tap ♫ to see which
+  song is playing. A player can name an artist they like: about one song in four then comes from
+  that artist or similar ones (never explicit, never a "name that tune" question).
 - Pictures from the report can be pinched larger in place or opened full screen.
 
 **For the room** – a live game on the big screen, everyone answering on their own phone, with
@@ -42,7 +45,8 @@ Word report ─▶ sections, passages, tables, charts, pictures
             ─▶ automatic checks, then a second model answers each question blind
             ─▶ only questions it gets right, for the right reason, go into the bank
 Player      ─▶ the server deals each question, keeps the answer key and does all the scoring
-Host        ─▶ a realtime voice model told only what has already happened – never an answer
+Host        ─▶ a text model writes each line, with a delivery note for every beat, and an ElevenLabs
+               voice performs it – told only what has already happened, never an answer
 ```
 
 Timing is deliberate: the host speaks in the gaps (the opening, the start of a round, after an
@@ -71,9 +75,13 @@ and upload a report. A sample report can be generated with
 `backend/.venv/bin/python samples/make_sample_report.py`.
 
 Running costs when testing locally are only the AI calls: a few cents to turn a report into a
-question bank, and for the host's voice roughly 17 cents per game on the premium voice model
-(the default: it is the one that follows direction about pace and timing) or 5 cents on the
-standard one. The choice is on the admin's Host page.
+question bank, and the host's voice. The host characters use ElevenLabs' game-show-host voices
+(add `ELEVENLABS_API_KEY` to `backend/.env`; the Starter plan, $6 a month, includes the
+commercial licence and is enough for testing). Each line is written by a text model, a fraction
+of a cent, and performed by ElevenLabs, which charges per character – a game's host lines come
+to roughly 2,000–2,500 characters. Without a key, each ElevenLabs voice is played by the
+closest OpenAI voice instead, through a realtime voice model: roughly 17 cents per game on the
+premium model or 5 cents on the standard one (the choice is on the admin's Host page).
 
 ## Let other people try it – no domain, no cloud
 
@@ -135,6 +143,7 @@ Most container services give you a secure address of their own (`*.run.app`,
 | `APP_SECRET` | 32+ random characters; signs player and admin sessions |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | The first admin, created at start-up if there is none |
 | `OPENAI_API_KEY` (or the `AZURE_OPENAI_*` settings with `LLM_PROVIDER=azure`) | The AI provider |
+| `ELEVENLABS_API_KEY` | The host's voices (ElevenLabs). Optional: without it the host speaks with OpenAI's voices |
 | `PUBLIC_BASE_URL` | The site's public address, used for share links and QR codes |
 | `STORAGE_BACKEND` | Where reports and pictures are kept: `local`, `s3`, `azure` or `gcs` |
 | `APPLE_*` | Optional: an Apple developer key fills the song catalogue faster |
@@ -155,15 +164,17 @@ Measured on one laptop, one server process, with `scripts/load_test.py`:
 A real player makes a request every several seconds, not several a second, so one process has
 room for roughly a thousand people playing at once. Past that, run more copies – more
 containers behind a load balancer, or `WEB_CONCURRENCY=4` inside one – since everything a game
-needs to remember is in the database. The talking host is the exception: each player with the
-voice on holds one realtime session with the AI provider, so the ceiling there is your account's
-rate limit, not this server.
+needs to remember is in the database. The talking host is the exception: every line it says
+is a request to ElevenLabs (or, without ElevenLabs, a realtime session with the AI provider), so
+the ceiling there is your plan's limit on simultaneous requests, not this server. If ElevenLabs
+fails or refuses, the host carries on in the closest OpenAI voice.
 
 Security in brief: admin pages need an admin sign-in (passwords stored with Argon2, sign-in
 attempts limited); every game request is checked against the player who owns the game; answers
 never leave the server before a question is answered; pictures are reached through short-lived
-signed links; sign-in tokens are never put in addresses; responses carry a content security
-policy; and each game is capped in how much AI voice it can use. Players join with a name and
+signed links; sign-in tokens are never put in addresses; the AI and ElevenLabs keys never
+leave the server; responses carry a content security policy; and each game is capped in how
+much AI voice it can use. Players join with a name and
 an email and no password, by design – use a quiz access code or an allowed email domain to
 keep a quiz to the people it is meant for.
 
@@ -185,8 +196,9 @@ the candidates side by side and listen:
 
 ```bash
 cd backend
-.venv/bin/python -m scripts.host_audition              # Max: three manners, five voices
-.venv/bin/python -m scripts.host_audition --host roxy  # the second character
+.venv/bin/python -m scripts.host_audition                                  # Max: three manners, five OpenAI voices
+.venv/bin/python -m scripts.host_audition --host roxy                      # the second character
+.venv/bin/python -m scripts.host_audition --host eleven --manners wiseguy  # the ElevenLabs host voices
 ```
 
 It writes `samples/out/host-audition.html`, one page with every clip in it.

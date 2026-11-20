@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { ErrorNote } from '../components/ui'
 import { call, errorText, isAbort } from './api'
 import { ChoiceGroup, ErrorBlock, Field, LoadingBlock, Note, PageHeader, Panel, SaveBar, Segmented, Switch } from './components'
@@ -46,6 +46,7 @@ export default function HostPage() {
           voiceInfo={meta.voiceInfo ?? {}}
           manners={meta.manners?.length ? meta.manners : FALLBACK_MANNERS}
           aiConfigured={meta.aiConfigured}
+          elevenConfigured={meta.elevenConfigured ?? false}
         />
       )}
     </>
@@ -54,7 +55,7 @@ export default function HostPage() {
 
 // ---- wording --------------------------------------------------------------------------
 
-const MAX_CHARACTERS = 3
+const MAX_CHARACTERS = 4
 const NAME_MAX = 30
 const INSTRUCTIONS_MAX = 600
 
@@ -75,11 +76,38 @@ const REGISTER_WORDS: Record<VoiceRegister, string> = {
   higher: 'higher voice',
 }
 
-/** For example "cedar — lower voice, smooth tone". */
+/** For example "Classic game-show host" or "cedar — lower voice, smooth tone". */
 function voiceLabel(voice: string, info: VoiceInfo): string {
   const facts = info[voice]
   if (!facts) return voice
+  if (facts.provider === 'elevenlabs') return facts.label
   return `${voice} — ${REGISTER_WORDS[facts.register] ?? `${facts.register} voice`}, ${facts.tone} tone`
+}
+
+const isEleven = (voice: string, info: VoiceInfo) => info[voice]?.provider === 'elevenlabs'
+
+/** What the admin is told under the voice list. */
+function voiceHint(voice: string, info: VoiceInfo, elevenConfigured: boolean): ReactNode {
+  const facts = info[voice]
+  if (!facts) return undefined
+  if (facts.provider === 'elevenlabs') {
+    if (!elevenConfigured) {
+      return `${facts.blurb} Needs an ElevenLabs key (ELEVENLABS_API_KEY); until one is set, the ${facts.fallback} voice stands in.`
+    }
+    if (facts.inAccount === false) {
+      return (
+        <>
+          {facts.blurb} Not in your ElevenLabs account yet:{' '}
+          <a className="underline" href={facts.addLink} target="_blank" rel="noreferrer">
+            add it to My Voices
+          </a>
+          . Until then, the {facts.fallback} voice stands in.
+        </>
+      )
+    }
+    return `${facts.blurb} Performed by ElevenLabs.`
+  }
+  return `Measured: pitch about ${facts.pitchHz} Hz, clarity ${facts.clarityDb} dB.`
 }
 
 const QUALITIES: { value: VoiceQuality; label: string; description: string }[] = [
@@ -174,12 +202,14 @@ function HostForm({
   voiceInfo,
   manners,
   aiConfigured,
+  elevenConfigured,
 }: {
   initial: HostSettings
   voices: string[]
   voiceInfo: VoiceInfo
   manners: MannerMeta[]
   aiConfigured: boolean
+  elevenConfigured: boolean
 }) {
   const notify = useNotify()
   const fallbackVoice = voices[0] ?? ''
@@ -197,9 +227,15 @@ function HostForm({
   const request = useRef<{ id: number; controller: AbortController } | null>(null)
   const requestCount = useRef(0)
 
-  // Lowest voice first, so the list reads as a scale.
+  // The ElevenLabs host voices first, in the server's order; then OpenAI's, lowest first, so they read as a scale.
   const voiceOptions = useMemo(() => {
-    const known = [...voices].sort((a, b) => (voiceInfo[a]?.pitchHz ?? Infinity) - (voiceInfo[b]?.pitchHz ?? Infinity) || a.localeCompare(b))
+    const pitch = (voice: string) => {
+      const facts = voiceInfo[voice]
+      return facts && facts.provider !== 'elevenlabs' ? facts.pitchHz : Infinity
+    }
+    const elevenVoices = voices.filter((voice) => isEleven(voice, voiceInfo))
+    const openaiVoices = voices.filter((voice) => !isEleven(voice, voiceInfo)).sort((a, b) => pitch(a) - pitch(b) || a.localeCompare(b))
+    const known = [...elevenVoices, ...openaiVoices]
     const extra = draft.hosts.map((host) => host.voice).filter((voice) => voice && !known.includes(voice))
     return [...known, ...new Set(extra)]
   }, [voices, voiceInfo, draft.hosts])
@@ -379,14 +415,13 @@ function HostForm({
 
       <Panel
         title="Host characters"
-        description="One to three characters, each with a name and a voice. The first one is the host everyone gets unless players are allowed to choose."
+        description="One to four characters, each with a name and a voice. The first one is the host everyone gets unless players are allowed to choose."
       >
         <ol className="grid gap-3">
           {draft.hosts.map((character, index) => {
             const sample = samples[character.key]
             const name = character.name.trim().toLowerCase()
             const nameError = !name ? 'Give this character a name.' : names.indexOf(name) !== index ? 'Another character already has this name.' : null
-            const facts = voiceInfo[character.voice]
             return (
               <li key={character.key} className="rounded-xl border border-line p-3 sm:p-4">
                 <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)]">
@@ -405,15 +440,24 @@ function HostForm({
                   </Field>
                   <Field
                     label="Voice"
-                    hint={facts ? `Measured: pitch about ${facts.pitchHz} Hz, clarity ${facts.clarityDb} dB.` : undefined}
+                    hint={voiceHint(character.voice, voiceInfo, elevenConfigured)}
                   >
                     {(props) => (
                       <select className="field" {...props} value={character.voice} onChange={(event) => changeCharacter(character.key, { voice: event.target.value })}>
-                        {voiceOptions.map((voice) => (
-                          <option key={voice} value={voice}>
-                            {voiceLabel(voice, voiceInfo)}
-                          </option>
-                        ))}
+                        <optgroup label="ElevenLabs host voices">
+                          {voiceOptions.filter((voice) => isEleven(voice, voiceInfo)).map((voice) => (
+                            <option key={voice} value={voice}>
+                              {voiceLabel(voice, voiceInfo)}
+                            </option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="OpenAI voices">
+                          {voiceOptions.filter((voice) => !isEleven(voice, voiceInfo)).map((voice) => (
+                            <option key={voice} value={voice}>
+                              {voiceLabel(voice, voiceInfo)}
+                            </option>
+                          ))}
+                        </optgroup>
                       </select>
                     )}
                   </Field>
@@ -522,7 +566,7 @@ function HostForm({
             Add a character
           </button>
           <span className="text-xs text-muted">
-            {draft.hosts.length >= MAX_CHARACTERS ? 'Three is the most.' : 'Up to three.'} Samples use what is on this page right now, saved or not
+            {draft.hosts.length >= MAX_CHARACTERS ? 'Four is the most.' : 'Up to four.'} Samples use what is on this page right now, saved or not
             {waiting ? '.' : ', and each one is a new line.'}
           </span>
         </div>

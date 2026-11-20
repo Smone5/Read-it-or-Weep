@@ -7,7 +7,7 @@ import math
 from typing import Any
 
 import db
-from services import bank, music_service
+from services import favorites, bank, music_service
 from services.settings_store import MODES
 
 
@@ -72,6 +72,7 @@ async def _after_party(run: dict, rules: dict, items: list[dict]) -> dict | None
         return None
     heard = [item["music_track_id"] for item in items if item["music_track_id"]]
     tracks = await music_service.after_party(decade, heard, seed=run["id"])
+    tracks = favorites.mix(tracks, await favorites.for_player(run["player_id"]), f"party:{run['id']}", decade)
     return {"decade": decade, "tracks": tracks} if tracks else None
 
 

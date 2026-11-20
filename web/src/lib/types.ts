@@ -9,7 +9,7 @@ export type Branding = {
   theme: 'dark' | 'light'
   logoUrl: string | null
   supportEmail: string | null
-  host: { name: string; voiceEnabled: boolean; talkEnabled: boolean; choices: { id: string; name: string; register: string }[] }
+  host: { name: string; voiceEnabled: boolean; talkEnabled: boolean; choices: { id: string; name: string; register: string; label?: string | null }[] }
 }
 
 export type ModeId = 'show' | 'sudden_death' | 'speed' | 'straight'
@@ -28,6 +28,8 @@ export type Readiness = {
 }
 
 export type PlayerView = {
+  /** The artist they like: now and then a song from them, or from artists like them, plays behind their games. */
+  favoriteArtist?: string | null
   id: string
   name: string
   email: string
@@ -128,7 +130,15 @@ export type Reveal = {
 }
 
 /** One song of the music that plays behind a game and its results. */
-export type PartyTrack = { title: string; artist: string; previewUrl: string; artworkUrl: string | null; trackUrl: string | null }
+export type PartyTrack = {
+  title: string
+  artist: string
+  previewUrl: string
+  artworkUrl: string | null
+  trackUrl: string | null
+  /** Set when the song is here because the player named a favourite artist ("Chicago"). */
+  because?: string | null
+}
 export type AfterParty = { decade: string; tracks: PartyTrack[] }
 /** The songs that play quietly behind a game (an empty list when it has no music). */
 export type Soundtrack = { decade: string | null; tracks: PartyTrack[]; volume?: 'quiet' | 'medium' | 'loud' }

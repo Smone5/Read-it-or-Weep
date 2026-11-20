@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 import db
+from services import eleven
 
 ALL_DECADES = ["50s", "60s", "70s", "80s", "90s", "00s", "10s", "20s"]
 
@@ -61,15 +62,19 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "sarcasm": 6,                     # 0 (warm) .. 10 (full roast)
         "voice_enabled": True,
         "custom_instructions": "",
-        # One to three host characters. Players may pick between them in the lobby. "manner" is how the
+        # One to four host characters. Players may pick between them in the lobby. "manner" is how the
         # character performs (see HOST_MANNERS); "style" is an optional extra line about that character.
+        # The voices are the game-show-host voices of the ElevenLabs voice library, chosen by ear by the
+        # organiser (2026-11-20). Without an ElevenLabs key each one is played by the OpenAI voice closest to it.
         "hosts": [
-            {"id": "max", "name": "Max", "voice": "cedar", "manner": "wiseguy", "style": ""},    # lower voice
-            # Measured on identical lines, "coral" sits about a quarter higher than "marin" and has the cleanest
-            # tone of any voice.
-            {"id": "roxy", "name": "Roxy", "voice": "coral", "manner": "wiseguy",
+            {"id": "max", "name": "Max", "voice": "eleven:classic", "manner": "wiseguy", "style": ""},
+            {"id": "roxy", "name": "Roxy", "voice": "eleven:british", "manner": "wiseguy",
              "style": "Razor-sharp and amused, a little exasperated: the funniest person in any meeting, finally "
                       "handed a microphone. A laugh is never far away."},
+            {"id": "june", "name": "June", "voice": "eleven:southern", "manner": "wiseguy",
+             "style": "Big-hearted and sassy: she has seen it all twice and loves every minute. Teases like family."},
+            {"id": "dex", "name": "Dex", "voice": "eleven:hype", "manner": "showman",
+             "style": "Young, quick and hyped: every right answer is a highlight reel, every wrong one a blooper."},
         ],
         "player_can_choose": True,
         # standard is cheaper; premium is the default because, measured on identical scenes, only the premium
@@ -115,7 +120,9 @@ VOICE_FACTS = {
     "echo": (129, 3.0), "ash": (130, 2.8), "cedar": (154, 4.7), "verse": (167, 4.9), "shimmer": (175, 6.3),
     "alloy": (183, 6.3), "marin": (187, 7.0), "ballad": (191, 5.9), "coral": (260, 9.2), "sage": (273, 8.0),
 }
-VOICES = sorted(VOICE_FACTS)
+# The voices an admin can choose: OpenAI's (performed by the realtime model) and ElevenLabs' host voices.
+VOICES = sorted(VOICE_FACTS) + [voice.id for voice in eleven.VOICES]
+MAX_HOSTS = 4
 # How a host character performs. The direction for each lives in host_service.MANNERS.
 HOST_MANNERS = ("wiseguy", "deadpan", "showman")
 
@@ -130,8 +137,12 @@ def voice_tone(voice: str) -> str:
     return "clear" if clarity >= 6.5 else ("smooth" if clarity >= 4.5 else "gravelly")
 
 
-VOICE_INFO = {voice: {"pitchHz": pitch, "register": voice_register(voice), "clarityDb": clarity, "tone": voice_tone(voice)}
-              for voice, (pitch, clarity) in VOICE_FACTS.items()}
+VOICE_INFO: dict[str, dict] = {
+    **{voice: {"provider": "openai", "pitchHz": pitch, "register": voice_register(voice), "clarityDb": clarity,
+               "tone": voice_tone(voice)} for voice, (pitch, clarity) in VOICE_FACTS.items()},
+    **{voice.id: {"provider": "elevenlabs", "label": voice.label, "blurb": voice.blurb, "short": voice.short,
+                  "fallback": voice.fallback, "addLink": voice.share_link} for voice in eleven.VOICES},
+}
 
 _cache: dict[str, tuple[float, dict]] = {}
 _TTL = 15.0
@@ -199,7 +210,7 @@ def _clean_host(value: dict) -> dict:
         value["sarcasm"] = 6
     hosts: list[dict] = []
     taken: set[str] = set()
-    for raw in (value.get("hosts") or [])[:3]:
+    for raw in (value.get("hosts") or [])[:MAX_HOSTS]:
         if not isinstance(raw, dict):
             continue
         name = str(raw.get("name") or "").strip()[:30]

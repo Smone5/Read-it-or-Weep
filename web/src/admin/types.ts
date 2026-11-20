@@ -59,8 +59,23 @@ export type VoiceRegister = 'deeper' | 'lower-mid' | 'middle' | 'higher'
 
 export type VoiceTone = 'clear' | 'smooth' | 'gravelly'
 
-/** Two things measured from each voice's audio: how low or high it sits, and how clean it sounds. */
-export type VoiceInfo = Record<string, { pitchHz: number; register: VoiceRegister; clarityDb: number; tone: VoiceTone }>
+/** An OpenAI voice: two things measured from its audio, how low or high it sits and how clean it sounds. */
+export type OpenAIVoiceFacts = { provider?: 'openai'; pitchHz: number; register: VoiceRegister; clarityDb: number; tone: VoiceTone }
+
+/** An ElevenLabs host voice, described in words; `fallback` is the OpenAI voice that stands in for it without a key. */
+export type ElevenVoiceFacts = {
+  provider: 'elevenlabs'
+  label: string
+  blurb: string
+  short: string
+  fallback: string
+  /** Where to add it to the ElevenLabs account ("Add to My Voices"): the API only uses voices the account has. */
+  addLink: string
+  /** Whether the account has it (absent when that could not be checked). */
+  inAccount?: boolean
+}
+
+export type VoiceInfo = Record<string, OpenAIVoiceFacts | ElevenVoiceFacts>
 
 /** How a host character performs: the acting, as opposed to the voice. */
 export type HostManner = 'wiseguy' | 'deadpan' | 'showman'
@@ -72,6 +87,8 @@ export type Meta = {
   decades: string[]
   voices: string[]
   voiceInfo?: VoiceInfo
+  /** Whether an ElevenLabs key is set, so its voices are really heard (otherwise their stand-ins are). */
+  elevenConfigured?: boolean
   manners?: MannerMeta[]
   extensions: string[]
   aiConfigured: boolean

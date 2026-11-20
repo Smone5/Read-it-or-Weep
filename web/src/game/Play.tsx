@@ -15,9 +15,9 @@
 //   reveal       the result, then the host's reaction. "Next" is there from the start: tapping it
 //                while he is talking cuts him off cleanly rather than letting him run on.
 //
-// Behind all of it the jukebox plays hits from the game's decade – low while a question is being
-// read, up in the gaps, down under the host – and goes silent for a "name that tune" clip, which
-// has the stage to itself.
+// Behind all of it the jukebox plays hits from the game's decade – a quiet bed under the questions
+// and between them, swelling for the big moments (the opening, a round's title card, a streak), down
+// under the host – and goes silent for a "name that tune" clip, which has the stage to itself.
 //
 // To make that possible the server deals the first item of a round *sealed*: we learn which round
 // is coming, show its card, and only then ask for the question to be opened.
@@ -27,7 +27,7 @@ import { MusicToggle } from '../components/NowPlaying'
 import { ErrorNote, Modal, SoundToggle } from '../components/ui'
 import { api, ApiError, onConnectionTrouble } from '../lib/api'
 import type { HostVoice } from '../lib/hostVoice'
-import { setJukeboxLevel } from '../lib/jukebox'
+import { onJukeboxChange, setJukeboxLevel } from '../lib/jukebox'
 import { fadeOutMusic, preloadClip, stopMusic } from '../lib/music'
 import { blip, buzz, play } from '../lib/sound'
 import { trace } from '../lib/trace'
@@ -55,8 +55,35 @@ const RETRY = 4
 
 const MIN_CARD_MS = 1400 // a title card stays at least long enough to be read
 const MAX_INTRO_MS = 11000 // ...and the host never holds the game up longer than this
+// The show's opening is the exception: the host introduces the show and the contestant and explains how it
+// works, so it may run longer - and it can always be skipped.
+const MAX_OPENING_MS = 45000
+// The show opens with the music on its own, loud, before the host's first word (his line is written meanwhile).
+// The organiser: "have the music play a little bit longer before the host starts." His first word comes this long
+// after the tap - and at least OPENING_THEME_MS after the theme's first note, since on a slow phone the first song
+// takes a while to arrive - but never later than OPENING_LATEST_MS. The music starts gliding down 1.2 s before he
+// speaks (see hostVoice), so it plays on its own, loud, for about six seconds.
+const OPENING_MUSIC_MS = 7000
+const OPENING_THEME_MS = 7000
+const OPENING_LATEST_MS = 9500
+const NO_MUSIC_AFTER_MS = 2500 // no song by now (music off, or it will not load): he need not wait for one
+const NO_HOST_OPENING_MS = 4000 // with no host to open the show, the theme still gets a few seconds
+// A round's title card: the music drops as the player taps Next, the sting plays in that moment of quiet, then the
+// music comes in under the title. ("A TV title card goes quiet, sting, theme, then the host over it.")
+const STING_GAP_MS = 400
+// When the host finishes a title ("...the Deep End!") the music answers it for a beat before the question appears.
+const BUTTON_MS = 600
+const OPENING_BUTTON_MS = 800
+const CLIP_GAP_MS = 400 // before a "name that tune" clip: the music stops dead, a beat of silence, then the mystery song
+// After an answer the music comes up while the player decides when to tap Next - never in the first moments, under the
+// answer's sting - and eases back down if they stay. ("...go up while waiting, then fade away, but be abrupt when they
+// click next.")
+const WAIT_NOT_BEFORE_MS = 1200
+const LINGER_AFTER_MS = 6000
 const HOST_LATE_MS = 3200 // if he has not started speaking by now, the game goes on without the introduction
-const HOST_LATE_OPENING_MS = 4800 // (the opening allows for him still connecting)
+// The opening allows for him still connecting, and for a long line to write (measured up to 7.4 s through the tester
+// link). The music is up during the wait, so it plays as the show's intro rather than dead air.
+const HOST_LATE_OPENING_MS = 12000
 const CLIP_WAIT_MS = 2500 // a music clip that has not started by now: start the clock anyway
 const STREAKS_WORTH_SHOUTING = [3, 5, 7, 10, 15, 20] // right answers in a row that get a fanfare
 
@@ -124,6 +151,8 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   const startedRef = useRef(false)
   const movingRef = useRef(false)
   const skipRef = useRef<(() => void) | null>(null)
+  const welcomeRef = useRef(0) // the welcome line's number (0: no host to open the show)
+  const stopOpeningWatch = useRef<() => void>(() => undefined)
   const revealRef = useRef<HTMLElement>(null)
 
   const runId = state.runId
@@ -135,13 +164,69 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
 
   useEffect(() => onConnectionTrouble(setReconnecting), [])
 
-  // The soundtrack follows the game. Lightning statements and speed runs keep it up throughout: they
-  // move too fast for it to keep dipping, and they are the loud part of the show anyway.
+  // The soundtrack follows the game. Each change of scene is one move of the music, made on purpose:
+  //   opening card   loud, on its own, then down under the host (and back up for a beat after his last word)
+  //   round card     quiet for the sting, then up under the title, down under the host, up for a beat after him
+  //   question       out of the way ("think"); in the quick-fire rounds a steady bed instead ("gap")
+  //   reveal         "gap" under the answer's sting and the host, "wait" (up) once he is done, easing back to
+  //                  "linger" if the player stays; down at once when they tap Next
+  //   wager screen   a bed: no clock is running, and the bet is the drama
+  //   music break    the soundtrack plays under the host's introduction, then stops dead before the clip
+  const [bigMoment, setBigMoment] = useState(false)
+  const [opening, setOpening] = useState(!resumed) // the show's opening card: the loudest the music gets
+  // A round card begins with a moment of quiet for its sting; then the music comes up under the title.
+  const [titleUp, setTitleUp] = useState(false)
+  const titleTimer = useRef(0)
+  // The card is over: 'button' while the music answers the host's last word, 'bed' once it has gone down to whatever
+  // comes next (the question's level, or silence before a clip).
+  const [handover, setHandover] = useState<'button' | 'bed' | null>(null)
+  // After an answer the host reacts; once he is done the player may linger before tapping Next, and the music
+  // comes up to fill that wait - then eases off if they stay.
+  const [afterHost, setAfterHost] = useState(false)
+  const [lingering, setLingering] = useState(false)
+  // Next was tapped: the music drops at once, without waiting for the next question to arrive.
+  const [leaving, setLeaving] = useState(false)
   useEffect(() => {
-    if (item?.slot === 'music') setJukeboxLevel('out')
-    else if ((phase === 'question' || phase === 'wager') && !quick) setJukeboxLevel('think')
+    setAfterHost(false)
+    setLingering(false)
+    setLeaving(false)
+    if (phase !== 'reveal') return
+    let current = true
+    const settle = new Promise((resolve) => window.setTimeout(resolve, WAIT_NOT_BEFORE_MS))
+    void Promise.all([host ? host.whenQuiet() : Promise.resolve(), settle]).then(() => {
+      if (current) setAfterHost(true)
+    })
+    return () => {
+      current = false
+    }
+  }, [phase, host])
+  useEffect(() => {
+    if (!afterHost) return
+    const linger = () => setLingering(true)
+    const timer = window.setTimeout(linger, LINGER_AFTER_MS)
+    const onHide = () => document.hidden && linger() // nobody is looking: no need for it to be up
+    document.addEventListener('visibilitychange', onHide)
+    return () => {
+      window.clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onHide)
+    }
+  }, [afterHost])
+  useEffect(() => {
+    const music = item?.slot === 'music'
+    // What is under the question (or the betting screen) this card leads to.
+    const bed = music ? 'out' : quick || item?.needsWager ? 'gap' : 'think'
+    if (phase === 'card') {
+      if (handover === 'bed') setJukeboxLevel(bed)
+      else if (opening) setJukeboxLevel('intro')
+      else setJukeboxLevel(titleUp ? 'title' : 'think')
+    } else if (music) setJukeboxLevel('out')
+    else if (phase === 'wager') setJukeboxLevel('gap')
+    else if (phase === 'question') setJukeboxLevel(bed)
+    else if (leaving) setJukeboxLevel(bed)
+    else if (bigMoment && !quick) setJukeboxLevel('swell')
+    else if (afterHost && !quick) setJukeboxLevel(lingering ? 'linger' : 'wait')
     else setJukeboxLevel('gap')
-  }, [phase, item?.slot, quick])
+  }, [phase, item?.slot, item?.needsWager, quick, bigMoment, opening, titleUp, handover, afterHost, lingering, leaving])
 
   // On a phone the explanation lands below the answers: bring it into view, and return to the
   // top for each new question.
@@ -178,6 +263,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
 
   /** Put a question (or the wager screen) in front of the player. Its clock is already running. */
   const show = useCallback((next: Item) => {
+    setHandover(null)
     setItem(next)
     setReveal(null)
     setPicked(null)
@@ -197,8 +283,8 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
 
   /** Hold a title card for as long as the host needs: at least long enough to read, never too long, always skippable. */
   const hostBeat = useCallback(
-    (lateMs: number) =>
-      new Promise<void>((resolve) => {
+    (lateMs: number, capMs: number = MAX_INTRO_MS, floorMs: number = MIN_CARD_MS) =>
+      new Promise<string>((resolve) => {
         let over = false
         const end = (why: string) => {
           if (over) return
@@ -209,12 +295,12 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
           skipRef.current = null
           setCanSkip(false)
           trace('card.end', { why })
-          resolve()
+          resolve(why)
         }
         const floor = window.setTimeout(() => {
           if (host) void host.whenQuiet().then(() => end('host finished'))
           else end('no host')
-        }, MIN_CARD_MS)
+        }, floorMs)
         // Dead air on a title card feels broken: a host who is late to start loses his turn.
         const late = window.setTimeout(() => {
           if (!host?.stalled) return
@@ -224,7 +310,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         const cap = window.setTimeout(() => {
           host?.skip()
           end('too long')
-        }, MAX_INTRO_MS)
+        }, capMs)
         skipRef.current = () => {
           host?.skip()
           end('skipped')
@@ -243,14 +329,36 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       setPicked(null)
       setError('')
       setCard(opening ? openingCard(state, next) : roundCard(next, mode))
+      setOpening(opening)
+      setHandover(null)
+      setTitleUp(false)
+      window.clearTimeout(titleTimer.current)
       setPhase('card')
       trace('card', { round: next.round.name, slot: next.slot, opening })
       if (next.music) preloadClip(next.music.previewUrl) // so the clip can start the instant the host is done
       if (!opening) {
-        play('levelup')
+        play('levelup') // in a moment of quiet: the music comes up under the title just after it
+        titleTimer.current = window.setTimeout(() => setTitleUp(true), STING_GAP_MS)
         if (hostReacts) host?.cue('round', next.id)
       }
-      await hostBeat(opening ? HOST_LATE_OPENING_MS : HOST_LATE_MS)
+      const why = await hostBeat(
+        opening ? HOST_LATE_OPENING_MS : HOST_LATE_MS,
+        opening ? MAX_OPENING_MS : MAX_INTRO_MS,
+        opening && !welcomeRef.current ? NO_HOST_OPENING_MS : MIN_CARD_MS,
+      )
+      if (!aliveRef.current || doneRef.current) return
+      if (next.slot === 'music') {
+        // The soundtrack stops dead on his last word ("Roll it!"), and the mystery song starts out of the silence.
+        setHandover('bed')
+        await new Promise((resolve) => window.setTimeout(resolve, CLIP_GAP_MS))
+      } else if (why === 'host finished' && mode !== 'speed') {
+        // The music answers the title, then gets out of the way as the question appears. (Not when the player
+        // skipped the card, or the host never came: then they want the question.)
+        setHandover('button')
+        trace('card.button')
+        await new Promise((resolve) => window.setTimeout(resolve, opening ? OPENING_BUTTON_MS : BUTTON_MS))
+        setHandover('bed')
+      } else setHandover('bed')
       if (!aliveRef.current || doneRef.current) return
       if (next.needsWager) {
         show(next) // the wager screen; placing the bet is what opens the question
@@ -309,14 +417,38 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       } else {
         if (!resumed) {
           play('levelup')
-          host?.cue('welcome')
+          const tapped = Date.now()
+          const welcome = host?.cue('welcome', undefined, { notBefore: tapped + OPENING_MUSIC_MS }) ?? 0
+          welcomeRef.current = welcome
           trace('opening')
+          if (welcome && host) {
+            // His first word waits for the theme: OPENING_THEME_MS after its first note, if that is later than
+            // planned. With no music coming, he need not wait at all.
+            let anchored = false
+            const anchor = (at: number) => {
+              if (anchored) return
+              anchored = true
+              stopOpeningWatch.current()
+              host.holdUntil(at)
+            }
+            const unsubscribe = onJukeboxChange((jukebox) => {
+              if (jukebox.playing) anchor(Math.min(tapped + OPENING_LATEST_MS, Math.max(tapped + OPENING_MUSIC_MS, Date.now() + OPENING_THEME_MS)))
+            })
+            const noMusic = window.setTimeout(() => anchor(0), NO_MUSIC_AFTER_MS)
+            stopOpeningWatch.current = () => {
+              unsubscribe()
+              window.clearTimeout(noMusic)
+            }
+          }
         }
         void pull(!resumed)
       }
     }
     return () => {
+      // (The opening's watch on the music is not stopped here: in development React runs this cleanup once straight
+      // after mounting. It stops itself once the theme starts, or after NO_MUSIC_AFTER_MS at the latest.)
       aliveRef.current = false
+      window.clearTimeout(titleTimer.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -325,10 +457,11 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
     if (!reveal || movingRef.current) return
     host?.skip() // the player has moved on, so the host stops – cleanly – rather than talk over what comes next
     fadeOutMusic()
+    if (!quick || reveal.finished) setLeaving(true) // the quick-fire rounds keep their bed steady
     trace('advance')
     if (reveal.finished) void finish()
     else void pull()
-  }, [reveal, host, finish, pull])
+  }, [reveal, host, finish, pull, quick])
 
   const submit = useCallback(
     async (choice: number | null) => {
@@ -337,6 +470,9 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       setPicked(choice)
       try {
         const result = await api<Reveal>(`/api/runs/${runId}/answer`, { body: { itemId: item.id, choiceIndex: choice }, retry: RETRY })
+        // A hint or a reply about this question is out of date once it has been answered, and would hold up his
+        // reaction: stop it, so the answer's sting plays at full.
+        if (host?.busy) host.skip()
         setReveal(result)
         setState(result.state)
         setPhase('reveal')
@@ -347,6 +483,8 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         if (result.correct && STREAKS_WORTH_SHOUTING.includes(result.state.streak)) {
           const streak = result.state.streak
           setBanner(`${streak} in a row!`)
+          setBigMoment(true) // the music swells with the fanfare
+          window.setTimeout(() => setBigMoment(false), 2600)
           window.setTimeout(() => blip(streak >= 5 ? 'bigstreak' : 'streak'), 300) // just after the "correct" sound
           window.setTimeout(() => setBanner((current) => (current === `${streak} in a row!` ? '' : current)), 2400)
         }

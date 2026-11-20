@@ -8,8 +8,10 @@ import { trace } from './trace'
 
 export type Sfx = 'correct' | 'wrong' | 'cheer' | 'gameover' | 'hint' | 'levelup' | 'tick' | 'rimshot' | 'click' | 'fasttick'
 
+// The level-up sting is a quiet recording (it peaks at -16 dBFS where the others reach -6 to -1): it is played louder
+// so that a round's title card opens on a sting you can hear. "Correct" is a little quieter than "wrong" as recorded.
 const VOLUME: Record<Sfx, number> = {
-  correct: 0.55, wrong: 0.5, cheer: 0.5, gameover: 0.5, hint: 0.45, levelup: 0.5,
+  correct: 0.7, wrong: 0.5, cheer: 0.5, gameover: 0.5, hint: 0.45, levelup: 2,
   tick: 0.35, rimshot: 0.5, click: 0.4, fasttick: 0.3,
 }
 
@@ -247,13 +249,13 @@ export function blip(name: Blip) {
   trace('sfx', { name })
 }
 
-/** The host has started (or stopped) speaking: effects drop to a bed, then come back. */
-export function duckEffects(on: boolean) {
+/** The host has started (or stopped) speaking: effects drop to a bed, then come back (at once if he was cut off). */
+export function duckEffects(on: boolean, quick = false) {
   ducked = on
   if (!context || !bus) return
   const now = context.currentTime
   bus.gain.cancelScheduledValues(now)
-  bus.gain.setTargetAtTime(on ? UNDER_HOST : 1, now, on ? 0.04 : 0.25)
+  bus.gain.setTargetAtTime(on ? UNDER_HOST : 1, now, on ? 0.04 : quick ? 0.03 : 0.25)
 }
 
 /** A short buzz on phones that support it. */

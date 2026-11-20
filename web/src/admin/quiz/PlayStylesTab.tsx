@@ -366,7 +366,7 @@ export default function PlayStylesTab() {
             checked={draft.soundtrack ?? true}
             onChange={(checked) => change((current) => ({ ...current, soundtrack: checked }))}
             label="Music behind the questions"
-            description="Hits from the game's decade keep playing through the whole game: low while a question is being read, up in the gaps, down under the host, and silent for a name-that-tune clip. Players can switch it off for themselves."
+            description="Hits from the game's decade play through the whole game: a quiet bed under the questions that swells at the start, on each round's title card and on a streak, dips under the host, and goes silent for a name-that-tune clip. Players can turn it up, down or off for themselves."
           />
         )}
         {draft.music_enabled && (draft.soundtrack ?? true) && (

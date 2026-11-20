@@ -64,6 +64,15 @@ class Config:
     model_embedding: str = field(default_factory=lambda: _env("MODEL_EMBEDDING", "text-embedding-3-small"))
     model_voice: str = field(default_factory=lambda: _env("MODEL_VOICE", "gpt-realtime-2.1-mini"))
     model_voice_premium: str = field(default_factory=lambda: _env("MODEL_VOICE_PREMIUM", "gpt-realtime-2.1"))
+    # With an ElevenLabs voice the host's lines are written by a text model and performed by ElevenLabs
+    # (services/eleven.py). These are for that path.
+    elevenlabs_api_key: str = field(default_factory=lambda: _env("ELEVENLABS_API_KEY"))
+    elevenlabs_engine: str = field(default_factory=lambda: _env("ELEVENLABS_ENGINE", "socket"))   # socket | dialogue | tts
+    elevenlabs_model: str = field(default_factory=lambda: _env("ELEVENLABS_MODEL"))               # empty: the engine's own
+    model_host_writer: str = field(default_factory=lambda: _env("MODEL_HOST_WRITER", _env("MODEL_FAST", "gpt-6-luna")))
+    host_writer_effort: str = field(default_factory=lambda: _env("HOST_WRITER_EFFORT", "none"))
+    model_transcribe: str = field(default_factory=lambda: _env("MODEL_TRANSCRIBE", "gpt-4o-mini-transcribe"))
+    model_speech: str = field(default_factory=lambda: _env("MODEL_SPEECH", "gpt-4o-mini-tts"))     # the backup voice
     llm_concurrency: int = field(default_factory=lambda: int(_env("LLM_CONCURRENCY", "6")))
     prefill_music: bool = field(default_factory=lambda: _env("PREFILL_MUSIC", "true").lower() in ("1", "true", "yes"))
 

@@ -21,7 +21,7 @@ from typing import Any
 
 import db
 from security import sign_media
-from services import bank, music_service
+from services import favorites, bank, music_service
 from services.settings_store import MODES
 
 GRACE_MS = 1500           # network + render time not counted against the player
@@ -185,6 +185,11 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
         if rules.get("soundtrack", True):
             # The songs playing behind this game are not asked about: the player has just been listening to them.
             avoid |= {t["id"] for t in await music_service.soundtrack_rows(run["decade"], run["id"])}
+            # Nor are the favourite artist's songs that play now and then: the questions are the same for everyone.
+            liked = favorites.keys(await favorites.for_player(run["player_id"]))
+            if liked:
+                avoid |= {t["id"] for t in await music_service.tracks_for(run["decade"])
+                          if favorites.song_key(t["artist"], t["title"]) in liked}
         built = await music_service.build_question(run["decade"], avoid)
         if built is None:
             return None

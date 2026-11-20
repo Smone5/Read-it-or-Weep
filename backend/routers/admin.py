@@ -20,6 +20,7 @@ from ingest import pipeline
 from routers.play import throttle, throttle_key
 from security import hash_password, issue_admin_token, verify_password
 from services import bank, host_service, live, music_service, settings_store, stats
+from services import eleven, host_samples
 from services.settings_store import ALL_DECADES, DEFAULTS, MODES, VOICES
 from storage import storage
 
@@ -53,11 +54,20 @@ async def me(admin: dict = Depends(current_admin)) -> dict:
     return {"admin": admin}
 
 
+async def _voice_info() -> dict:
+    """The voices, and for the ElevenLabs ones whether the account has them yet (they must be added once)."""
+    info = dict(settings_store.VOICE_INFO)
+    present = await eleven.voices_in_account()
+    for voice_id, has in (present or {}).items():
+        info[voice_id] = {**info[voice_id], "inAccount": has}
+    return info
+
+
 @router.get("/meta")
 async def meta(admin: dict = Depends(current_admin)) -> dict:
     defaults = await settings_store.get("game")
     return {"modes": [settings_store.mode_view(key, defaults) for key in MODES], "decades": ALL_DECADES, "voices": VOICES,
-            "voiceInfo": settings_store.VOICE_INFO,
+            "voiceInfo": await _voice_info(), "elevenConfigured": eleven.configured(),
             "manners": [{"id": key, "label": host_service.MANNERS[key]["label"], "blurb": host_service.MANNERS[key]["blurb"]}
                         for key in settings_store.HOST_MANNERS],
             "extensions": supported_extensions(), "aiConfigured": config.ai_configured,
@@ -103,7 +113,10 @@ async def read_settings(key: Literal["branding", "host", "game"], admin: dict = 
 async def write_settings(key: Literal["branding", "host", "game"], body: dict[str, Any],
                          admin: dict = Depends(current_admin)) -> dict:
     body.pop("logo_key", None)          # the logo is changed only through the upload endpoint
-    return {"value": await settings_store.put(key, body)}
+    value = await settings_store.put(key, body)
+    if key in ("host", "branding"):
+        host_samples.warm_soon()        # the hosts' introductions, recorded again if anything about them changed
+    return {"value": value}
 
 
 @router.post("/settings/branding/logo")

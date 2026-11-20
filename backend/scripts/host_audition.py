@@ -2,6 +2,7 @@
 
     python -m scripts.host_audition                       # Max: three manners, five voices
     python -m scripts.host_audition --host roxy           # the second character's line-up
+    python -m scripts.host_audition --host eleven --manners wiseguy   # the ElevenLabs host voices
     python -m scripts.host_audition --name Sam --voices verse,echo --manners wiseguy,showman
 
 Every clip is the host playing the same four moments of a game - opening the show, a wrong
@@ -36,7 +37,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import config  # noqa: E402
-from services import host_service, settings_store  # noqa: E402
+from services import eleven, host_service, settings_store  # noqa: E402
 
 RATE = host_service.SAMPLE_RATE
 OUT = Path(__file__).resolve().parents[2] / "samples" / "out"
@@ -63,16 +64,25 @@ LINE_UPS = {
     "max": {"name": "Max", "style": "", "voices": ["cedar", "verse", "ballad", "alloy", "echo"]},
     "roxy": {"name": "Roxy", "style": settings_store.DEFAULTS["host"]["hosts"][1]["style"],
              "voices": ["coral", "marin", "shimmer", "sage"]},
+    # The ElevenLabs host voices (needs ELEVENLABS_API_KEY; without it each is played by its stand-in).
+    "eleven": {"name": "Max", "style": "", "voices": ["eleven:classic", "eleven:british", "eleven:southern", "eleven:hype"]},
 }
+
+
+def voice_name(voice: str) -> str:
+    return eleven.BY_ID[voice].label if eleven.is_eleven(voice) else voice.capitalize()
 
 
 async def record(*, name: str, voice: str, manner: str, style: str, quality: str, pace: str) -> dict:
     """One candidate plays the four moments. Returns the words, the audio and where each line starts."""
     persona = host_service.build_persona(name=name, game_title="Read It or Weep", company="Meridian", sarcasm=6,
                                          quiz_title="Q3 Business Review", style=style or None, manner=manner)
-    model = host_service.voice_model({"voice_quality": quality})
+    host = {"voice_quality": quality, "pace": pace, "manner": manner, **host_service.resolve_voice(voice)}
+    if host["engine"] == "eleven":           # written with delivery tags, performed by ElevenLabs
+        persona = host_service.build_persona(name=name, game_title="Read It or Weep", company="Meridian", sarcasm=6,
+                                             quiz_title="Q3 Business Review", style=style or None, manner=manner, tags=True)
     lines: list[tuple[str, np.ndarray]] = []
-    async with host_service.HostVoice(persona, voice, True, model=model, pace=pace) as session:
+    async with host_service.open_voice(persona, host, True) as session:
         for _, scene in MOMENTS:
             pcm, words = bytearray(), ""
             async for kind, data in session.say(scene):
@@ -136,8 +146,9 @@ def clip_url(audio: np.ndarray) -> str:
 
 
 def card(code: str, title: str, note: str, take: dict) -> str:
-    register = {"deeper": "deeper voice", "lower-mid": "lower voice", "middle": "mid-range voice",
-                "higher": "higher voice"}[settings_store.voice_register(take["voice"])]
+    register = (eleven.BY_ID[take["voice"]].blurb.rstrip(".") if eleven.is_eleven(take["voice"]) else
+                {"deeper": "deeper voice", "lower-mid": "lower voice", "middle": "mid-range voice",
+                 "higher": "higher voice"}[settings_store.voice_register(take["voice"])])
     lines = "".join(f'<li data-at="{start:.2f}"><span class="moment">{html.escape(moment)}</span>{html.escape(text)}</li>'
                     for (moment, _), text, start in zip(MOMENTS, take["lines"], take["starts"]))
     return f'''
@@ -280,14 +291,14 @@ async def main() -> None:
         for code, take in acted:
             clips[code] = clip_url(take["audio"])
             cards.append(card(code, host_service.MANNERS[take["manner"]]["label"], host_service.MANNERS[take["manner"]]["blurb"], take))
-        sections.append(f'<section><h2>Ways to play {html.escape(name)}</h2><p class="blurb">The same voice ({html.escape(voices[0])}), '
+        sections.append(f'<section><h2>Ways to play {html.escape(name)}</h2><p class="blurb">The same voice ({html.escape(voice_name(voices[0]))}), '
                         f'a different performance each time.</p>{"".join(cards)}</section>')
     voiced = [(f"V{i + 1}", take) for i, take in enumerate(takes[len(manners):]) if take]
     if voiced:
         cards = []
         for code, take in voiced:
             clips[code] = clip_url(take["audio"])
-            cards.append(card(code, take["voice"].capitalize(), "", take))
+            cards.append(card(code, voice_name(take["voice"]), "", take))
         sections.append(f'<section><h2>Other voices for {html.escape(name)}</h2><p class="blurb">All playing the '
                         f'{html.escape(host_service.MANNERS[manners[0]]["label"])}.</p>{"".join(cards)}</section>')
     if not clips:

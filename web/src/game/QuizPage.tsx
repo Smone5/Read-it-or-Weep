@@ -26,6 +26,11 @@ function savedHost(): string | null {
   }
 }
 
+// The end of a game: a moment of quiet for the results' sting, then the music under the host's sign-off; on his last
+// word it comes up big for a few seconds before settling into the after-party playlist.
+const ENDING_QUIET_MS = 2500
+const FINALE_MS = 5000
+
 export default function QuizPage() {
   const { slug = '' } = useParams()
   const [info, setInfo] = useState<QuizInfo | null>(null)
@@ -116,7 +121,7 @@ export default function QuizPage() {
     // where it is (a question, a gap, a music break); a game that cannot have music simply plays without.
     const runId = first.state.runId
     soundtrackFor.current = runId
-    setJukeboxLevel('gap')
+    setJukeboxLevel('intro') // the show opens loud, on its own, until the host starts talking
     if (first.state.mode !== 'straight') {
       api<Soundtrack>(`/api/runs/${runId}/soundtrack`, { retry: 2 }).then(
         (music) => {
@@ -152,16 +157,20 @@ export default function QuizPage() {
     setSummary(result)
     setScreen('summary')
     void load()
-    // The ending, in order: the game-over sting, then the host's sign-off (applause can run under
-    // him), and then the results playlist. A game that had a soundtrack never goes quiet: the song
-    // that is playing carries on under all of it, and the playlist picks up when that song ends.
+    // The ending, in order: the game-over sting in a moment of quiet, then the host's sign-off with the music
+    // coming up under him, then - on his last word - the music up big for a few seconds (a show ends on its biggest
+    // music, not its smallest), settling into the results playlist. A game that had a soundtrack never goes silent:
+    // the song that is playing carries on under all of it, and the playlist picks up when that song ends.
     const party = result.afterParty
     partyFor.current = result.runId
     soundtrackFor.current = null
-    if (party) setJukeboxLevel('party')
-    else stopJukebox(1200) // no music on this quiz's results screen
+    const ours = () => Boolean(party) && partyFor.current === result.runId
+    if (party) {
+      setJukeboxLevel('think')
+      window.setTimeout(() => ours() && setJukeboxLevel('party'), ENDING_QUIET_MS)
+    } else stopJukebox(1200) // no music on this quiz's results screen
     const music = () => {
-      if (party && partyFor.current === result.runId) startParty(party.tracks)
+      if (party && ours()) startParty(party.tracks)
     }
     const host = hostRef.current
     if (result.status !== 'completed' || !host) {
@@ -170,8 +179,15 @@ export default function QuizPage() {
     }
     const celebrating = result.personalBest && result.score > 0
     window.setTimeout(() => {
-      host.cue('summary')
-      void host.whenQuiet().then(music)
+      if (!host.cue('summary')) {
+        music() // no host to sign off after all
+        return
+      }
+      void host.whenQuiet().then(() => {
+        if (!ours()) return
+        setJukeboxLevel('title')
+        window.setTimeout(music, FINALE_MS)
+      })
     }, celebrating ? 500 : 1500)
   }
 
@@ -322,11 +338,37 @@ function Lobby({ info, player, hostId, onChooseHost, onStart, onResume, onSwitch
   const meeting = untilText(quiz.meetingAt)
   const firstName = player.name.split(' ')[0]
 
+  // Each host introduces themselves, so a player can choose one by ear. The sample is recorded once on the
+  // server and kept, so a tap costs nothing; the first tap of a new host may take a few seconds.
+  const sample = useRef<HTMLAudioElement | null>(null)
+  const [hearing, setHearing] = useState<{ id: string; playing: boolean } | null>(null)
+  useEffect(() => () => sample.current?.pause(), [])
+  const hear = (id: string) => {
+    const audio = sample.current ?? (sample.current = new Audio())
+    audio.pause()
+    if (hearing?.id === id) {
+      setHearing(null)
+      return
+    }
+    const done = () => setHearing((now) => (now?.id === id ? null : now))
+    audio.onplaying = () => setHearing({ id, playing: true })
+    audio.onended = done
+    audio.onerror = () => {
+      done()
+      setError('That host cannot be heard right now. Try again in a minute.')
+    }
+    setError('')
+    setHearing({ id, playing: false })
+    audio.src = `/api/quiz/${encodeURIComponent(quiz.slug)}/hosts/${encodeURIComponent(id)}/sample`
+    audio.play().catch(done)
+  }
+
   useEffect(() => {
     applyDecade(wantsDecade ? decade : null)
   }, [decade, wantsDecade])
 
   const go = async (action: () => Promise<void>) => {
+    sample.current?.pause()
     setBusy(true)
     setError('')
     try {
@@ -406,17 +448,32 @@ function Lobby({ info, player, hostId, onChooseHost, onStart, onResume, onSwitch
         </section>
       )}
 
+      {chosen?.id !== 'straight' && quiz.decades.length > 0 && <FavouriteArtist initial={player.favoriteArtist ?? null} />}
+
       {branding.host.choices.length > 1 && chosen?.id !== 'straight' && (
         <section>
           <p className="pixel mb-2 text-[9px] text-muted">Choose your host</p>
-          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+          <div className={`grid grid-cols-2 gap-2.5 ${branding.host.choices.length >= 4 ? 'sm:grid-cols-4' : 'sm:grid-cols-3'}`}>
             {branding.host.choices.map((choice, index) => {
               const selected = hostId ? choice.id === hostId : index === 0
               return (
-                <button key={choice.id} className="answer !items-start flex-col !gap-1" data-state={selected ? 'picked' : 'idle'} style={{ ['--tone' as string]: 'var(--accent)' }} onClick={() => { onChooseHost(choice.id); play('click') }} aria-pressed={selected}>
-                  <span className="pixel text-[11px]">{choice.name}</span>
-                  <span className="text-[14px] text-muted">{REGISTER_LABEL[choice.register] ?? 'Host'}</span>
-                </button>
+                <div key={choice.id} className="relative">
+                  <button className="answer w-full !items-start flex-col !gap-1 pr-12" data-state={selected ? 'picked' : 'idle'} style={{ ['--tone' as string]: 'var(--accent)' }} onClick={() => { onChooseHost(choice.id); play('click') }} aria-pressed={selected}>
+                    <span className="pixel text-[11px]">{choice.name}</span>
+                    <span className="text-[14px] text-muted">{choice.label ?? REGISTER_LABEL[choice.register] ?? 'Host'}</span>
+                  </button>
+                  {branding.host.voiceEnabled && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm absolute right-1.5 top-1/2 h-9 w-9 -translate-y-1/2 !p-0"
+                      onClick={() => hear(choice.id)}
+                      aria-label={hearing?.id === choice.id ? `Stop ${choice.name}` : `Hear ${choice.name}`}
+                      title={hearing?.id === choice.id ? 'Stop' : `Hear ${choice.name}`}
+                    >
+                      <span aria-hidden>{hearing?.id === choice.id ? (hearing.playing ? '■' : '…') : '▶'}</span>
+                    </button>
+                  )}
+                </div>
               )
             })}
           </div>
@@ -445,5 +502,82 @@ function Lobby({ info, player, hostId, onChooseHost, onStart, onResume, onSwitch
         </div>
       </Modal>
     </div>
+  )
+}
+
+/**
+ * "Who do you like?" - a player's favourite artist. Now and then a song from them, or from artists like them,
+ * plays behind their game and on their results screen (never as a name-that-tune question). Optional.
+ */
+function FavouriteArtist({ initial }: { initial: string | null }) {
+  const [saved, setSaved] = useState(initial)
+  const [text, setText] = useState(initial ?? '')
+  const [similar, setSimilar] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+  const [problem, setProblem] = useState('')
+
+  const save = async (value: string) => {
+    setBusy(true)
+    setProblem('')
+    try {
+      const reply = await api<{ artist: string | null; similar: string[] }>('/api/me/favourite-artist', {
+        method: 'PUT',
+        body: { artist: value.trim() || null },
+      })
+      setSaved(reply.artist)
+      setText(reply.artist ?? '')
+      setSimilar(reply.similar ?? [])
+    } catch (caught) {
+      setProblem(caught instanceof ApiError ? caught.message : 'That did not save. Try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const unchanged = text.trim() === (saved ?? '')
+  return (
+    <section>
+      <label className="pixel mb-2 block text-[9px] text-muted" htmlFor="favourite-artist">
+        Who do you like? <span className="normal-case">(optional)</span>
+      </label>
+      <form
+        className="flex gap-2"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (!unchanged) void save(text)
+        }}
+      >
+        <input
+          id="favourite-artist"
+          className="field min-w-0 flex-1"
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          placeholder="An artist, e.g. Chicago"
+          maxLength={80}
+          autoComplete="off"
+        />
+        <button className="btn btn-ghost flex-none" type="submit" disabled={busy || unchanged}>
+          {busy ? '…' : 'Save'}
+        </button>
+      </form>
+      <p className="mt-2 text-[15px] text-muted" aria-live="polite">
+        {saved ? (
+          <>
+            Now and then: {saved}
+            {similar.length > 0 && `, and artists like ${similar.slice(0, 3).join(', ')}`}.{' '}
+            <button className="underline" type="button" onClick={() => void save('')} disabled={busy}>
+              Clear
+            </button>
+          </>
+        ) : (
+          'Now and then, a song from them or from artists like them.'
+        )}
+      </p>
+      {problem && (
+        <p className="mt-1 text-[15px]" style={{ color: 'var(--bad)' }}>
+          {problem}
+        </p>
+      )}
+    </section>
   )
 }
