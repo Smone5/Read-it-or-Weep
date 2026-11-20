@@ -27,7 +27,7 @@ import { MusicToggle } from '../components/NowPlaying'
 import { ErrorNote, Modal, SoundToggle } from '../components/ui'
 import { api, ApiError, onConnectionTrouble } from '../lib/api'
 import type { HostVoice } from '../lib/hostVoice'
-import { musicOn, onJukeboxChange, setJukeboxLevel, type JukeboxState } from '../lib/jukebox'
+import { jukeboxMix, musicOn, onJukeboxChange, setJukeboxLevel, type JukeboxState } from '../lib/jukebox'
 import { fadeOutMusic, preloadClip, stopMusic } from '../lib/music'
 import { blip, buzz, play } from '../lib/sound'
 import { trace } from '../lib/trace'
@@ -59,15 +59,15 @@ const MAX_INTRO_MS = 11000 // ...and the host never holds the game up longer tha
 // works, so it may run longer - and it can always be skipped.
 const MAX_OPENING_MS = 45000
 // The show opens with the music on its own, loud, before the host's first word (his line is written meanwhile).
-// The organiser: "have the music play a little bit longer before the host starts." His first word comes this long
-// after the tap - and at least OPENING_THEME_MS after the theme's first note, since on a slow phone the first song
-// takes a while to arrive - but never later than OPENING_LATEST_MS. The music starts gliding down 1.2 s before he
-// speaks (see hostVoice), so it plays on its own, loud, for about six seconds.
-const OPENING_MUSIC_MS = 7000
-const OPENING_THEME_MS = 7000
-const OPENING_LATEST_MS = 9500
+// The organiser: "have the music play a little bit longer before the host starts." The theme plays on its own for the
+// organiser's number of seconds (admin ▸ Play styles ▸ Music; six as tuned), counted from its first note - on a slow
+// phone the first song takes a while to arrive - and then glides down for 1.2 s as he comes in (see hostVoice). If the
+// song is very late he waits no more than OPENING_SLACK_MS beyond that.
+const HOST_LEAD_IN_MS = 1200
+const OPENING_SLACK_MS = 2500
+const openingThemeMs = () => jukeboxMix().opening_sec * 1000 + HOST_LEAD_IN_MS
 // No song by now and none on its way (music off, or no soundtrack for this game): he need not wait for one. A song
-// that is only late - the browser's audio still waking - is still waited for, up to OPENING_LATEST_MS.
+// that is only late - the browser's audio still waking - is still waited for, up to OPENING_SLACK_MS beyond it.
 const NO_MUSIC_AFTER_MS = 2500
 const NO_HOST_OPENING_MS = 4000 // with no host to open the show, the theme still gets a few seconds
 // A round's title card: the music drops as the player taps Next, the sting plays in that moment of quiet, then the
@@ -102,6 +102,11 @@ const ROUND_BLURB: Record<string, string> = {
   'Last Question': 'Double points',
   'Speed Run': 'Beat the clock',
   'The Quiz': 'Take your time',
+  // Office Jukebox, the music side game
+  'Morning Stand-up': 'Name the artist · an easy start',
+  'Jargon Jukebox': 'Song titles in corporate-speak',
+  'Song or Synergy?': 'Hit song, or office jargon?',
+  'Closing Bell': 'Name the song · double points',
 }
 
 const MODE_BLURB: Record<ModeId, string> = {
@@ -109,16 +114,17 @@ const MODE_BLURB: Record<ModeId, string> = {
   sudden_death: 'Three strikes and you are out',
   speed: 'Beat the clock',
   straight: 'Take your time',
+  jukebox: 'Hits with an office twist · nothing costs points',
 }
 
 function openingCard(state: RunState, first?: Item): Card {
-  const round = first && state.mode === 'show' ? `First up: ${first.round.name}` : ''
+  const round = first && (state.mode === 'show' || state.mode === 'jukebox') ? `First up: ${first.round.name}` : ''
   return { kicker: 'Get ready', title: state.modeName, blurb: round || MODE_BLURB[state.mode] }
 }
 
 function roundCard(next: Item, mode: ModeId): Card {
-  if (next.slot === 'music' && mode !== 'show') return { kicker: 'Bonus', title: 'Music Break', blurb: 'Name that tune · win back a life' }
-  const kicker = mode === 'show' ? `Round ${next.round.number}` : 'Get ready'
+  if (next.slot === 'music' && mode === 'sudden_death') return { kicker: 'Bonus', title: 'Music Break', blurb: 'Name that tune · win back a life' }
+  const kicker = mode === 'show' || mode === 'jukebox' ? `Round ${next.round.number}` : 'Get ready'
   return { kicker, title: next.round.name, blurb: ROUND_BLURB[next.round.name] ?? '' }
 }
 
@@ -156,6 +162,10 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   const movingRef = useRef(false)
   const skipRef = useRef<(() => void) | null>(null)
   const welcomeRef = useRef(0) // the welcome line's number (0: no host to open the show)
+  // The final question is read out before its answers appear (its clock waits on the server: see engine.place_wager).
+  const [reading, setReading] = useState(false)
+  const readingRef = useRef(false)
+  const readTimer = useRef(0)
   const stopOpeningWatch = useRef<() => void>(() => undefined)
   const revealRef = useRef<HTMLElement>(null)
 
@@ -164,7 +174,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   const quick = mode === 'speed' || item?.slot === 'fact_fake'
   // The host reacts to answers in the two "show" styles. In a Speed Run he opens and signs off
   // but stays out of the way of the race; the Straight Quiz has no host at all.
-  const hostReacts = mode === 'show' || mode === 'sudden_death'
+  const hostReacts = mode === 'show' || mode === 'sudden_death' || mode === 'jukebox'
 
   useEffect(() => onConnectionTrouble(setReconnecting), [])
 
@@ -195,7 +205,9 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   // player is still on the question or on its answer. ("The music trivia question should finish playing its 30
   // seconds and new music should keep going.")
   const [clipOver, setClipOver] = useState(false)
-  const clipHasFloor = item?.slot === 'music' && !clipOver
+  // ...and in Office Jukebox the song that was being worked out plays once it has been answered: the reward.
+  const rewardClip = phase === 'reveal' ? reveal?.music?.previewUrl : undefined
+  const clipHasFloor = (item?.slot === 'music' || Boolean(rewardClip)) && !clipOver
   useEffect(() => {
     setAfterHost(false)
     setLingering(false)
@@ -211,7 +223,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
     }
   }, [phase, host])
   useEffect(() => {
-    if (!afterHost || clipHasFloor) return
+    if (!afterHost || clipHasFloor || !jukeboxMix().ease_down) return
     const linger = () => setLingering(true)
     const timer = window.setTimeout(linger, LINGER_AFTER_MS)
     const onHide = () => document.hidden && linger() // nobody is looking: no need for it to be up
@@ -419,6 +431,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       else if (waiting && !waiting.sealed) {
         roundRef.current = waiting.round.name
         show(waiting) // mid-question, or at the wager screen
+        if ((waiting.startsInMs ?? 0) > 0) readOut(waiting, false) // picked up during the final's reading
       } else if (waiting) {
         movingRef.current = true
         void introduce(waiting, false)
@@ -430,11 +443,11 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         if (!resumed) {
           play('levelup')
           const tapped = Date.now()
-          const welcome = host?.cue('welcome', undefined, { notBefore: tapped + OPENING_MUSIC_MS }) ?? 0
+          const welcome = host?.cue('welcome', undefined, { notBefore: tapped + openingThemeMs() }) ?? 0
           welcomeRef.current = welcome
           trace('opening')
           if (welcome && host) {
-            // His first word waits for the theme: OPENING_THEME_MS after its first note, if that is later than
+            // His first word waits for the theme: openingThemeMs() after its first note, if that is later than
             // planned. With no music coming, he need not wait at all.
             let anchored = false
             const anchor = (at: number) => {
@@ -446,7 +459,8 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
             let jukeboxNow: JukeboxState | null = null
             const unsubscribe = onJukeboxChange((jukebox) => {
               jukeboxNow = jukebox
-              if (jukebox.playing) anchor(Math.min(tapped + OPENING_LATEST_MS, Math.max(tapped + OPENING_MUSIC_MS, Date.now() + OPENING_THEME_MS)))
+              const theme = openingThemeMs()
+              if (jukebox.playing) anchor(Math.min(tapped + theme + OPENING_SLACK_MS, Math.max(tapped + theme, Date.now() + theme)))
             })
             const noMusic = window.setTimeout(() => {
               if (!(jukeboxNow?.active && musicOn())) anchor(0)
@@ -465,6 +479,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       // after mounting. It stops itself once the theme starts, or after NO_MUSIC_AFTER_MS at the latest.)
       aliveRef.current = false
       window.clearTimeout(titleTimer.current)
+      window.clearTimeout(readTimer.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -504,7 +519,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
           window.setTimeout(() => blip(streak >= 5 ? 'bigstreak' : 'streak'), 300) // just after the "correct" sound
           window.setTimeout(() => setBanner((current) => (current === `${streak} in a row!` ? '' : current)), 2400)
         }
-        if (hostReacts && item.slot !== 'fact_fake') host?.cue('result', item.id)
+        if (hostReacts && item.slot !== 'fact_fake' && item.slot !== 'song_or_jargon') host?.cue('result', item.id)
       } catch (caught) {
         if (caught instanceof ApiError && caught.status === 409) await finish()
         else {
@@ -578,16 +593,55 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
     }
   }
 
+  /** The answers are wanted now: the reading is over, or skipped. The server starts the clock (never later than planned). */
+  const startClock = async (itemId: string) => {
+    if (!readingRef.current) return
+    readingRef.current = false
+    window.clearTimeout(readTimer.current)
+    try {
+      const opened = await api<{ item: Item; state: RunState }>(`/api/runs/${runId}/start-clock`, { body: { itemId }, retry: RETRY })
+      if (!aliveRef.current) return
+      setItem(opened.item)
+      setState(opened.state)
+    } catch (caught) {
+      setError((caught as Error).message)
+    }
+    setReading(false)
+    blip('question')
+    trace('read.end')
+  }
+
+  /** The final question: the host reads it out, then its answers and its clock appear. Without his voice, at once. */
+  const readOut = (next: Item, aloud: boolean) => {
+    readingRef.current = true
+    setReading(true)
+    trace('read.start', { inMs: next.startsInMs ?? 0, aloud: Boolean(aloud && host?.canBeHeard) })
+    if (aloud && host?.canBeHeard) {
+      host.cue('read', next.id)
+      void host.whenQuiet().then(() => void startClock(next.id))
+      // The server starts the clock when the reading should be over, whatever happens here.
+      readTimer.current = window.setTimeout(() => void startClock(next.id), (next.startsInMs ?? 0) + 250)
+    } else void startClock(next.id)
+  }
+
+  const skipReading = () => {
+    if (!item || !readingRef.current) return
+    host?.skip()
+    void startClock(item.id)
+  }
+
   const placeWager = async (amount: number) => {
     if (!item || busy) return
     setBusy(true)
     try {
-      const result = await api<{ item: Item; state: RunState }>(`/api/runs/${runId}/wager`, { body: { itemId: item.id, amount }, retry: RETRY })
+      const result = await api<{ item: Item; state: RunState }>(`/api/runs/${runId}/wager`, { body: { itemId: item.id, amount, readAloud: true }, retry: RETRY })
       play('click')
       host?.skip() // nothing he was saying about the bet should run into the question
       setItem(result.item)
       setPhase('question')
       trace('show', { slot: result.item.slot, round: result.item.round.name, wager: false })
+      if ((result.item.startsInMs ?? 0) > 0) readOut(result.item, true)
+      else blip('question')
     } catch (caught) {
       setError((caught as Error).message)
     } finally {
@@ -639,7 +693,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   }
 
   // "Question 3/19": answered so far, plus the one on screen, out of everything still queued.
-  const showsCounter = mode === 'show' || mode === 'straight'
+  const showsCounter = mode === 'show' || mode === 'straight' || mode === 'jukebox'
   const onScreen = item && !reveal && item.position >= state.answered ? 1 : 0
   const total = Math.max(1, state.answered + onScreen + (state.remaining ?? 0))
   const position = showsCounter ? `${Math.min(state.answered + onScreen, total) || 1}/${total}` : String(state.answered)
@@ -700,19 +754,19 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
           </div>
         )}
 
-        {(phase === 'question' || phase === 'reveal') && item && item.options && (
+        {(phase === 'question' || phase === 'reveal') && item && (item.options || reading) && (
           <>
             <section className="card rise p-4 sm:p-5" key={item.id}>
               <div className="mb-3 flex flex-wrap items-center gap-2">
-                <span className="chip">{item.slot === 'music' ? 'Music Break' : item.round.name}</span>
+                <span className="chip">{item.slot === 'music' && mode !== 'jukebox' ? 'Music Break' : item.round.name}</span>
                 {item.section && item.slot !== 'music' && <span className="chip chip-accent">{item.section.heading}</span>}
                 {item.wager ? <span className="chip chip-accent">Bet {item.wager}</span> : null}
                 {item.multiplier !== 1 && !item.wager && <span className="chip">x{item.multiplier} points</span>}
               </div>
-              {item.title && item.slot !== 'fact_fake' && item.slot !== 'music' && (
+              {item.title && item.slot !== 'fact_fake' && item.slot !== 'music' && item.slot !== 'song_or_jargon' && (
                 <p className="pixel neon-accent mb-2 text-[10px] sm:text-xs">“{item.title}”</p>
               )}
-              <h2 className={`!normal-case ${item.slot === 'fact_fake' ? 'text-[22px] sm:text-2xl' : 'text-[19px] sm:text-[22px]'}`} style={{ fontFamily: 'var(--font-sans)', lineHeight: 1.35, letterSpacing: 0 }}>
+              <h2 className={`!normal-case ${item.slot === 'fact_fake' || item.slot === 'song_or_jargon' || item.slot === 'jargon' ? 'text-[22px] sm:text-2xl' : 'text-[19px] sm:text-[22px]'}`} style={{ fontFamily: 'var(--font-sans)', lineHeight: 1.35, letterSpacing: 0 }}>
                 {item.text}
               </h2>
               {item.peek && phase === 'question' && (
@@ -723,6 +777,12 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
               )}
               {item.hint && phase === 'question' && (
                 <p className="mt-3 text-[15px]" style={{ color: 'var(--accent)' }}><span className="pixel text-[8px]">Hint · </span>{item.hint}</p>
+              )}
+              {reading && (
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                  <p className="pixel blink text-[10px] text-muted" role="status">{hostName} reads the question…</p>
+                  <button className="btn btn-ghost btn-sm" onClick={skipReading}>Skip ▶</button>
+                </div>
               )}
             </section>
 
@@ -739,8 +799,11 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
             {item.music && (
               <MusicPlayer key={`clip:${item.id}`} src={item.music.previewUrl} active={phase === 'question'} onBroken={() => void musicBroken()} onPlaying={() => setClipStarted(true)} onClipOver={setClipOver} />
             )}
+            {!item.music && rewardClip && (
+              <MusicPlayer key={`reward:${item.id}`} src={rewardClip} active={false} onBroken={() => undefined} onClipOver={setClipOver} />
+            )}
 
-            {phase === 'question' && item.timeLimitSec > 0 && (
+            {phase === 'question' && item.timeLimitSec > 0 && item.options && (
               <TimerBar
                 // Re-read the clock from the server after a wager or a lifeline (writing a hint stops it).
                 timerKey={`${item.id}:${item.wager ?? ''}:${item.lifelinesUsed.length}`}
@@ -754,8 +817,8 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
               />
             )}
 
-            {item.slot === 'fact_fake' ? (
-              <FactFakeButtons picked={picked} correctIndex={reveal ? reveal.correctIndex : null} disabled={busy || phase !== 'question'} onPick={(i) => void submit(i)} />
+            {!item.options ? null : item.slot === 'fact_fake' || item.slot === 'song_or_jargon' ? (
+              <FactFakeButtons labels={item.slot === 'song_or_jargon' ? item.options : undefined} picked={picked} correctIndex={reveal ? reveal.correctIndex : null} disabled={busy || phase !== 'question'} onPick={(i) => void submit(i)} />
             ) : (
               <AnswerList
                 options={item.options}

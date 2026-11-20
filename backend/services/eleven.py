@@ -21,6 +21,7 @@ import base64
 import contextlib
 import json
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -88,9 +89,16 @@ class ElevenError(RuntimeError):
     ``permanent``: it will not work on a second try either (a wrong key, no credit left, a plan without access).
     """
 
-    def __init__(self, message: str, *, permanent: bool = False):
+    def __init__(self, message: str, *, permanent: bool = False, busy: bool | None = None):
         super().__init__(message)
         self.permanent = permanent
+        # ElevenLabs is only busy (too many lines at once for the plan, or a moment's rate limit): worth another try.
+        self.busy = busy if busy is not None else _sounds_busy(message)
+
+
+def _sounds_busy(message: str) -> bool:
+    text = message.lower()
+    return any(word in text for word in ("429", "concurrent", "too many", "rate limit", "busy", "system_busy"))
 
 
 def configured() -> bool:
@@ -194,6 +202,18 @@ def _complaint(status: int, body: bytes | str) -> str:
 
 # --------------------------------------------------------------------------- performing a line
 
+BUSY_RETRIES = 3
+_slots: asyncio.Semaphore | None = None
+
+
+def _slot() -> asyncio.Semaphore:
+    """How many lines go to ElevenLabs at the same moment (ELEVENLABS_CONCURRENCY: the plan's limit)."""
+    global _slots
+    if _slots is None:
+        _slots = asyncio.Semaphore(max(1, config.elevenlabs_concurrency))
+    return _slots
+
+
 async def perform(text: str, voice: Voice, *, output_format: str = OUTPUT_FORMAT) -> AsyncIterator[bytes]:
     """The line, performed: 24 kHz 16-bit mono PCM (or ``output_format``, e.g. "mp3_44100_64"), in pieces, as it
     is made.
@@ -204,11 +224,24 @@ async def perform(text: str, voice: Voice, *, output_format: str = OUTPUT_FORMAT
         raise ElevenError("no ElevenLabs key is set", permanent=True)
     path = engine()
     voice_id = await account_voice_id(voice)
-    pieces = (_socket(text, voice_id, output_format) if path == "socket"
-              else _http(text, voice_id, path, output_format))
-    async with contextlib.aclosing(pieces) as audio:
-        async for chunk in audio:
-            yield chunk
+    # Several games at once: the plan takes only so many lines at the same moment. The rest queue here for a free
+    # slot, and a "busy" answer is tried again after a short pause rather than handed to the backup voice at once.
+    for attempt in range(BUSY_RETRIES + 1):
+        started = False
+        async with _slot():
+            pieces = (_socket(text, voice_id, output_format) if path == "socket"
+                      else _http(text, voice_id, path, output_format))
+            try:
+                async with contextlib.aclosing(pieces) as audio:
+                    async for chunk in audio:
+                        started = True
+                        yield chunk
+                return
+            except ElevenError as exc:
+                if started or not exc.busy or attempt == BUSY_RETRIES:
+                    raise
+                log.info("ElevenLabs busy (%s); trying again", exc)
+        await asyncio.sleep(0.4 * (attempt + 1) + random.random() * 0.3)
 
 
 async def _socket(text: str, voice_id: str, output_format: str = OUTPUT_FORMAT) -> AsyncIterator[bytes]:
@@ -222,7 +255,7 @@ async def _socket(text: str, voice_id: str, output_format: str = OUTPUT_FORMAT) 
         status = getattr(getattr(exc, "response", None), "status_code", None)
         body = getattr(getattr(exc, "response", None), "body", b"") or b""
         raise ElevenError(_complaint(status, body) if status else f"could not reach ElevenLabs ({type(exc).__name__})",
-                          permanent=status in REFUSED) from exc
+                          permanent=status in REFUSED, busy=status == 429 or None) from exc
     try:
         await connection.send(json.dumps({"voices": [voice_id]}))
         await connection.send(json.dumps({"inputs": [{"text": text, "voice_id": voice_id, "new_turn": False}]}))
@@ -278,7 +311,7 @@ async def _http(text: str, voice_id: str, path: str, output_format: str = OUTPUT
                                      headers=_headers()) as response:
                 if response.status_code != 200:
                     raise ElevenError(_complaint(response.status_code, await response.aread()),
-                                      permanent=response.status_code in REFUSED)
+                                      permanent=response.status_code in REFUSED, busy=response.status_code == 429 or None)
                 async for chunk in response.aiter_bytes():
                     if chunk:
                         yield chunk
@@ -310,3 +343,23 @@ async def account() -> dict:
     data = response.json()
     return {key: data.get(key) for key in ("tier", "character_count", "character_limit", "next_character_count_reset_unix",
                                            "status")}
+
+
+_share: tuple[float, float | None] = (0.0, None)      # (when read, share of the plan used)
+SHARE_FRESH_SEC = 300
+
+
+async def share_used() -> float | None:
+    """How much of the month's plan has been used, 0 to 1 (re-read every few minutes; None if it cannot be read)."""
+    global _share
+    now = time.monotonic()
+    if _share[1] is not None and now - _share[0] < SHARE_FRESH_SEC:
+        return _share[1]
+    try:
+        info = await account()
+        limit = int(info.get("character_limit") or 0)
+        share = int(info.get("character_count") or 0) / limit if limit else None
+    except Exception:  # noqa: BLE001 - not knowing is never a reason to stop the host
+        share = None
+    _share = (now, share)
+    return share

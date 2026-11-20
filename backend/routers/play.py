@@ -112,7 +112,7 @@ async def quiz_info(slug: str, player: dict | None = Depends(optional_player),
             "meetingAt": quiz["meeting_at"], "status": quiz["status"], "requiresCode": bool(quiz["access_code"]),
             "teams": quiz["teams"], "sections": len(sections), "questions": stock["mcq"] + stock["fact_fake"],
             "ready": stock["mcq"] >= 3, "leaderboard": bool(rules["leaderboard"]),
-            "modes": [{**settings_store.mode_view(m, rules), "music": music and m in ("show", "sudden_death")}
+            "modes": [{**settings_store.mode_view(m, rules), "music": music and m in ("show", "sudden_death", "jukebox")}
                       for m in rules["modes"]],
             "defaultMode": rules["default_mode"], "decades": rules["decades"] if music else [],
         },
@@ -244,6 +244,7 @@ class AnswerBody(BaseModel):
 class WagerBody(BaseModel):
     itemId: str
     amount: int
+    readAloud: bool = False      # the page shows the question while the host reads it, then asks for its answers
 
 
 class LifelineBody(BaseModel):
@@ -312,7 +313,7 @@ async def run_soundtrack(run_id: str, player: dict = Depends(current_player)) ->
     asked = await db.fetch("select music_track_id from run_items where run_id = $1 and music_track_id is not null", run_id)
     tracks = await music_service.soundtrack(decade, run["id"], {r["music_track_id"] for r in asked})
     tracks = favorites.mix(tracks, await favorites.for_player(player["id"]), run["id"], decade)
-    return {"decade": decade, "tracks": tracks, "volume": rules["soundtrack_volume"]}
+    return {"decade": decade, "tracks": tracks, "volume": rules["soundtrack_volume"], "mix": rules["mix"]}
 
 
 @router.post("/runs/{run_id}/next")
@@ -349,7 +350,18 @@ async def answer(run_id: str, body: AnswerBody, player: dict = Depends(current_p
 async def wager(run_id: str, body: WagerBody, player: dict = Depends(current_player)) -> dict:
     run, _, rules = await _load_run(run_id, player)
     try:
-        item = await engine.place_wager(run, body.itemId, body.amount)
+        item = await engine.place_wager(run, body.itemId, body.amount, read_aloud=body.readAloud)
+    except engine.GameError as exc:
+        raise _game_error(exc) from exc
+    return {"item": await engine.public_item(item, run), "state": engine.run_state(run, rules)}
+
+
+@router.post("/runs/{run_id}/start-clock")
+async def start_clock(run_id: str, body: ItemBody, player: dict = Depends(current_player)) -> dict:
+    """The final question has been read out, or the player skipped the reading: show its answers, start its clock."""
+    run, _, rules = await _load_run(run_id, player)
+    try:
+        item = await engine.start_clock(run, body.itemId)
     except engine.GameError as exc:
         raise _game_error(exc) from exc
     return {"item": await engine.public_item(item, run), "state": engine.run_state(run, rules)}

@@ -17,6 +17,8 @@ type Props = {
   talk?: TalkControl | null
   showLeaderboard: boolean
   onPlayAgain: () => void
+  /** Back to the lobby: another style, decade or host, the readiness map, the high scores. */
+  onMainMenu: () => void
 }
 
 function minutes(seconds: number | null): string {
@@ -25,13 +27,14 @@ function minutes(seconds: number | null): string {
   return `${m}:${String(seconds % 60).padStart(2, '0')}`
 }
 
-export default function Summary({ slug, summary, hostName, hostLine, hostSpeaking, talk, showLeaderboard, onPlayAgain }: Props) {
+export default function Summary({ slug, summary, hostName, hostLine, hostSpeaking, talk, showLeaderboard, onPlayAgain, onMainMenu }: Props) {
   const [board, setBoard] = useState<Leaderboard | null>(null)
   const [stars, setStars] = useState(0)
   const [thanked, setThanked] = useState(false)
   const [reviewOpen, setReviewOpen] = useState(false)
   const celebrate = summary.personalBest && summary.score > 0 && summary.status === 'completed'
   const failed = summary.mode === 'straight' && summary.passed === false
+  const jukebox = summary.mode === 'jukebox' // the music side game: no report to be ready for
 
   useEffect(() => {
     play(celebrate ? 'cheer' : 'gameover')
@@ -78,9 +81,15 @@ export default function Summary({ slug, summary, hostName, hostLine, hostSpeakin
       <NowPlaying decade={summary.afterParty?.decade} />
 
       <section className="card grid grid-cols-2 gap-x-4 gap-y-4 p-4 sm:grid-cols-4">
-        <div className="hud">Report<b>{summary.report.correct}/{summary.report.answered}</b></div>
+        {jukebox ? (
+          <div className="hud">Music<b>{summary.music.correct}/{summary.music.answered}</b></div>
+        ) : (
+          <div className="hud">Report<b>{summary.report.correct}/{summary.report.answered}</b></div>
+        )}
         <div className="hud">Accuracy<b>{summary.accuracy}%</b></div>
-        {summary.music.answered > 0 ? (
+        {jukebox ? (
+          <div className="hud">Time<b>{minutes(summary.durationSec)}</b></div>
+        ) : summary.music.answered > 0 ? (
           <div className="hud">Music<b>{summary.music.correct}/{summary.music.answered}</b></div>
         ) : (
           <div className="hud">Time<b>{minutes(summary.durationSec)}</b></div>
@@ -93,6 +102,16 @@ export default function Summary({ slug, summary, hostName, hostLine, hostSpeakin
         )}
       </section>
 
+      {jukebox ? (
+        <section className="card card-accent p-4">
+          <h2 className="neon-accent text-xs">Warmed up</h2>
+          <p className="mt-2">
+            {summary.accuracy >= 70
+              ? 'That is the ear of a pro. Now take the same confidence into the report: the main game is waiting.'
+              : 'Every jingle intern starts somewhere. You are warmed up now: take on the report in the main game.'}
+          </p>
+        </section>
+      ) : (
       <section className="card p-4">
         <ReadinessMap readiness={summary.readiness} />
         {summary.readiness.ready ? (
@@ -104,8 +123,9 @@ export default function Summary({ slug, summary, hostName, hostLine, hostSpeakin
           </p>
         )}
       </section>
+      )}
 
-      {reread.length > 0 && (
+      {!jukebox && reread.length > 0 && (
         <section className="card card-accent p-4">
           <h2 className="neon-accent text-xs">Worth a re-read</h2>
           <ul className="mt-3 grid gap-1.5">
@@ -161,7 +181,10 @@ export default function Summary({ slug, summary, hostName, hostLine, hostSpeakin
         </div>
       </section>
 
-      <button className="btn btn-primary btn-lg" onClick={onPlayAgain}>Play again ▶</button>
+      <div className="flex flex-wrap gap-3">
+        <button className="btn btn-primary btn-lg flex-1" onClick={onPlayAgain}>Play again ▶</button>
+        <button className="btn btn-ghost btn-lg flex-1" onClick={onMainMenu}>Main menu</button>
+      </div>
     </div>
   )
 }

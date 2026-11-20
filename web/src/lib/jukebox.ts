@@ -26,6 +26,15 @@ export type JukeboxLevel = 'think' | 'gap' | 'wait' | 'linger' | 'swell' | 'titl
 /** How loud the organiser wants the music behind the questions. */
 export type JukeboxVolume = 'quiet' | 'medium' | 'loud'
 
+/**
+ * The organiser's music levels, moment by moment (admin ▸ quiz ▸ Play styles ▸ Music): steps of about 3 dB from the
+ * mix tuned by ear (0). Questions can be -3: silent. Plus the opening theme's length, and whether the music eases off
+ * while a player lingers on an answer.
+ */
+export type JukeboxMix = { opening: number; opening_sec: number; under_host: number; questions: number; between: number; ease_down: boolean }
+const MIX_AS_TUNED: JukeboxMix = { opening: 0, opening_sec: 6, under_host: 0, questions: 0, between: 0, ease_down: true }
+const mixStep = (steps: number) => (steps <= -3 ? 0 : 10 ** ((3 * steps) / 20))
+
 export type JukeboxState = {
   /** True from the moment a game (or a results screen) has music, whether or not it is sounding. */
   active: boolean
@@ -85,6 +94,10 @@ const UNDER_HOST_INTRO = 0.34
 // the game gets louder, so he never disappears under it. (A cap of 2 dB, tried first, meant a player who turned the
 // music up still found it "too quiet at times": while the host talks, which is much of a game.)
 const UNDER_HOST_PLAYER_MAX = 2.25
+// On a phone or tablet the music sits a little lower under him (about 2 dB): a small speaker makes music mask speech
+// more than a laptop's does ("not hearing the host on mobile well", 2026-11-20).
+const TOUCH = typeof window !== 'undefined' && window.matchMedia?.('(hover: none) and (pointer: coarse)').matches
+const UNDER_HOST_TOUCH = TOUCH ? 0.8 : 1
 // The carve: while his voice sounds, the music loses some of the band where speech is understood (consonants,
 // 1.5-4 kHz - also where a phone speaker is loudest and where the songs' singers sit). That buys more clarity than
 // turning the whole song down would, so the song can stay fuller underneath him.
@@ -122,6 +135,7 @@ let queue: PartyTrack[] = []
 let index = -1
 let level: JukeboxLevel = 'out'
 let volume: JukeboxVolume = 'medium'
+let mix: JukeboxMix = MIX_AS_TUNED
 let on = false
 let paused = false
 let needsTap = false
@@ -244,10 +258,13 @@ function goal(): number {
       : level === 'think' || level === 'wait' || level === 'swell' || level === 'title' || level === 'intro'
         ? levels[level]
         : levels.gap // 'gap' and 'linger'
+  // The organiser's own adjustment for this moment (see JukeboxMix).
+  const moment = level === 'intro' ? mixStep(mix.opening) : level === 'think' ? mixStep(mix.questions) : level === 'party' ? 1 : mixStep(mix.between)
   const scale = playerScale()
-  if (!voiceIsOver()) return Math.min(MAX_GAIN, base * scale)
-  const duck = level === 'intro' ? UNDER_HOST_INTRO : level === 'swell' || level === 'title' ? UNDER_HOST_BIG : UNDER_HOST
-  return Math.min(MAX_GAIN, base * scale, duck * Math.min(scale, UNDER_HOST_PLAYER_MAX))
+  if (!voiceIsOver()) return Math.min(MAX_GAIN, base * moment * scale)
+  const duck =
+    (level === 'intro' ? UNDER_HOST_INTRO : level === 'swell' || level === 'title' ? UNDER_HOST_BIG : UNDER_HOST) * mixStep(mix.under_host) * UNDER_HOST_TOUCH
+  return Math.min(MAX_GAIN, base * moment * scale, duck * Math.min(scale, UNDER_HOST_PLAYER_MAX))
 }
 
 /** Seconds to cover about two thirds of the way to a new level. Each kind of move has its own speed. */
@@ -601,8 +618,13 @@ export function setJukeboxLevel(next: JukeboxLevel) {
   if (on) sync()
 }
 
+/** The music levels this game was given (as tuned, until its soundtrack has arrived). */
+export function jukeboxMix(): JukeboxMix {
+  return mix
+}
+
 /** Start the soundtrack for a game. The level is whatever the game last asked for. */
-export function startJukebox(list: PartyTrack[], options: { volume?: JukeboxVolume } = {}) {
+export function startJukebox(list: PartyTrack[], options: { volume?: JukeboxVolume; mix?: Partial<JukeboxMix> } = {}) {
   if (!list.length) return
   session += 1
   listen()
@@ -611,6 +633,7 @@ export function startJukebox(list: PartyTrack[], options: { volume?: JukeboxVolu
   failures = 0
   heard.clear()
   volume = options.volume ?? 'medium'
+  mix = { ...MIX_AS_TUNED, ...(options.mix ?? {}) }
   on = true
   paused = false
   trace('jukebox.start', { songs: list.length, volume })

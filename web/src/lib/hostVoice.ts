@@ -54,6 +54,8 @@ type Line = {
   /** For the timing trace: seconds of speech received, and how often playback ran dry waiting for more. */
   seconds: number
   gaps: number
+  /** Pieces that arrived while the phone had his audio asleep: played as soon as it wakes. */
+  waiting?: ArrayBuffer[]
 }
 
 type Incoming = { type: string; id?: number; cue?: string; delta?: string; voice?: boolean; talk?: boolean; sampleRate?: number }
@@ -68,6 +70,33 @@ const FADE_SEC = 0.12 // cutting the host off: a quick fade, not a click
 const LEAD_IN_SEC = 1.2
 const VOICE_FADE_FROM = 0.45
 const VOICE_FADE_SEC = 0.7
+// His voice goes through a gentle leveller, so a quiet aside (often the punchline) is not lost under the music: it
+// lifts the quiet beats about 4 dB and leaves the loud ones where they were (the trim takes back the make-up gain
+// a compressor adds by itself). A phone's small speaker gets him a little louder still.
+const TOUCH = typeof window !== 'undefined' && window.matchMedia?.('(hover: none) and (pointer: coarse)').matches
+const LEVELLER_TRIM = TOUCH ? 1 : 0.7
+const voiceBuses = new WeakMap<AudioContext, AudioNode>()
+
+function voiceBus(context: AudioContext): AudioNode {
+  const known = voiceBuses.get(context)
+  if (known) return known
+  const lowCut = context.createBiquadFilter() // rumble a phone speaker cannot play anyway
+  lowCut.type = 'highpass'
+  lowCut.frequency.value = 90
+  const leveller = context.createDynamicsCompressor()
+  leveller.threshold.value = -24
+  leveller.knee.value = 8
+  leveller.ratio.value = 2
+  leveller.attack.value = 0.005
+  leveller.release.value = 0.2
+  const trim = context.createGain()
+  trim.gain.value = LEVELLER_TRIM
+  lowCut.connect(leveller)
+  leveller.connect(trim)
+  trim.connect(context.destination)
+  voiceBuses.set(context, lowCut)
+  return lowCut
+}
 // If the connection drops mid-game the host comes back by himself. The game never waits for him
 // meanwhile: with no connection there is nobody to ask, so title cards simply move on.
 const RECONNECT_WAITS_MS = [1000, 2000, 4000, 8000, 15000]
@@ -106,6 +135,7 @@ export class HostVoice {
   private mic: Mic | null = null
   private talking = false
   private replyId = 0
+  private waking = false
   canTalk = false
 
   constructor(target: Target, listener: HostListener) {
@@ -156,6 +186,11 @@ export class HostVoice {
   /** True while the host has the floor: a line is on its way or being said, or the player is talking to him. */
   get busy(): boolean {
     return this.talking || this.awaited.size > 0 || this.sounding.size > 0
+  }
+
+  /** True when a line asked for now could be heard: connected, with his voice and the game's sound on. */
+  get canBeHeard(): boolean {
+    return this.ready && !this.closed && !this.resting && this.socket?.readyState === WebSocket.OPEN && this.audible()
   }
 
   /** True while a line has been asked for but nothing of it has been heard (or shown) yet. */
@@ -413,7 +448,39 @@ export class HostVoice {
     const line = this.arriving
     if (!line || line.dropped || !soundOn() || this.talking) return
     const context = hostAudioContext(this.sampleRate)
-    if (context.state !== 'running') return // not unlocked by a tap yet: subtitles still show
+    if (context.state !== 'running') {
+      // A phone can put his audio to sleep (another sound took over, the screen, a call). His words are kept and his
+      // audio asked to wake, so he is heard as soon as it does - rather than lost, as the show's opening was on a
+      // phone (2026-11-20). The subtitles show meanwhile, and a tap anywhere wakes it too (sound.ts, keepAwake).
+      ;(line.waiting ??= []).push(data)
+      this.wake(context)
+      return
+    }
+    this.play(line, data, context)
+  }
+
+  private wake(context: AudioContext) {
+    if (this.waking) return
+    this.waking = true
+    trace('host.asleep', { state: context.state })
+    void context.resume().catch(() => undefined)
+    const onState = () => {
+      if (context.state !== 'running') return
+      context.removeEventListener('statechange', onState)
+      this.waking = false
+      trace('host.awake')
+      for (const line of this.sounding) {
+        const waiting = line.waiting
+        line.waiting = undefined
+        if (!waiting || line.dropped) continue
+        window.clearTimeout(line.readTimer) // it is heard after all: it ends when its sound does
+        waiting.forEach((chunk) => this.play(line, chunk, context))
+      }
+    }
+    context.addEventListener('statechange', onState)
+  }
+
+  private play(line: Line, data: ArrayBuffer, context: AudioContext) {
     const samples = new Int16Array(data, 0, Math.floor(data.byteLength / 2))
     if (!samples.length) return
     const buffer = context.createBuffer(1, samples.length, this.sampleRate)
@@ -421,7 +488,7 @@ export class HostVoice {
     for (let i = 0; i < samples.length; i += 1) channel[i] = samples[i] / 32768
     if (!line.gain) {
       line.gain = context.createGain()
-      line.gain.connect(context.destination)
+      line.gain.connect(voiceBus(context))
     }
     const source = context.createBufferSource()
     source.buffer = buffer

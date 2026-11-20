@@ -251,3 +251,14 @@ def test_lead_in_grows_with_the_question_but_never_runs_away():
     assert short < long <= endless == live.MAX_LEAD_IN_SEC
     assert live._lead_in({"kind": "music", "text": "Who performed this track?"}) <= 12
     assert live.OPEN_BEAT_SEC >= 0.5                       # long enough for every phone to hear that it opened
+
+
+def test_the_organisers_music_levels_stay_within_their_ranges():
+    from services import settings_store
+    as_tuned = settings_store.clean_game({})["mix"]
+    assert as_tuned == {"opening": 0, "opening_sec": 6, "under_host": 0, "questions": 0, "between": 0, "ease_down": True}
+    mix = settings_store.clean_game({"mix": {"opening": 9, "opening_sec": 30, "under_host": 3, "questions": -9,
+                                             "between": "loud", "ease_down": False}})["mix"]
+    # Under the host one step up at most (he must stay easy to follow); a question can be silent (-3).
+    assert mix == {"opening": 2, "opening_sec": 10, "under_host": 1, "questions": -3, "between": 0, "ease_down": False}
+    assert settings_store.clean_game({"mix": "nonsense"})["mix"] == as_tuned

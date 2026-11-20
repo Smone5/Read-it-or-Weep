@@ -10,7 +10,7 @@ export type AdminRow = AdminUser & { created_at: string; last_login_at: string |
 
 // ---- game rules -----------------------------------------------------------------
 
-export type ModeId = 'show' | 'sudden_death' | 'speed' | 'straight'
+export type ModeId = 'show' | 'sudden_death' | 'speed' | 'straight' | 'jukebox'
 
 export type ModeMeta = { id: ModeId; name: string; tagline: string }
 
@@ -19,6 +19,18 @@ export type QuestionSources = 'all' | 'manual' | 'ai'
 export type PictureMode = 'auto' | 'show' | 'memory'
 
 export type SoundtrackVolume = 'quiet' | 'medium' | 'loud'
+
+export type MusicMix = {
+  opening: number
+  /** Seconds the theme plays on its own before the host's first word. */
+  opening_sec: number
+  under_host: number
+  /** -3 is silent. */
+  questions: number
+  between: number
+  /** The music eases off if a player lingers on an answer. */
+  ease_down: boolean
+}
 
 /** Company defaults with one quiz's overrides on top (settings_store.quiz_rules). */
 export type GameRules = {
@@ -32,6 +44,8 @@ export type GameRules = {
   /** ...and quietly behind the questions while the game is being played. */
   soundtrack: boolean
   soundtrack_volume: SoundtrackVolume
+  /** The music moment by moment, in steps of about 3 dB from the mix tuned by ear (0). */
+  mix?: MusicMix
   decades: string[]
   picture_mode: PictureMode
   ready_threshold: number
@@ -124,6 +138,8 @@ export type HostSettings = {
   player_can_choose: boolean
   voice_quality: VoiceQuality
   pace: HostPace
+  /** % of the month's ElevenLabs plan after which new lines use the backup voice (0: only if it runs out). */
+  voice_budget?: number
   /** One to three characters. `name` and `voice` below are a read-only copy of the first. */
   hosts: HostCharacter[]
   name: string
@@ -139,6 +155,7 @@ export type HostSettingsWrite = {
   player_can_choose: boolean
   voice_quality: VoiceQuality
   pace: HostPace
+  voice_budget: number
   hosts: { name: string; voice: string; style: string; manner: HostManner }[]
 }
 

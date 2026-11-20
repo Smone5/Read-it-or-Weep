@@ -26,6 +26,24 @@ function savedHost(): string | null {
   }
 }
 
+// The tester link is updated while people play. A page loaded before an update runs the old game against the new
+// server, which can go wrong in new ways (a final question that never appeared, 2026-11-20). So between games - in
+// the lobby, or when a game is started - the page checks whether it is still the current version, and reloads if
+// not. Never in the middle of a game.
+async function pageIsStale(): Promise<boolean> {
+  if (!import.meta.env.PROD) return false
+  const mine = [...document.querySelectorAll<HTMLScriptElement>('script[type="module"][src]')]
+    .map((script) => new URL(script.src, location.href).pathname)
+    .find((path) => path.startsWith('/assets/'))
+  if (!mine) return false
+  try {
+    const response = await fetch('/', { cache: 'no-store' })
+    return response.ok && !(await response.text()).includes(mine)
+  } catch {
+    return false // offline or unreachable: carry on with what we have
+  }
+}
+
 // The end of a game: a moment of quiet for the results' sting, then the music under the host's sign-off; on his last
 // word it comes up big for a few seconds before settling into the after-party playlist.
 const ENDING_QUIET_MS = 2500
@@ -128,17 +146,24 @@ export default function QuizPage() {
           if (soundtrackFor.current !== runId || !music.tracks.length) return
           // A game picked back up does not start its music from the top again.
           const from = isResume ? Math.floor(Math.random() * music.tracks.length) : 0
-          startJukebox([...music.tracks.slice(from), ...music.tracks.slice(0, from)], { volume: music.volume })
+          startJukebox([...music.tracks.slice(from), ...music.tracks.slice(0, from)], { volume: music.volume, mix: music.mix })
         },
         () => undefined,
       )
     }
   }
 
+  const lastStart = useRef<{ mode: ModeId; decade: string | null } | null>(null) // for "Play again"
   const start = async (mode: ModeId, decade: string | null) => {
+    // Sound is unlocked first, inside the tap: a phone allows it only there, before anything is awaited.
     unlockAudio()
     unlockMusic()
     play('click')
+    if (await pageIsStale()) {
+      location.reload() // the game was updated since this page loaded: start the new version instead
+      return
+    }
+    lastStart.current = { mode, decade }
     // The game is created here; its first question is dealt behind the opening title card, and its
     // clock starts only when that question appears.
     const first = await api<Turn>(`/api/quiz/${slug}/runs`, { body: { mode, decade } })
@@ -191,14 +216,31 @@ export default function QuizPage() {
     }, celebrating ? 500 : 1500)
   }
 
-  const backToLobby = () => {
+  /** Leave the results screen: its music and its host stop. */
+  const leaveResults = () => {
     partyFor.current = null
     soundtrackFor.current = null
     stopJukebox()
     closeHost()
     applyDecade(null)
+  }
+
+  const backToLobby = () => {
+    leaveResults()
     setScreen('lobby')
     void load()
+    void pageIsStale().then((stale) => stale && location.reload()) // between games: catch up with an update
+  }
+
+  /** Straight into a new game with the same style, decade and host (the main menu if this one was picked back up). */
+  const playAgain = () => {
+    const last = lastStart.current
+    if (!last) {
+      backToLobby()
+      return
+    }
+    leaveResults()
+    void start(last.mode, last.decade).catch(() => backToLobby()) // could not start one: the main menu instead
   }
 
   if (fatal) {
@@ -227,7 +269,7 @@ export default function QuizPage() {
         <Play key={turn.state.runId} firstTurn={turn} resumed={resumed} hostName={hostName} hostLine={hostLine} hostSpeaking={hostSpeaking} host={hostRef.current} talk={talk} onDone={finished} />
       )}
       {screen === 'summary' && summary && (
-        <Summary slug={slug} summary={summary} hostName={hostName} hostLine={hostLine} hostSpeaking={hostSpeaking} talk={talk} showLeaderboard={info.quiz.leaderboard} onPlayAgain={backToLobby} />
+        <Summary slug={slug} summary={summary} hostName={hostName} hostLine={hostLine} hostSpeaking={hostSpeaking} talk={talk} showLeaderboard={info.quiz.leaderboard} onPlayAgain={playAgain} onMainMenu={backToLobby} />
       )}
     </Stage>
   )

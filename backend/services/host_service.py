@@ -35,8 +35,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import io
 import logging
+import random
 import re
 import time
 import wave
@@ -357,7 +359,8 @@ def open_voice(instructions: str, host: dict, speak: bool) -> "AnyVoice":
     pace = host.get("pace", "snappy")
     if host.get("engine") == "eleven":
         return WrittenHostVoice(instructions, eleven.BY_ID[host["voice"]], speak, pace=pace,
-                                manner=host.get("manner") or DEFAULT_MANNER)
+                                manner=host.get("manner") or DEFAULT_MANNER,
+                                budget=int(host.get("voice_budget", settings_store.DEFAULTS["host"]["voice_budget"])))
     return HostVoice(instructions, host["voice"], speak, model=voice_model(host), pace=pace)
 
 
@@ -379,6 +382,11 @@ _ROUND_ANGLE = {
     "Last Question": "one last question, worth double",
     "Speed Run": "the clock is already running",
     "The Quiz": "no clock, no tricks",
+    # Office Jukebox, the music side game
+    "Morning Stand-up": "a few seconds of a hit: name the artist. An easy start to the working day",
+    "Jargon Jukebox": "a song title rewritten as corporate jargon: pick the real title, and the song plays",
+    "Song or Synergy?": "a phrase: is it a hit song, or office jargon?",
+    "Closing Bell": "name the song from its clip, for double points: the last two before home time",
 }
 
 
@@ -418,6 +426,11 @@ def _how_it_works(run: dict, rules: dict, rounds: list[str]) -> str:
         return (f"{int(cfg['strikes'])} wrong answers and the game is over. The questions keep coming and the clock gets "
                 f"shorter, from {int(cfg['timer_start_sec'])} seconds down to {int(cfg['timer_min_sec'])}. Every so often "
                 "a song plays: name that tune and win a strike back. One 50/50 lifeline.")
+    if mode == "jukebox":
+        return ("Office Jukebox, the music side game: four quick rounds of hits from the decade they chose - Morning "
+                "Stand-up (name the artist), Jargon Jukebox (a song title in corporate-speak: pick the real one), Song or "
+                "Synergy? (hit song or office jargon?) and the Closing Bell (name the song, double points). Nothing "
+                "costs points: it is the warm-up.")
     if mode == "speed":
         cfg = rules["speed"]
         return (f"{int(cfg['clock_sec'])} seconds on one clock for the whole game, as many answers as they can manage. "
@@ -509,8 +522,9 @@ async def _welcome(run: dict, player: dict | None, name: str) -> str:
     # Measured: asked for "50 to 70 words", the writer gave 94 to 115 - so the limit is stated as a hard one, and
     # WrittenHostVoice asks for one rewrite of anything well over it.
     limit = {("show", False): 65, ("show", True): 35, ("sudden_death", False): 55, ("sudden_death", True): 30,
-             ("speed", False): 40, ("speed", True): 20, ("straight", False): 35, ("straight", True): 20}[
-        (run["mode"] if run["mode"] in ("show", "sudden_death", "speed", "straight") else "show", returning)]
+             ("speed", False): 40, ("speed", True): 20, ("straight", False): 35, ("straight", True): 20,
+             ("jukebox", False): 45, ("jukebox", True): 25}[
+        (run["mode"] if run["mode"] in ("show", "sudden_death", "speed", "straight", "jukebox") else "show", returning)]
     if run["mode"] == "speed":
         ending = "the rules in one breath" if not returning else "a one-line reminder of the rules"
         finish = "End on \"Go!\" - the clock starts the moment you finish."
@@ -566,6 +580,12 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
     if cue == "welcome" and run:
         return await _welcome(run, player, name)
     if cue == "summary" and run:
+        if run["mode"] == "jukebox":
+            share = round(100 * run["music_correct"] / run["music_answered"]) if run["music_answered"] else 0
+            return (f"Office Jukebox, the music side game, is over. {name} scored {run['score']} points and got {share}% "
+                    f"of the music right, earning the title '{run['badge']}' (on their screen). Sign off warmly, speaking "
+                    "to them directly (\"you\"): the title, announced like an office promotion; one last joke; then send "
+                    "them off to the main game, ready for it. Word limit: 24.")
         accuracy = round(100 * run["report_correct"] / run["report_answered"]) if run["report_answered"] else 0
         best = await db.fetchval("select max(score) from runs where player_id = $1 and quiz_id = $2 and mode = $3"
                                  " and status = 'completed' and id <> $4", run["player_id"], run["quiz_id"], run["mode"],
@@ -598,7 +618,11 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
         # The song plays the moment he stops, so a music break ends on the throw that starts it.
         throw = ("End on a two- or three-word throw that starts the song (\"Roll it!\", \"Hit it!\"): it plays the "
                  "moment you stop.")
-        if item["slot"] == "music":
+        if item["slot"] == "music" and run["mode"] == "jukebox":
+            # The side game's clip rounds keep their own names; a clip still starts as he stops.
+            angle = _ROUND_ANGLE.get(round_name, "name the song")
+            ending = f"then, if you like, ONE joke of five words or fewer about it. {throw}"
+        elif item["slot"] == "music":
             if run["mode"] == "sudden_death":
                 return (f"Announce a bonus music break. Its name first, as a headline - \"Music Break!\" - then, in ten "
                         f"words or fewer: name the tune - a hit from the {run['decade']} - and win back a life. {throw} "
@@ -630,20 +654,31 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
             used = item["time_taken_ms"] / (item["time_limit_sec"] * 1000)
             speed = " They answered almost instantly." if used < 0.15 else (" They used nearly all the time." if used > 0.85 else "")
         helped = f" They used a lifeline ({', '.join(item['lifelines_used'])})." if item["lifelines_used"] else ""
+        warm = (" This is the warm-up side game: be on their side - celebrate a right answer big, and make a miss a "
+                "gentle laugh, never a roast.") if run["mode"] == "jukebox" else ""
+        if item["slot"] == "jargon":
+            track = await db.fetchrow("select artist, title from music_tracks where id = $1", item["music_track_id"])
+            song = f"\"{track['title']}\" by {track['artist']}" if track else "the song"
+            jargon = payload.get("text", "")
+            verdict = ("ran out of time" if item["timed_out"] else "got it RIGHT" if item["is_correct"]
+                       else f"guessed \"{_chosen(item)}\", which is WRONG")
+            return (f"Jargon Jukebox: the corporate title was \"{jargon}\"; the song is {song}. {name} {verdict}.{warm} "
+                    "React: the verdict, one quick joke about the corporate title, and end on the song's title and artist, "
+                    "like a DJ - the song plays the moment you stop. Word limit: 16.")
         if item["slot"] == "music":
             track = await db.fetchrow("select artist, title from music_tracks where id = $1", item["music_track_id"])
             song = f"\"{track['title']}\" by {track['artist']}" if track else "the track"
             life = " That wins them a life back." if run["mode"] == "sudden_death" and item["is_correct"] else ""
             if item["timed_out"]:
-                return (f"Music break. The track was {song}. The contestant ran out of time without answering. React: "
+                return (f"Music break. The track was {song}. The contestant ran out of time without answering.{warm} React: "
                         "the verdict, one quick joke, and end on the track's title and artist, like a DJ. Word limit: 16.")
             if item["is_correct"]:
-                return (f"Music break. The track was {song}, and the contestant got it RIGHT.{speed}{life} React: a verdict "
-                        "call for a correct answer, one quick joke about the song or the era, and end on the song's title "
-                        "and artist, like a DJ. Word limit: 16.")
-            return (f"Music break. The track was {song}; the contestant guessed \"{_chosen(item)}\", which is WRONG.{speed} "
-                    "React: the verdict, one quick joke about that guess, and end on the track's title and artist, like a "
-                    "DJ. Word limit: 16.")
+                return (f"Music break. The track was {song}, and the contestant got it RIGHT.{speed}{life}{warm} React: a "
+                        "verdict call for a correct answer, one quick joke about the song or the era, and end on the song's "
+                        "title and artist, like a DJ. Word limit: 16.")
+            return (f"Music break. The track was {song}; the contestant guessed \"{_chosen(item)}\", which is WRONG.{speed}"
+                    f"{warm} React: the verdict, one quick joke about that guess, and end on the track's title and artist, "
+                    "like a DJ. Word limit: 16.")
         first = " This is their first answer of the game." if run["questions_answered"] <= 1 else ""
         # A long answer read out in full stalls the game, and it is on their screen anyway: its gist will do.
         short = " The right answer is long: say only its gist, in four words or fewer." if len(correct_answer.split()) > 4 else ""
@@ -661,6 +696,68 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
                 f"with the right answer inside it, then one quick joke about that specific wrong answer, ending on its "
                 f"funniest word.{short} Word limit: 14.")
     return None
+
+
+# --------------------------------------------------------------------------- said once, replayed after
+# ElevenLabs is paid by the character, so a line whose exact words come round again is recorded the first time and
+# replayed from then on: the final question read out, and the round introductions, which come from a rotating set per
+# host and round (written and recorded the first ROUND_SET times a round comes up). Reactions, the opening and the
+# sign-off stay live: they are about this player and this answer.
+ROUND_SET = 6
+REPLAY_CHUNK = 9600              # 0.2 s of 24 kHz 16-bit audio per message
+KEEP_UP_TO_SEC = 30
+
+
+def _audio_key(voice: "eleven.Voice", line: str, pause_cap: float | None) -> str:
+    return hashlib.sha256(f"{voice.voice_id}|{eleven.model()}|{pause_cap}|{line}".encode()).hexdigest()
+
+
+async def _recorded(key: str) -> bytes | None:
+    row = await db.fetchrow("update host_line_audio set used_count = used_count + 1, last_used_at = now() where key = $1"
+                            " returning audio", key)
+    return bytes(row["audio"]) if row else None
+
+
+async def _record(key: str, voice: "eleven.Voice", line: str, audio: bytes) -> None:
+    await db.execute("insert into host_line_audio (key, voice, line, audio, seconds) values ($1, $2, $3, $4, $5)"
+                     " on conflict (key) do nothing", key, voice.id, line, audio, len(audio) / 2 / SAMPLE_RATE)
+
+
+async def _bank_lines(bank: str) -> list[dict]:
+    return [dict(r) for r in await db.fetch("select id, line, used_count from host_line_bank where bank = $1", bank)]
+
+
+async def _bank_add(bank: str, line: str) -> None:
+    await db.execute("insert into host_line_bank (bank, line, used_count) values ($1, $2, 1)", bank, line)
+
+
+async def _bank_used(line_id: int) -> None:
+    await db.execute("update host_line_bank set used_count = used_count + 1 where id = $1", line_id)
+
+
+async def round_set(run: dict, item_id: str | None) -> str | None:
+    """Which rotating set a round introduction comes from - or None when it must be said live (after the Lightning
+    Round, when he remarks on its score)."""
+    if not item_id:
+        return None
+    item = await db.fetchrow("select * from run_items where id = $1 and run_id = $2", item_id, run["id"])
+    if item is None or await _lightning_tally(run, dict(item)):
+        return None
+    decade = run["decade"] if item["slot"] == "music" else ""     # a music break's line may mention the decade
+    return f"{run['mode']}|{item['slot']}|{item['round_name']}|{decade}"
+
+
+async def final_question_line(run: dict, item_id: str | None) -> str | None:
+    """The final question as the host reads it: word for word, never through the writer (nothing paraphrased, nothing
+    given away), after a lead-in that says nothing about it, and with no tag inside it to single a word out."""
+    if not item_id:
+        return None
+    item = await db.fetchrow("select slot, wager, answered_at, payload from run_items where id = $1 and run_id = $2",
+                             item_id, run["id"])
+    if not item or item["slot"] != "final" or item["wager"] is None or item["answered_at"] is not None:
+        return None
+    text = (item["payload"] or {}).get("text")
+    return f"[dramatic] Your final question... [clearly] {text}" if text else None
 
 
 def _chosen(item: dict) -> str:
@@ -802,6 +899,12 @@ class HostVoice:
         async for piece in self._respond():
             yield piece
 
+    async def recite(self, line: str, **_: object) -> AsyncIterator[tuple[str, bytes | str]]:
+        """Say a fixed line (the final question, a round introduction), word for word."""
+        async for piece in self.say(f"Read this out exactly as written - every word, nothing added or changed: "
+                                    f"\"{spoken_text(line)}\""):
+            yield piece
+
     async def reply(self, stage_note: str) -> AsyncIterator[tuple[str, bytes | str]]:
         """Answer what the contestant just said into the microphone."""
         await self.note(stage_note)
@@ -912,7 +1015,7 @@ class WrittenHostVoice:
     KEEP = 40                     # messages remembered besides the brief: enough not to repeat a joke
 
     def __init__(self, instructions: str, voice: eleven.Voice, speak: bool, *, pace: str = "snappy",
-                 manner: str = DEFAULT_MANNER):
+                 manner: str = DEFAULT_MANNER, budget: int = 0):
         self.instructions = instructions
         self.voice = voice
         self.speak = speak
@@ -923,6 +1026,8 @@ class WrittenHostVoice:
         self.stopped = False      # interrupt() was called for the line being said (cleared when the line ends)
         self.failures = 0         # ElevenLabs failures in a row
         self.backup_only = False  # ElevenLabs is not used again in this session
+        self.budget = budget      # % of the month's plan after which new lines use the backup voice (0: no guard)
+        self.last_by = ""         # who performed the last line: "eleven", "backup" or "replay"
         self.timings: list[dict] = []
 
     async def __aenter__(self) -> "WrittenHostVoice":
@@ -952,6 +1057,39 @@ class WrittenHostVoice:
         async for piece in self._respond():
             yield piece
 
+    async def recite(self, line: str, *, note: str = "Read the final question out, word for word.",
+                     keep: bool = True) -> AsyncIterator[tuple[str, bytes | str]]:
+        """Perform a line already written (the final question, a round introduction from its set): no writer, so it
+        starts sooner. With `keep` it is recorded the first time and replayed after."""
+        await self.note(note)
+        self._remember("assistant", line)
+        try:
+            yield "text", spoken_text(line)
+            if not self.speak:
+                return
+            async for piece in self._perform(line, keep=keep):
+                yield piece
+        finally:
+            self.stopped = False
+
+    async def from_set(self, round_key: str, direction: str) -> str | None:
+        """A round introduction from this host's rotating set for the round: a new one is written (without the game
+        so far, so it fits any game) until the set is full; then the least-used is picked."""
+        bank = hashlib.sha256(f"{self.instructions}|{self.voice.voice_id}|{round_key}".encode()).hexdigest()
+        try:
+            lines = await _bank_lines(bank)
+            if len(lines) >= ROUND_SET:
+                pick = min(lines, key=lambda line: (line["used_count"], random.random()))
+                await _bank_used(pick["id"])
+                return pick["line"]
+            line = await self._write([{"role": "user", "content": direction}])
+            if line:
+                await _bank_add(bank, line)
+            return line
+        except Exception as exc:  # noqa: BLE001 - the set is a saving; without it he says the line live
+            log.warning("round introduction set unavailable: %s", exc)
+            return None
+
     async def reply(self, stage_note: str) -> AsyncIterator[tuple[str, bytes | str]]:
         """Answer what the contestant just said into the microphone: it is written down first."""
         pcm, self.heard = bytes(self.heard), bytearray()
@@ -968,20 +1106,22 @@ class WrittenHostVoice:
         async for piece in self._respond():
             yield piece
 
-    async def _write(self) -> str:
+    async def _write(self, history: list[dict] | None = None) -> str:
         """The next line, with its delivery tags. A line well over the word limit its direction states is sent back
         once for a shorter version: the game is standing still while the host talks."""
+        history = self.history if history is None else history
         began = _clock()
-        line = await write_line(self.instructions, self.history)
+        line = await write_line(self.instructions, history)
         took = _clock() - began
-        asked = self.history[-1]["content"] if self.history and self.history[-1]["role"] == "user" else ""
+        asked = history[-1]["content"] if history and history[-1]["role"] == "user" else ""
+        ""
         found = re.search(r"Word limit: (\d+)\.", asked)
         if found and line:
             limit, words = int(found.group(1)), len(spoken_text(line).split())
             # Only a line far over, and only if the first draft came back quickly: a rewrite doubles the wait before
             # he speaks, and a slow one could make him miss his moment altogether (the opening gives up after 12 s).
             if words > limit + 15 and took < REWRITE_IF_WITHIN_SEC:
-                shorter = await write_line(self.instructions, self.history + [
+                shorter = await write_line(self.instructions, history + [
                     {"role": "assistant", "content": line},
                     {"role": "user", "content": f"That was {words} words; the limit is {limit}. Say it again in {limit} "
                                                 "words or fewer - same order, same ending, every word earning its place."}])
@@ -990,10 +1130,17 @@ class WrittenHostVoice:
         return line
 
     async def _audio(self, line: str) -> AsyncIterator[bytes]:
-        """The line performed: by ElevenLabs, or by the backup voice when ElevenLabs cannot."""
+        """The line performed: by ElevenLabs, or by the backup voice when ElevenLabs cannot (or the month's plan is
+        past the organiser's budget)."""
+        if not self.backup_only and self.budget:
+            share = await eleven.share_used()
+            if share is not None and share * 100 >= self.budget:
+                self.backup_only = True
+                log.warning("ElevenLabs plan %d%% used (budget %d%%): the backup voice takes over", share * 100, self.budget)
         if not self.backup_only:
             sent = False
             try:
+                self.last_by = "eleven"
                 async with contextlib.aclosing(eleven.perform(line, self.voice)) as audio:
                     async for chunk in audio:
                         sent = True
@@ -1002,12 +1149,14 @@ class WrittenHostVoice:
                 return
             except eleven.ElevenError as exc:
                 self.failures += 1
-                if exc.permanent or self.failures >= 2:
+                # Busy (other games using the plan's slots) is no reason to give up on ElevenLabs for the whole game.
+                if exc.permanent or (self.failures >= 2 and not exc.busy):
                     self.backup_only = True
                 log.warning("ElevenLabs failed (%s); the backup voice %s", exc,
                             "takes over for this session" if self.backup_only else "says this line")
                 if sent:
                     return            # half a line was heard: do not start it again in another voice
+        self.last_by = "backup"
         async with contextlib.aclosing(self._backup(spoken_text(line))) as audio:
             async for chunk in audio:
                 yield chunk
@@ -1043,23 +1192,65 @@ class WrittenHostVoice:
             yield "text", spoken_text(line)
             if not self.speak:
                 return
-            edit, first = TightEdit(self.pause_cap), None
-            async with contextlib.aclosing(self._audio(line)) as audio:
-                async for chunk in audio:
-                    if self.stopped:
-                        return
-                    out = edit.feed(chunk)
-                    if out:
-                        first = first or time.monotonic()
-                        yield "audio", out
-            tail = edit.finish()
-            if tail and not self.stopped:
-                yield "audio", tail
+            first: list[float] = []
+            async for piece in self._perform(line, first):
+                yield piece
             self.timings.append({"write_sec": round(wrote - began, 2),
-                                 "first_sound_sec": round((first or time.monotonic()) - began, 2),
+                                 "first_sound_sec": round((first[0] if first else time.monotonic()) - began, 2),
                                  "by": "backup" if self.backup_only or self.failures else "eleven", "line": line})
         finally:
             self.stopped = False
+
+    async def _perform(self, line: str, first: list[float] | None = None, keep: bool = False
+                       ) -> AsyncIterator[tuple[str, bytes | str]]:
+        """The line's audio, with the dead air taken out; stops as soon as the host is cut off. With `keep`, a line
+        already recorded in this voice is replayed rather than paid for again, and a new one is recorded as it goes."""
+        key = _audio_key(self.voice, line, self.pause_cap) if keep else None
+        began, sound_at = time.monotonic(), None
+        if key:
+            try:
+                saved = await _recorded(key)
+            except Exception as exc:  # noqa: BLE001 - the recording is a saving, never a reason to fail
+                log.warning("could not read a recorded line: %s", exc)
+                saved = None
+            if saved:
+                self.last_by = "replay"
+                for start in range(0, len(saved), REPLAY_CHUNK):
+                    if self.stopped:
+                        return
+                    if first is not None and not first:
+                        first.append(time.monotonic())
+                    yield "audio", saved[start:start + REPLAY_CHUNK]
+                log.info("host line replayed (%d characters saved)", len(line))
+                return
+        edit = TightEdit(self.pause_cap)
+        kept = bytearray()
+        async with contextlib.aclosing(self._audio(line)) as audio:
+            async for chunk in audio:
+                if self.stopped:
+                    return                # cut off: nothing is recorded
+                out = edit.feed(chunk)
+                if out:
+                    if first is not None and not first:
+                        first.append(time.monotonic())
+                    sound_at = sound_at or time.monotonic()
+                    if key:
+                        kept.extend(out)
+                    yield "audio", out
+        tail = edit.finish()
+        if tail and not self.stopped:
+            if key:
+                kept.extend(tail)
+            yield "audio", tail
+        # One line a log entry: who performed it, how long it took to start, and what it cost.
+        log.info("host line by %s: %d characters, first sound after %.1fs", self.last_by, len(line),
+                 (sound_at or time.monotonic()) - began)
+        # Only a whole line, in the real voice, is kept (never the backup voice standing in, never a line cut short).
+        if key and kept and not self.stopped and self.last_by == "eleven" and len(kept) <= KEEP_UP_TO_SEC * SAMPLE_RATE * 2:
+            try:
+                await _record(key, self.voice, line, bytes(kept))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("could not record a line: %s", exc)
 
 
 AnyVoice = HostVoice | WrittenHostVoice

@@ -5,7 +5,7 @@ import base64
 import re
 import secrets
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
@@ -78,6 +78,29 @@ class NewAdmin(BaseModel):
     email: EmailStr
     name: str | None = Field(default=None, max_length=80)
     password: str = Field(min_length=10, max_length=200)
+
+
+# A game's host lines come to roughly this many characters (measured; see the README): for "about N games left".
+CHARACTERS_PER_GAME = 2300
+
+
+@router.get("/voice-usage")
+async def voice_usage(admin: dict = Depends(current_admin)) -> dict:
+    """How much of the ElevenLabs plan has been used this month: the host's voice is paid for by the character."""
+    if not eleven.configured():
+        return {"configured": False}
+    try:
+        info = await eleven.account()
+    except eleven.ElevenError as exc:
+        return {"configured": True, "error": str(exc)}
+    except Exception:  # noqa: BLE001 – a network problem; the page says so rather than failing
+        return {"configured": True, "error": "ElevenLabs could not be reached just now."}
+    used, limit = int(info.get("character_count") or 0), int(info.get("character_limit") or 0)
+    reset = info.get("next_character_count_reset_unix")
+    return {"configured": True, "tier": info.get("tier"), "used": used, "limit": limit,
+            "resetsAt": datetime.fromtimestamp(reset, tz=timezone.utc).isoformat() if reset else None,
+            "perGame": CHARACTERS_PER_GAME,
+            "gamesLeft": max(0, (limit - used) // CHARACTERS_PER_GAME) if limit else None}
 
 
 @router.get("/admins")

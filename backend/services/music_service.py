@@ -283,7 +283,7 @@ def prefill(decades: list[str]) -> None:
         _seeding["prefill"] = asyncio.create_task(run())
 
 
-async def build_question(decade: str, avoid_track_ids: set[str]) -> dict | None:
+async def build_question(decade: str, avoid_track_ids: set[str], asks: str | None = None) -> dict | None:
     """Return {'track', 'text', 'options', 'correct_index'} for a music question, or None if unavailable."""
     ensure_decade(decade)
     tracks = await tracks_for(decade)
@@ -300,7 +300,7 @@ async def build_question(decade: str, avoid_track_ids: set[str]) -> dict | None:
         tracks = await tracks_for(decade)
 
     other_titles = list({t["title"] for t in tracks if t["artist"] != track["artist"] and t["title"] != track["title"]})
-    ask_title = len(other_titles) >= 3 and random.random() < 0.3
+    ask_title = len(other_titles) >= 3 and (asks == "title" or (asks is None and random.random() < 0.3))
     if ask_title:
         correct, wrong = track["title"], random.sample(other_titles, 3)
         text = "Name that tune. What is this song called?"

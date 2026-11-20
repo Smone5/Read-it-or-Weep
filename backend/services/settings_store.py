@@ -33,6 +33,11 @@ MODES: dict[str, dict[str, str]] = {
         "name": "Straight Quiz",
         "tagline": "No music, no jokes, no clock. Every section covered. Hit the pass mark.",
     },
+    "jukebox": {
+        "name": "Office Jukebox",
+        "tagline": "The warm-up: five minutes of hits with an office twist. Name the artist, crack corporate-speak song "
+                   "titles, song or jargon? Nothing costs points.",
+    },
 }
 
 _NUMBER_WORDS = {1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six"}
@@ -81,7 +86,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # model follows direction about pace and timing, and it writes the sharper jokes (about 3x the cost).
         "voice_quality": "premium",
         "pace": "snappy",                 # relaxed (slower) | snappy (the voice's own speed) | rapid (faster)
-        "talk_enabled": True,             # players may hold a button and talk to the host
+        "talk_enabled": True,
+        "voice_budget": 90,               # % of the month's ElevenLabs plan; then the backup voice (0 = no guard)             # players may hold a button and talk to the host
         # The first character, repeated for convenience (kept in step with hosts[0]).
         "name": "Max",
         "voice": "cedar",
@@ -95,6 +101,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "after_party": True,              # hits from the game's decade play on the results screen
         "soundtrack": True,               # ...and quietly behind the questions, from the first one to the last
         "soundtrack_volume": "medium",    # quiet | medium | loud
+        # The music moment by moment, in steps of about 3 dB from the mix tuned by ear (0): the opening theme, under
+        # the host, under a question (-3 = silent), and between questions (title cards and the wait for Next too).
+        # Plus how long the theme plays on its own before the host, and whether it eases off while a player lingers.
+        "mix": {"opening": 0, "opening_sec": 6, "under_host": 0, "questions": 0, "between": 0, "ease_down": True},
         "decades": ["60s", "70s", "80s", "90s", "00s", "10s", "20s"],
         "picture_mode": "auto",           # auto | show | memory
         "ready_threshold": 80,            # % of sections cleared to count as "ready"
@@ -203,6 +213,9 @@ def _clean_branding(value: dict) -> dict:
     return value
 
 
+VOICE_BUDGETS = (0, 50, 75, 90)
+
+
 def _clean_host(value: dict) -> dict:
     try:
         value["sarcasm"] = max(0, min(10, int(value.get("sarcasm", 6))))
@@ -234,7 +247,31 @@ def _clean_host(value: dict) -> dict:
     value["voice_enabled"] = bool(value.get("voice_enabled", True))
     value["talk_enabled"] = bool(value.get("talk_enabled", True))
     value["custom_instructions"] = str(value.get("custom_instructions") or "")[:600]
+    # The share of the month's ElevenLabs plan after which new lines use the backup voice (0: only when it runs out).
+    try:
+        budget = int(value.get("voice_budget", DEFAULTS["host"]["voice_budget"]))
+    except (TypeError, ValueError):
+        budget = DEFAULTS["host"]["voice_budget"]
+    value["voice_budget"] = budget if budget in VOICE_BUDGETS else DEFAULTS["host"]["voice_budget"]
     return value
+
+
+MIX_STEPS = {"opening": (-2, 2), "under_host": (-2, 1), "questions": (-3, 2), "between": (-2, 2)}
+OPENING_SEC = (4, 10)
+
+
+def _clean_mix(given: Any) -> dict:
+    """The organiser's music levels, each kept to its range. (Under the host the music goes no more than one step up:
+    beyond that he stops being easy to follow.)"""
+    mix = dict(DEFAULTS["game"]["mix"])
+    given = given if isinstance(given, dict) else {}
+    for key, (low, high) in {**MIX_STEPS, "opening_sec": OPENING_SEC}.items():
+        try:
+            mix[key] = max(low, min(high, int(given.get(key, mix[key]))))
+        except (TypeError, ValueError):
+            pass
+    mix["ease_down"] = bool(given.get("ease_down", mix["ease_down"]))
+    return mix
 
 
 def clean_game(value: dict) -> dict:
@@ -248,6 +285,7 @@ def clean_game(value: dict) -> dict:
         value["picture_mode"] = "auto"
     if value.get("soundtrack_volume") not in ("quiet", "medium", "loud"):
         value["soundtrack_volume"] = "medium"
+    value["mix"] = _clean_mix(value.get("mix"))
     return value
 
 

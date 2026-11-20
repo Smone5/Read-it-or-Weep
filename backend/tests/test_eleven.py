@@ -540,3 +540,169 @@ def test_the_host_stays_safe_for_work():
                                           {"title": "Q3 Review", "meeting_at": None}, returning=True)
     assert any("sports-style" in angle for angle in angles)
     assert not any(word in angle for angle in angles for word in ("meet again", "date", "relationship", "romance"))
+
+
+
+# --------------------------------------------------------------------------- reading out the final question
+
+def test_the_final_question_s_clock_waits_for_its_reading():
+    from services import engine
+    assert engine.reading_seconds("Which hub moved the most pallets in the third quarter of the year?") == (3 + 13) / 2 + 1.5
+    assert engine.reading_seconds(" ".join(["word"] * 80)) == engine.READ_MAX_SEC        # never a long wait
+    assert engine.reading_seconds(None) == 3 / 2 + 1.5
+
+
+async def test_only_the_final_question_is_read_and_word_for_word(monkeypatch):
+    question = "Which hub moved the most pallets in Q3?"
+    final = {"slot": "final", "wager": 100, "answered_at": None, "payload": {"text": question}}
+    monkeypatch.setattr(host_service, "db", _Db(item=final))
+    line = await host_service.final_question_line(RUN, "item-1")
+    assert line == f"[dramatic] Your final question... [clearly] {question}"
+    assert host_service.spoken_text(line) == f"Your final question... {question}"
+    for other in ({**final, "slot": "report"}, {**final, "wager": None}, {**final, "answered_at": "now"}):
+        monkeypatch.setattr(host_service, "db", _Db(item=other))
+        assert await host_service.final_question_line(RUN, "item-1") is None
+    assert await host_service.final_question_line(RUN, None) is None
+
+
+async def test_a_reading_is_performed_as_written_without_the_writer(with_key, monkeypatch):
+    async def no_writer(*args):
+        raise AssertionError("a reading must not go through the writer")
+
+    monkeypatch.setattr(host_service, "write_line", no_writer)
+    line = "[dramatic] Your final question... [clearly] Which hub moved the most pallets in Q3?"
+    async with FakeEleven([tone(0.4)]) as fake:
+        monkeypatch.setattr(eleven, "SOCKET", fake.url)
+        session = host_service.WrittenHostVoice("brief", eleven.BY_ID["eleven:classic"], True)
+        texts, audio = await collect(session.recite(line))
+    assert texts == ["Your final question... Which hub moved the most pallets in Q3?"]
+    assert fake.received[1]["inputs"][0]["text"] == line
+    assert len(audio) > 0 and session.stopped is False
+
+
+
+# --------------------------------------------------------------------------- said once, replayed after
+
+@pytest.fixture
+def recordings(monkeypatch):
+    """The recorded-lines store and the round sets, kept in memory."""
+    store: dict[str, bytes] = {}
+    banks: dict[str, list[dict]] = {}
+
+    async def recorded(key):
+        return store.get(key)
+
+    async def record(key, voice, line, audio):
+        store[key] = audio
+
+    async def bank_lines(bank):
+        return [dict(row) for row in banks.get(bank, [])]
+
+    async def bank_add(bank, line):
+        banks.setdefault(bank, []).append({"id": len(banks.get(bank, [])) + 1, "line": line, "used_count": 1})
+
+    async def bank_used(line_id):
+        for rows in banks.values():
+            for row in rows:
+                if row["id"] == line_id:
+                    row["used_count"] += 1
+
+    monkeypatch.setattr(host_service, "_recorded", recorded)
+    monkeypatch.setattr(host_service, "_record", record)
+    monkeypatch.setattr(host_service, "_bank_lines", bank_lines)
+    monkeypatch.setattr(host_service, "_bank_add", bank_add)
+    monkeypatch.setattr(host_service, "_bank_used", bank_used)
+    return store, banks
+
+
+async def test_a_kept_line_is_recorded_once_and_replayed_after(with_key, monkeypatch, recordings):
+    store, _ = recordings
+    line = "[building] Next up... [announcing] the Warm-Up!"
+    async with FakeEleven([tone(0.5)]) as fake:
+        monkeypatch.setattr(eleven, "SOCKET", fake.url)
+        first = host_service.WrittenHostVoice("brief", eleven.BY_ID["eleven:classic"], True)
+        _, heard = await collect(first.recite(line, note="Announce the round."))
+        asked = len(fake.paths)
+        again = host_service.WrittenHostVoice("brief", eleven.BY_ID["eleven:classic"], True)
+        _, replayed = await collect(again.recite(line, note="Announce the round."))
+    assert asked == 1 and len(fake.paths) == 1                  # the second time ElevenLabs is not asked at all
+    assert replayed == heard and len(store) == 1 and again.last_by == "replay"
+
+
+async def test_a_line_cut_short_or_in_the_backup_voice_is_not_kept(with_key, monkeypatch, recordings):
+    store, _ = recordings
+    async with FakeEleven([tone(0.4)], refuse=HTTPStatus.UNAUTHORIZED) as fake:
+        monkeypatch.setattr(eleven, "SOCKET", fake.url)
+        session = host_service.WrittenHostVoice("brief", eleven.BY_ID["eleven:classic"], True)
+
+        async def backup(words):
+            yield tone(0.3)
+
+        monkeypatch.setattr(session, "_backup", backup)
+        await collect(session.recite("[dry] Roll it!", note="Throw to the song."))
+    assert store == {} and session.last_by == "backup"
+
+
+async def test_round_introductions_rotate_once_their_set_is_full(monkeypatch, recordings):
+    _, banks = recordings
+    written = []
+
+    async def write_line(instructions, history):
+        written.append(history)
+        return f"[announcing] Line {len(written)}!"
+
+    monkeypatch.setattr(host_service, "write_line", write_line)
+    session = host_service.WrittenHostVoice("brief", eleven.BY_ID["eleven:classic"], True)
+    lines = [await session.from_set("show|report|Warm-Up|", "Announce the next round.") for _ in range(20)]
+    assert len(written) == host_service.ROUND_SET                 # written (and recorded) only until the set is full
+    assert all(len(history) == 1 for history in written)          # without the game so far: they fit any game
+    assert set(lines) == {f"[announcing] Line {n}!" for n in range(1, host_service.ROUND_SET + 1)}
+    # A different host (another brief) or another round starts a set of its own.
+    other = host_service.WrittenHostVoice("another brief", eleven.BY_ID["eleven:classic"], True)
+    await other.from_set("show|report|Warm-Up|", "Announce the next round.")
+    assert len(banks) == 2
+
+
+async def test_past_the_budget_new_lines_use_the_backup_voice(with_key, monkeypatch):
+    async def share_used():
+        return 0.93
+
+    monkeypatch.setattr(eleven, "share_used", share_used)
+    async with FakeEleven([tone(0.3)]) as fake:
+        monkeypatch.setattr(eleven, "SOCKET", fake.url)
+        session = host_service.WrittenHostVoice("brief", eleven.BY_ID["eleven:classic"], True, budget=90)
+
+        async def backup(words):
+            yield tone(0.3)
+
+        monkeypatch.setattr(session, "_backup", backup)
+        _, audio = await collect(session.recite("[dry] Roll it!", note="Throw.", keep=False))
+    assert fake.paths == [] and session.last_by == "backup" and len(audio) > 0
+    unguarded = host_service.WrittenHostVoice("brief", eleven.BY_ID["eleven:classic"], True, budget=0)
+    assert unguarded.budget == 0
+
+
+async def test_a_busy_elevenlabs_is_tried_again_not_given_up_on(with_key, monkeypatch):
+    class BusyOnce(FakeEleven):
+        tries = 0
+
+        async def _refuse(self, connection, request):
+            self.paths.append(request.path)
+            BusyOnce.tries += 1
+            if BusyOnce.tries == 1:
+                return connection.respond(HTTPStatus.TOO_MANY_REQUESTS, json.dumps({"detail": {"message": "too many concurrent requests"}}))
+            return None
+
+    monkeypatch.setattr(eleven, "_slots", None)
+    async with BusyOnce([tone(0.3)]) as fake:
+        monkeypatch.setattr(eleven, "SOCKET", fake.url)
+        session = host_service.WrittenHostVoice("brief", eleven.BY_ID["eleven:classic"], True)
+        _, audio = await collect(session.recite("[dry] Roll it!", note="Throw.", keep=False))
+    assert len(fake.paths) == 2 and len(audio) > 0 and session.last_by == "eleven" and not session.backup_only
+
+
+def test_the_budget_setting_stays_within_its_choices():
+    cleaned = settings_store._clean_host({"voice_budget": 85})
+    assert cleaned["voice_budget"] == settings_store.DEFAULTS["host"]["voice_budget"] == 90
+    assert settings_store._clean_host({"voice_budget": "75"})["voice_budget"] == 75
+    assert settings_store._clean_host({"voice_budget": 0})["voice_budget"] == 0

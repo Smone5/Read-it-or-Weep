@@ -58,7 +58,7 @@ async def play(client: httpx.AsyncClient, slug: str, headers: dict, mode: str, s
         leaked = leaked or "correctIndex" in blob or "correct_index" in blob
         if item.get("sealed"):
             # The first item of a round arrives sealed: the browser shows its title card, then opens it.
-            sealed_rounds.append("Music Break" if item["slot"] == "music" else item["round"]["name"])
+            sealed_rounds.append("Music Break" if item["slot"] == "music" and mode != "jukebox" else item["round"]["name"])
             if len(sealed_rounds) == 1:
                 check(item["text"] is None and item["options"] is None, f"{label}: a sealed item shows no question or answers")
                 early = await client.post(f"/api/runs/{run_id}/answer", json={"itemId": item["id"], "choiceIndex": 0}, headers=headers)
@@ -79,10 +79,20 @@ async def play(client: httpx.AsyncClient, slug: str, headers: dict, mode: str, s
         if item.get("needsWager"):
             check(item["text"] is None and item["options"] is None, f"{label}: final question is hidden until a wager is placed")
             amount = item["wagerOptions"][-1]
-            r = await client.post(f"/api/runs/{run_id}/wager", json={"itemId": item["id"], "amount": amount}, headers=headers)
+            r = await client.post(f"/api/runs/{run_id}/wager", json={"itemId": item["id"], "amount": amount, "readAloud": True},
+                                  headers=headers)
             assert r.status_code == 200, r.text
             item = r.json()["item"]
             check(item["text"] and item["wager"] == amount, f"{label}: wager of {amount} accepted and question revealed")
+            check(item["options"] is None and item.get("startsInMs", 0) > 0,
+                  f"{label}: final question held for the host's reading ({item.get('startsInMs')} ms), answers hidden")
+            early = await client.post(f"/api/runs/{run_id}/answer", json={"itemId": item["id"], "choiceIndex": 0}, headers=headers)
+            check(early.status_code == 400, f"{label}: an answer before the answers are up is refused ({early.status_code})")
+            r = await client.post(f"/api/runs/{run_id}/start-clock", json={"itemId": item["id"]}, headers=headers)
+            assert r.status_code == 200, r.text
+            item = r.json()["item"]
+            check(bool(item["options"]) and item["remainingMs"] == item["timeLimitSec"] * 1000,
+                  f"{label}: after the reading the answers appear with the full clock ({item['remainingMs']} ms)")
         slots.append(item["slot"])
         if not rounds or rounds[-1] != item["round"]["name"]:
             rounds.append(item["round"]["name"])
@@ -112,6 +122,8 @@ async def play(client: httpx.AsyncClient, slug: str, headers: dict, mode: str, s
         assert r.status_code == 200, r.text
         reveal = r.json()
         assert reveal["correct"] == (choice == right), "server marking disagrees with the stored answer"
+        if mode == "jukebox":
+            assert reveal["points"] >= 0, f"{label}: an Office Jukebox answer cost points ({reveal['points']})"
         score_seen = reveal["state"]["score"]
         if guard == 1:
             again = await client.post(f"/api/runs/{run_id}/answer", json={"itemId": item["id"], "choiceIndex": right}, headers=headers)
@@ -165,8 +177,8 @@ async def main() -> None:
             quizzes = (await client.get("/api/admin/quizzes", headers=admin)).json()["quizzes"]
             quiz_id = next(q["id"] for q in quizzes if q["slug"] == slug)
             r = await client.patch(f"/api/admin/quizzes/{quiz_id}", headers=admin, json={
-                "settings": {"modes": ["show", "sudden_death", "speed", "straight"]}, "teams": ["Sales", "Operations"]})
-            check(r.status_code == 200 and len(r.json()["rules"]["modes"]) == 4, "all four styles of play switched on")
+                "settings": {"modes": ["show", "sudden_death", "speed", "straight", "jukebox"]}, "teams": ["Sales", "Operations"]})
+            check(r.status_code == 200 and len(r.json()["rules"]["modes"]) == 5, "all five styles of play switched on")
 
             print("== joining ==")
             tag = uuid.uuid4().hex[:6]
@@ -263,6 +275,19 @@ async def main() -> None:
             check(straight["summary"]["afterParty"] is None, "straight quiz ends without music")
             quiet = (await client.get(f"/api/runs/{straight['run_id']}/soundtrack", headers=players["Omar Haddad"])).json()
             check(quiet["tracks"] == [], "straight quiz has no soundtrack either")
+
+            print("== Office Jukebox ==")
+            box = await play(client, slug, players["Dana Reyes"], "jukebox", 0.6, label="jukebox/Dana")
+            check([box["slots"].count(kind) for kind in ("music", "jargon", "song_or_jargon")] == [5, 3, 4],
+                  f"office jukebox: 5 clips, 3 jargon titles, 4 song-or-jargon ({box['slots']})")
+            check(box["sealed"] == ["Morning Stand-up", "Jargon Jukebox", "Song or Synergy?", "Closing Bell"],
+                  f"office jukebox opens each of its four rounds with a title card: {box['sealed']}")
+            check(box["summary"]["music"]["answered"] == 12 and box["summary"]["report"]["answered"] == 0,
+                  "office jukebox is all music, no report questions")
+            check(box["summary"]["badge"] in {"Chief Music Officer", "Senior Playlist Manager", "Jingle Intern",
+                                              "Hold Music Specialist"}, f"office jukebox earns its own title ({box['summary']['badge']})")
+            jargon = await db.fetch("select payload from run_items where run_id = $1 and slot = 'jargon'", box["run_id"])
+            print("       jargon titles:", [row["payload"]["text"] for row in jargon])
 
             print("== Speed Run ==")
             r = await client.post(f"/api/quiz/{slug}/runs", json={"mode": "speed"}, headers=players["Li Wei"])

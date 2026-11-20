@@ -111,6 +111,8 @@ async def run_summary(run: dict, rules: dict) -> dict:
         "select max(score) from runs where player_id = $1 and quiz_id = $2 and mode = $3 and status = 'completed'"
         " and id <> $4", run["player_id"], run["quiz_id"], run["mode"], run["id"])
     accuracy = round(100 * run["report_correct"] / run["report_answered"]) if run["report_answered"] else 0
+    if run["mode"] == "jukebox":                    # the music side game is scored on its music
+        accuracy = round(100 * run["music_correct"] / run["music_answered"]) if run["music_answered"] else 0
     return {
         "afterParty": await _after_party(run, rules, items),
         "runId": run["id"], "mode": run["mode"], "modeName": MODES[run["mode"]]["name"], "status": run["status"],

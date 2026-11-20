@@ -272,7 +272,7 @@ export function AnswerList({ options, removed = [], picked, correctIndex, disabl
   )
 }
 
-export function FactFakeButtons({ picked, correctIndex, disabled, onPick }: Omit<AnswerListProps, 'options' | 'removed'>) {
+export function FactFakeButtons({ picked, correctIndex, disabled, onPick, labels = ['FACT', 'FAKE'] }: Omit<AnswerListProps, 'options' | 'removed'> & { labels?: string[] }) {
   const revealed = correctIndex !== null
   const look = (index: number) => {
     if (!revealed) return picked === index ? 'picked' : 'idle'
@@ -280,7 +280,7 @@ export function FactFakeButtons({ picked, correctIndex, disabled, onPick }: Omit
   }
   return (
     <div className="grid grid-cols-2 gap-3">
-      {['FACT', 'FAKE'].map((label, index) => (
+      {labels.map((label, index) => (
         <button
           key={label}
           className="answer justify-center !min-h-[84px]"
@@ -505,7 +505,7 @@ export function Hud({ state, clockMs, position }: { state: RunState; clockMs?: n
       )}
       {position && (
         <div className="hud text-right">
-          {state.mode === 'show' || state.mode === 'straight' ? 'Question' : 'Answered'}<b>{position}</b>
+          {state.mode === 'show' || state.mode === 'straight' || state.mode === 'jukebox' ? 'Question' : 'Answered'}<b>{position}</b>
         </div>
       )}
     </div>

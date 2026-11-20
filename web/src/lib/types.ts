@@ -12,7 +12,7 @@ export type Branding = {
   host: { name: string; voiceEnabled: boolean; talkEnabled: boolean; choices: { id: string; name: string; register: string; label?: string | null }[] }
 }
 
-export type ModeId = 'show' | 'sudden_death' | 'speed' | 'straight'
+export type ModeId = 'show' | 'sudden_death' | 'speed' | 'straight' | 'jukebox'
 
 export type ModeInfo = { id: ModeId; name: string; tagline: string; music: boolean }
 
@@ -58,7 +58,7 @@ export type QuizView = {
 
 export type QuizInfo = { branding: Branding; quiz: QuizView; player: PlayerView | null }
 
-export type Slot = 'report' | 'image' | 'music' | 'fact_fake' | 'second_chance' | 'final'
+export type Slot = 'report' | 'image' | 'music' | 'fact_fake' | 'second_chance' | 'final' | 'jargon' | 'song_or_jargon'
 
 export type ItemImage = { url: string; alt: string; mode: 'show' | 'memory' }
 
@@ -83,6 +83,8 @@ export type Item = {
   text: string | null
   options: string[] | null
   remainingMs?: number | null
+  /** The final question, being read out by the host: its answers (and its clock) come this many ms from now. */
+  startsInMs?: number
   image?: ItemImage
   music?: { previewUrl: string; asks: 'artist' | 'title' }
 }
@@ -125,7 +127,8 @@ export type Reveal = {
   sourceQuote?: string | null
   section?: { id: string; heading: string }
   image?: ItemImage
-  music?: { artist: string; title: string; artworkUrl: string | null; trackUrl: string | null }
+  /** The song behind a music question; in Office Jukebox its clip too, played once the answer is in. */
+  music?: { artist: string; title: string; artworkUrl: string | null; trackUrl: string | null; previewUrl?: string }
   strikeRestored?: boolean
 }
 
@@ -141,7 +144,13 @@ export type PartyTrack = {
 }
 export type AfterParty = { decade: string; tracks: PartyTrack[] }
 /** The songs that play quietly behind a game (an empty list when it has no music). */
-export type Soundtrack = { decade: string | null; tracks: PartyTrack[]; volume?: 'quiet' | 'medium' | 'loud' }
+export type Soundtrack = {
+  decade: string | null
+  tracks: PartyTrack[]
+  volume?: 'quiet' | 'medium' | 'loud'
+  /** The organiser's music levels, moment by moment (see jukebox.JukeboxMix). */
+  mix?: { opening: number; opening_sec: number; under_host: number; questions: number; between: number; ease_down: boolean }
+}
 
 export type Summary = {
   /** Music for the results screen: hits from the game's decade (null when music is off). */

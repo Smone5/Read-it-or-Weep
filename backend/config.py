@@ -69,6 +69,8 @@ class Config:
     elevenlabs_api_key: str = field(default_factory=lambda: _env("ELEVENLABS_API_KEY"))
     elevenlabs_engine: str = field(default_factory=lambda: _env("ELEVENLABS_ENGINE", "socket"))   # socket | dialogue | tts
     elevenlabs_model: str = field(default_factory=lambda: _env("ELEVENLABS_MODEL"))               # empty: the engine's own
+    # Lines sent to ElevenLabs at the same moment, across every game: the plan's concurrency limit (more queue briefly).
+    elevenlabs_concurrency: int = field(default_factory=lambda: int(_env("ELEVENLABS_CONCURRENCY", "3") or 3))
     model_host_writer: str = field(default_factory=lambda: _env("MODEL_HOST_WRITER", _env("MODEL_FAST", "gpt-6-luna")))
     host_writer_effort: str = field(default_factory=lambda: _env("HOST_WRITER_EFFORT", "none"))
     model_transcribe: str = field(default_factory=lambda: _env("MODEL_TRANSCRIBE", "gpt-4o-mini-transcribe"))

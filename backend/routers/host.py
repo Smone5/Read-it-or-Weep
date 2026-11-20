@@ -247,10 +247,25 @@ async def _serve(websocket: WebSocket, *, game: str, quiz: dict, player: dict | 
                         cue = str(message.get("cue", ""))
                         if session is not None:
                             direction = await _live_direction(await live.load(live_code, fresh=True), cue)
+                        elif cue == "read":
+                            # The final question, read out word for word (no writer): see final_question_line.
+                            current = await db.fetchrow("select * from runs where id = $1", run_row["id"])
+                            line = await host_service.final_question_line(current, message.get("itemId"))
+                            direction = None
+                            if line and not unwanted(number):
+                                stream = voice_session.recite(line)
                         else:
                             current = await db.fetchrow("select * from runs where id = $1", run_row["id"])
                             direction = await host_service.describe_cue(cue, run=current, player=player,
                                                                         item_id=message.get("itemId"))
+                            # A round introduction comes from the host's rotating set, recorded once (see round_set).
+                            if (cue == "round" and direction and speak
+                                    and isinstance(voice_session, host_service.WrittenHostVoice)):
+                                round_key = await host_service.round_set(current, message.get("itemId"))
+                                line = await voice_session.from_set(round_key, direction) if round_key else None
+                                if line and not unwanted(number):
+                                    stream = voice_session.recite(line, note=direction, keep=True)
+                                    direction = None
                         # Looking the facts up takes a moment: the player may have moved on meanwhile.
                         if direction and not unwanted(number):
                             stream = voice_session.say(direction)

@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { ErrorNote } from '../components/ui'
 import { call, errorText, isAbort } from './api'
-import { ChoiceGroup, ErrorBlock, Field, LoadingBlock, Note, PageHeader, Panel, SaveBar, Segmented, Switch } from './components'
+import { Bar, ChoiceGroup, ErrorBlock, Field, LoadingBlock, Note, PageHeader, Panel, SaveBar, Segmented, Switch } from './components'
 import { useNotify, usePageTitle } from './context'
 import { useLoad, useMeta } from './hooks'
 import type {
@@ -110,6 +110,15 @@ function voiceHint(voice: string, info: VoiceInfo, elevenConfigured: boolean): R
   return `Measured: pitch about ${facts.pitchHz} Hz, clarity ${facts.clarityDb} dB.`
 }
 
+// When this much of the month's ElevenLabs plan is used, new lines switch to the backup voice (lines already
+// recorded still play in the real one). "Off": only when ElevenLabs itself refuses, the plan being used up.
+const BUDGETS: { value: string; label: string }[] = [
+  { value: '50', label: '50%' },
+  { value: '75', label: '75%' },
+  { value: '90', label: '90%' },
+  { value: '0', label: 'Off' },
+]
+
 const QUALITIES: { value: VoiceQuality; label: string; description: string }[] = [
   {
     value: 'premium',
@@ -158,6 +167,7 @@ function draftOf(value: HostSettings, fallbackVoice: string): Draft {
     player_can_choose: value.player_can_choose ?? true,
     voice_quality: value.voice_quality ?? 'standard',
     pace: value.pace ?? 'snappy',
+    voice_budget: value.voice_budget ?? 90,
     hosts: hosts
       .slice(0, MAX_CHARACTERS)
       .map((host) => ({ key: nextKey++, name: host.name, voice: host.voice, style: host.style ?? '', manner: host.manner ?? 'wiseguy' })),
@@ -173,6 +183,7 @@ const bodyOf = (draft: Draft): HostSettingsWrite => ({
   player_can_choose: draft.player_can_choose,
   voice_quality: draft.voice_quality,
   pace: draft.pace,
+  voice_budget: draft.voice_budget,
   hosts: draft.hosts.map((host) => ({ name: host.name.trim(), voice: host.voice, style: host.style.trim(), manner: host.manner })),
 })
 
@@ -639,6 +650,8 @@ function HostForm({
         </div>
       </Panel>
 
+      <VoiceUsage />
+
       <Panel title="Voice">
         <Switch
           checked={draft.voice_enabled}
@@ -657,6 +670,14 @@ function HostForm({
           <div>
             <span className="label">Quality</span>
             <ChoiceGroup label="Voice quality" options={QUALITIES} value={draft.voice_quality} onChange={(quality) => changeSound({ voice_quality: quality })} />
+            <div className="mt-4">
+              <span className="label">Save the ElevenLabs plan</span>
+              <Segmented label="Switch to the backup voice when this much of the month's plan is used" options={BUDGETS} value={String(draft.voice_budget)} onChange={(budget) => change({ voice_budget: Number(budget) })} />
+              <p className="mt-1 text-xs text-muted">
+                When this much of the month's ElevenLabs characters is used, new lines switch to the closest OpenAI voice until the count
+                starts again. Lines already recorded (round introductions, the final question) keep playing in the real voice.
+              </p>
+            </div>
           </div>
           <div>
             <span className="label">How fast the host talks</span>
@@ -678,5 +699,52 @@ function HostForm({
         }}
       />
     </form>
+  )
+}
+
+type VoiceUsageRead =
+  | { configured: false }
+  | { configured: true; error: string }
+  | { configured: true; error?: undefined; tier: string | null; used: number; limit: number; resetsAt: string | null; perGame: number; gamesLeft: number | null }
+
+/** How much of the ElevenLabs plan this month's games have used: the host's voice is paid for by the character. */
+function VoiceUsage() {
+  const { data, error } = useLoad<VoiceUsageRead>('/voice-usage')
+  if (error) return null // the rest of the page still works
+  if (!data) return null
+  if (!data.configured) {
+    return (
+      <Panel title="Voice usage">
+        <p className="text-sm text-muted">No ElevenLabs key is set, so the host speaks with OpenAI's voices (paid with the OpenAI account).</p>
+      </Panel>
+    )
+  }
+  if (data.error !== undefined) {
+    return (
+      <Panel title="Voice usage">
+        <Note tone="warn">
+          ElevenLabs did not say how much has been used: {data.error} If the key is not allowed to read the account, give it
+          the "User: Read" permission in ElevenLabs.
+        </Note>
+      </Panel>
+    )
+  }
+  const share = data.limit > 0 ? data.used / data.limit : 0
+  const resets = data.resetsAt ? new Date(data.resetsAt).toLocaleDateString(undefined, { day: 'numeric', month: 'long' }) : null
+  return (
+    <Panel title="Voice usage" description="The host's ElevenLabs voice is paid for by the character. This is this month's use of the plan.">
+      <p className="text-sm">
+        <b>{data.used.toLocaleString()}</b> of {data.limit.toLocaleString()} characters used ({Math.round(share * 100)}%)
+        {data.tier ? <span className="text-muted"> · {data.tier.charAt(0).toUpperCase() + data.tier.slice(1)} plan</span> : null}
+      </p>
+      <div className="my-2">
+        <Bar value={data.used} max={data.limit} label="Characters used this month" tone={share > 0.9 ? 'var(--bad)' : share > 0.75 ? 'var(--accent)' : undefined} />
+      </div>
+      <p className="text-xs text-muted">
+        {data.gamesLeft !== null ? <>Roughly {data.gamesLeft.toLocaleString()} more games this month, at about {data.perGame.toLocaleString()} characters a game. </> : null}
+        {resets ? <>The count starts again on {resets}. </> : null}
+        If it runs out, the host carries on in the closest OpenAI voice.
+      </p>
+    </Panel>
   )
 }

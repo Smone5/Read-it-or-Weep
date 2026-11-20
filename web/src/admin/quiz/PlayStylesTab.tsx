@@ -5,7 +5,7 @@ import { Badge, ChoiceGroup, Note, NumberField, numberError, Panel, SaveBar, Seg
 import { useNotify } from '../context'
 import { decadeLabel } from '../format'
 import { paths } from '../paths'
-import type { DeepPartial, GameRules, ModeId, PictureMode, SoundtrackVolume } from '../types'
+import type { DeepPartial, GameRules, ModeId, MusicMix, PictureMode, SoundtrackVolume } from '../types'
 import { useQuiz } from './context'
 
 // ---- the numbers ----------------------------------------------------------------------
@@ -113,6 +113,7 @@ const MODE_NUMBERS: Record<ModeId, NumberSpec[]> = {
     straight('max_questions', 'Most questions in a quiz', 3, 100),
     straight('pass_mark', 'Pass mark', 1, 100, { unit: '% correct' }),
   ],
+  jukebox: [], // Office Jukebox: four fixed rounds, nothing to set
 }
 
 const LIFELINES: NumberSpec[] = [
@@ -129,6 +130,16 @@ const READY_THRESHOLD: NumberSpec = {
   unit: '%',
   get: (rules) => rules.ready_threshold,
   set: (rules, value) => ({ ...rules, ready_threshold: value }),
+}
+
+const OPENING_SECONDS: NumberSpec = {
+  id: 'opening_sec',
+  label: 'The theme on its own before the host speaks',
+  min: 4,
+  max: 10,
+  unit: 'seconds',
+  get: (rules) => rules.mix?.opening_sec ?? 6,
+  set: (rules, value) => ({ ...rules, mix: { ...MIX_AS_TUNED, ...(rules.mix ?? {}), opening_sec: value } }),
 }
 
 const LIVE_NUMBERS: NumberSpec[] = [
@@ -160,6 +171,18 @@ const SOUNDTRACK_VOLUMES: { value: SoundtrackVolume; label: string }[] = [
   { value: 'loud', label: 'Loud' },
 ]
 
+// The music moment by moment: steps of about 3 dB either side of the mix tuned by ear.
+const MIX_AS_TUNED: MusicMix = { opening: 0, opening_sec: 6, under_host: 0, questions: 0, between: 0, ease_down: true }
+const STEP_LABELS: Record<string, string> = { '-3': 'Off', '-2': 'Much quieter', '-1': 'Quieter', '0': 'Recommended', '1': 'Louder', '2': 'Much louder' }
+const steps = (low: number, high: number) =>
+  Array.from({ length: high - low + 1 }, (_, i) => String(low + i)).map((value) => ({ value, label: STEP_LABELS[value] }))
+const MIX_MOMENTS: { key: 'opening' | 'under_host' | 'questions' | 'between'; label: string; help: string; options: { value: string; label: string }[] }[] = [
+  { key: 'opening', label: 'The opening theme', help: 'Loud and on its own at the start of a game, before the host speaks.', options: steps(-2, 2) },
+  { key: 'under_host', label: 'Under the host', help: 'Behind his voice. One step louder at most, so he is always easy to follow.', options: steps(-2, 1) },
+  { key: 'questions', label: 'During a question', help: 'Quiet, so players can concentrate. "Off" leaves the question in silence.', options: steps(-3, 2) },
+  { key: 'between', label: 'Between questions', help: 'After an answer, on round title cards, and while a player waits to tap Next.', options: steps(-2, 2) },
+]
+
 const clone = (rules: GameRules): GameRules => structuredClone(rules)
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -189,6 +212,8 @@ function withSavedStyle(draft: GameRules, saved: GameRules, mode: ModeId): GameR
       return { ...draft, speed: saved.speed }
     case 'straight':
       return { ...draft, straight: saved.straight }
+    case 'jukebox':
+      return draft // Office Jukebox has no numbers of its own
   }
 }
 
@@ -219,6 +244,7 @@ export default function PlayStylesTab() {
     ...(enabled.has('show') ? LIFELINES : []),
     READY_THRESHOLD,
     ...LIVE_NUMBERS,
+    ...(draft.music_enabled && (draft.soundtrack ?? true) ? [OPENING_SECONDS] : []),
   ]
   const badNumbers = onScreen.filter((spec) => numberError(spec.get(draft), spec.min, spec.max) !== null)
   const clockTooShort = enabled.has('sudden_death') && draft.sudden_death.timer_min_sec > draft.sudden_death.timer_start_sec
@@ -380,6 +406,12 @@ export default function PlayStylesTab() {
             />
           </div>
         )}
+        {draft.music_enabled && (draft.soundtrack ?? true) && (
+          <MixControls
+            mix={{ ...MIX_AS_TUNED, ...(draft.mix ?? {}) }}
+            onChange={(mix) => change((current) => ({ ...current, mix }))}
+          />
+        )}
         {draft.music_enabled && (
           <Switch
             checked={draft.after_party}
@@ -446,5 +478,47 @@ export default function PlayStylesTab() {
 
       <SaveBar dirty={dirty} saving={saving} error={error} onDiscard={() => change(() => clone(rules))} />
     </form>
+  )
+}
+
+
+/** The music moment by moment, for organisers who want it louder or quieter at one point of the game. */
+function MixControls({ mix, onChange }: { mix: MusicMix; onChange: (mix: MusicMix) => void }) {
+  const tuned = JSON.stringify(mix) === JSON.stringify(MIX_AS_TUNED)
+  return (
+    <fieldset className="mb-3 ml-1 mt-1 grid gap-3">
+      <legend className="label">Moment by moment</legend>
+      {MIX_MOMENTS.map((moment) => (
+        <div key={moment.key}>
+          <span className="mb-1 block text-sm font-semibold">{moment.label}</span>
+          <Segmented
+            label={moment.label}
+            options={moment.options}
+            value={String(mix[moment.key])}
+            onChange={(value) => onChange({ ...mix, [moment.key]: Number(value) })}
+          />
+          <p className="mt-1 text-xs text-muted">{moment.help}</p>
+        </div>
+      ))}
+      <NumberField
+        label="The theme on its own before the host speaks"
+        value={mix.opening_sec}
+        min={4}
+        max={10}
+        unit="seconds"
+        onChange={(seconds) => onChange({ ...mix, opening_sec: seconds })}
+      />
+      <Switch
+        checked={mix.ease_down}
+        onChange={(checked) => onChange({ ...mix, ease_down: checked })}
+        label="Ease the music down while a player lingers on an answer"
+        description="Once the host has reacted the music comes up; if the player has not tapped Next after about six seconds it eases back down. Tapping Next always drops it at once."
+      />
+      <div>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={tuned} onClick={() => onChange(MIX_AS_TUNED)}>
+          Back to the recommended mix
+        </button>
+      </div>
+    </fieldset>
   )
 }

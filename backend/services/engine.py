@@ -21,17 +21,25 @@ from typing import Any
 
 import db
 from security import sign_media
-from services import favorites, bank, music_service
+from services import favorites, bank, jukebox, music_service
 from services.settings_store import MODES
 
 GRACE_MS = 1500           # network + render time not counted against the player
 MUSIC_GRACE_MS = 3000     # a music clip also has to start playing
+# The final question is read out by the host before its answers appear (the advice of a game-show producer and a voice
+# director, 2026-11-20). Its clock waits for the reading - the same wait for everyone, sound on or off - and starts the
+# moment the answers are shown (start_clock), never later than this estimate of how long the reading takes.
+READ_WORDS_PER_SEC = 2.0  # the host's measured pace, pauses included
+READ_LEAD_WORDS = 3       # "Your final question..."
+READ_PAD_SEC = 1.5        # his first sound, and a breath before the answers
+READ_MAX_SEC = 20.0
 LATE_MS = 4000            # an answer this long after the limit counts as a timeout
 UNTIMED_SEC = 0
 
 BADGES = [(90, "Briefing Boss"), (70, "Well Read"), (40, "Skimmer"), (0, "Judged It By Its Cover")]
 LIFELINE_MULTIPLIER = {"fifty": 0.6, "hint": 0.6, "peek": 0.5}
 REPORT_SLOTS = ("report", "image", "final", "second_chance")
+MUSIC_SLOTS = ("music", "jargon", "song_or_jargon")    # counted as music in a game's score card
 
 
 class GameError(Exception):
@@ -90,6 +98,14 @@ def build_plan(mode: str, rules: dict, stock: dict[str, int], section_ids: list[
             plan.append(_slot("report", number, "Last Question", limit, difficulty="hard", mult=2))
         return plan
 
+    if mode == "jukebox":
+        # Office Jukebox, the music side game (see services/jukebox.py): generous clocks, and nothing costs points.
+        warm_up, jargon, synergy, closing = jukebox.ROUNDS
+        return ([_slot("music", 1, warm_up, 30, asks="artist") for _ in range(3)]
+                + [_slot("jargon", 2, jargon, 30) for _ in range(3)]
+                + [_slot("song_or_jargon", 3, synergy, 15) for _ in range(4)]
+                + [_slot("music", 4, closing, 30, asks="title", mult=2) for _ in range(2)])
+
     if mode == "straight":
         cfg = rules["straight"]
         per_section = max(1, int(cfg["per_section"]))
@@ -128,10 +144,12 @@ async def start_run(quiz: dict, rules: dict, player: dict, mode: str, decade: st
         raise GameError("That style of play is not switched on for this quiz.")
     questions = await bank.approved(quiz["id"], rules["question_sources"])
     stock = bank.counts(questions)
-    if stock["mcq"] < 3:
+    if stock["mcq"] < 3 and mode != "jukebox":                # the music side game needs no report questions
         raise GameError("This quiz does not have enough questions yet. Check back soon.", 409)
+    if mode == "jukebox" and not rules["music_enabled"]:
+        raise GameError("Music is switched off for this quiz, so Office Jukebox cannot be played.")
 
-    music = bool(rules["music_enabled"]) and mode in ("show", "sudden_death")
+    music = bool(rules["music_enabled"]) and mode in ("show", "sudden_death", "jukebox")
     if music:
         allowed = rules["decades"]
         decade = decade if decade in allowed else random.choice(allowed)
@@ -142,6 +160,8 @@ async def start_run(quiz: dict, rules: dict, player: dict, mode: str, decade: st
     section_ids = [s["id"] for s in await bank.sections(quiz["id"])
                    if any(q["section_id"] == s["id"] and q["kind"] == "mcq" for q in questions)]
     plan = build_plan(mode, rules, stock, section_ids, music)
+    if mode == "jukebox":
+        jukebox.prepare_soon(await music_service.tracks_for(decade))   # round two's jargon titles, written ahead
     lifelines = dict(rules["show"]["lifelines"]) if mode == "show" else ({"fifty": 1} if mode == "sudden_death" else {})
     await db.execute("update runs set status = 'abandoned', finished_at = now()"
                      " where player_id = $1 and quiz_id = $2 and status = 'in_progress'", player["id"], quiz["id"])
@@ -190,7 +210,7 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
             if liked:
                 avoid |= {t["id"] for t in await music_service.tracks_for(run["decade"])
                           if favorites.song_key(t["artist"], t["title"]) in liked}
-        built = await music_service.build_question(run["decade"], avoid)
+        built = await music_service.build_question(run["decade"], avoid, asks=slot.get("asks"))
         if built is None:
             return None
         track = built["track"]
@@ -198,6 +218,21 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
                 "payload": {"title": "Name That Tune", "text": built["text"], "options": built["options"],
                             "asks": built["asks"], "preview_url": track["preview_url"],
                             "attempt": int(slot.get("attempt", 1))}}
+
+    if kind in ("jargon", "song_or_jargon"):
+        tracks = await music_service.tracks_for(run["decade"])
+        avoid = {i["music_track_id"] for i in items if i["music_track_id"]}
+        if rules.get("soundtrack", True):            # never a song the background music is playing: no spoilers
+            avoid |= {t["id"] for t in await music_service.soundtrack_rows(run["decade"], run["id"])}
+        if kind == "jargon":
+            built = await jukebox.jargon_item(tracks, avoid)
+        else:
+            used = {i["payload"].get("phrase") for i in items if i["slot"] == "song_or_jargon"}
+            built = jukebox.song_or_jargon_item(tracks, avoid, used)
+        if built is None:
+            return None
+        return {**base, "music_track_id": built["track"]["id"] if built["track"] else None,
+                "correct_index": built["correct_index"], "payload": built["payload"]}
 
     if kind == "second_chance":
         retried = {i["payload"].get("retry_of") for i in items if i["slot"] == "second_chance"}
@@ -280,6 +315,8 @@ def _deals_sealed(run: dict, items: list[dict], fields: dict) -> bool:
         return False                       # the wager is its own gate
     if not items:
         return True                        # the opening of the game
+    if run["mode"] == "jukebox":
+        return fields["round_no"] != items[-1]["round_no"]   # each round has a title card; its clips load as they go
     if fields["slot"] == "music":
         return True                        # every music break is introduced, and its clip gets time to load
     return run["mode"] == "show" and fields["round_no"] != items[-1]["round_no"]
@@ -370,6 +407,12 @@ async def public_item(item: dict, run: dict) -> dict:
         if item["slot"] == "music":
             view["music"] = {"previewUrl": payload["preview_url"], "asks": payload.get("asks", "artist")}
         return view
+    starts_in_ms = int((item["served_at"] - _now()).total_seconds() * 1000)
+    if item["slot"] == "final" and starts_in_ms > 0:
+        # Being read out: the question, but not its answers, until its clock starts (see place_wager).
+        view.update({"text": payload["text"], "options": None, "wager": item["wager"], "startsInMs": starts_in_ms,
+                     "remainingMs": item["time_limit_sec"] * 1000 if item["time_limit_sec"] else None})
+        return view
     elapsed_ms = max(0, int((_now() - item["served_at"]).total_seconds() * 1000))
     view.update({
         "text": payload["text"], "options": payload["options"], "wager": item["wager"],
@@ -410,7 +453,13 @@ async def open_item(run: dict, rules: dict, item_id: str) -> tuple[dict, dict]:
     return item, run
 
 
-async def place_wager(run: dict, item_id: str, amount: int) -> dict:
+def reading_seconds(text: str | None) -> float:
+    """How long the host takes to read a question out, lead-in included (see READ_WORDS_PER_SEC)."""
+    words = len((text or "").split())
+    return min(READ_MAX_SEC, (READ_LEAD_WORDS + words) / READ_WORDS_PER_SEC + READ_PAD_SEC)
+
+
+async def place_wager(run: dict, item_id: str, amount: int, *, read_aloud: bool = False) -> dict:
     item = await _current_item(run, item_id)
     if item["slot"] != "final" or item["answered_at"] is not None:
         raise GameError("There is nothing to wager on right now.")
@@ -418,8 +467,24 @@ async def place_wager(run: dict, item_id: str, amount: int) -> dict:
         return item
     if amount not in item["payload"].get("wager_options", []):
         raise GameError("Pick one of the wager amounts shown.")
+    # The question is read out first: its clock starts when the answers appear (start_clock), or at the latest when
+    # the reading should be over. Only for a page that knows to ask for the answers - one loaded before this existed
+    # (a game carried across an update of the server) gets its question at once, as it always did.
+    starts = _now() + timedelta(seconds=reading_seconds(item["payload"].get("text")) if read_aloud else 0)
     return await db.fetchrow("update run_items set wager = $2, served_at = $3 where id = $1 returning *",
-                             item_id, amount, _now())
+                             item_id, amount, starts)
+
+
+async def start_clock(run: dict, item_id: str) -> dict:
+    """The final question's answers are on screen (the reading is over, or the player skipped it): its clock starts
+    now. It can only ever start earlier than planned, so skipping the reading never gains anyone time."""
+    item = await _current_item(run, item_id)
+    if item["slot"] == "final" and item["wager"] is None:
+        raise GameError("Place your wager first.")
+    if item["answered_at"] is not None:
+        return item
+    return await db.fetchrow("update run_items set served_at = least(served_at, $2) where id = $1 returning *",
+                             item_id, _now())
 
 
 async def use_lifeline(run: dict, item_id: str, kind: str, hint_writer=None) -> dict:
@@ -486,6 +551,10 @@ def _points(run: dict, rules: dict, item: dict, correct: bool, timed_out: bool, 
         return 100 if correct else 0
     if mode == "speed":
         return round(100 * (1 + 0.1 * min(run["streak"], 10))) if correct else 0
+    if mode == "jukebox":
+        if not correct:
+            return 0                                        # a warm-up: nothing costs points
+        return round((50 + 50 * time_fraction) * multiplier) + 10 * min(run["streak"], 5)
     if mode == "sudden_death":
         if not correct:
             return 0
@@ -510,6 +579,8 @@ async def submit_answer(run: dict, rules: dict, item_id: str, choice: int | None
         raise GameError("Place your wager first.")
     if item["payload"].get("sealed"):
         raise GameError("That question has not been opened yet.")
+    if item["slot"] == "final" and item["served_at"] > _now():
+        raise GameError("The answers are not up yet.")
     if run["status"] != "in_progress":
         raise GameError("This game is already over.", 409)
 
@@ -534,7 +605,7 @@ async def submit_answer(run: dict, rules: dict, item_id: str, choice: int | None
         return await _reveal(await _current_item(run, item_id),
                              await db.fetchrow("select * from runs where id = $1", run["id"]), rules)
 
-    is_music = item["slot"] == "music"
+    is_music = item["slot"] in MUSIC_SLOTS
     counts_for_streak = item["slot"] != "fact_fake" or run["mode"] == "speed"
     streak = (run["streak"] + 1 if correct else 0) if counts_for_streak else run["streak"]
     strikes = run["strikes"]
@@ -597,6 +668,11 @@ async def _reveal(item: dict, run: dict, rules: dict) -> dict:
         if track:
             result["music"] = {"artist": track["artist"], "title": track["title"],
                                "artworkUrl": track["artwork_url"], "trackUrl": track["track_url"]}
+            # The side game's song plays once it has been answered: the reward for working it out.
+            if item["slot"] in ("jargon", "song_or_jargon") and payload.get("preview_url"):
+                result["music"]["previewUrl"] = payload["preview_url"]
+    if payload.get("explain"):
+        result["explanation"] = payload["explain"]
     return result
 
 
@@ -629,7 +705,8 @@ async def finish_run(run: dict, rules: dict, abandoned: bool = False) -> dict:
     if current["status"] != "in_progress":
         return current
     accuracy = round(100 * current["report_correct"] / current["report_answered"]) if current["report_answered"] else 0
-    badge = next(name for floor, name in BADGES if accuracy >= floor)
+    badge = (jukebox.badge(current["music_correct"], current["music_answered"]) if current["mode"] == "jukebox"
+             else next(name for floor, name in BADGES if accuracy >= floor))
     passed = accuracy >= int(rules["straight"]["pass_mark"]) if current["mode"] == "straight" else None
     status = "abandoned" if abandoned and current["questions_answered"] < 3 else "completed"
     duration = int((_now() - current["started_at"]).total_seconds())
