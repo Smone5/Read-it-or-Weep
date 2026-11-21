@@ -79,9 +79,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
              "style": "Razor-sharp and bone-dry, mildly exasperated: the funniest person in any meeting, finally "
                       "handed a microphone. Understated British wit where a flat pause does the heavy lifting."},
             {"id": "june", "name": "June", "voice": "eleven:southern", "manner": "wiseguy",
-             "style": "Big-hearted, honeyed Southern charmer with natural Southern cadence (an occasional warm 'y'all', "
-                      "'well now', or 'bless it', never forced caricature): she has seen every slide deck twice and "
-                      "loves every minute. Teases like family and cheers like a proud aunt."},
+             "style": "Unmistakably Southern through and through — write EVERY line in warm, sassy Southern American "
+                      "speech, rhythm, and idioms: 'y'all', 'well now', 'bless your heart', 'sugar', 'darlin'', "
+                      "'hold your horses', 'fixin' to', 'Lord have mercy', 'reckon', 'hot dog', 'sweet tea', and "
+                      "homespun porch-swing zingers. Big-hearted, honeyed, and sharp as a tack — she teases like "
+                      "your funniest Southern aunt and cheers every right answer like a Friday-night touchdown."},
             {"id": "dex", "name": "Dex", "voice": "eleven:hype", "manner": "showman",
              "style": "Young, quick and hyped: every right answer is a buzzer-beater highlight reel, every wrong one "
                       "an instant-replay blooper."},

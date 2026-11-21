@@ -108,13 +108,16 @@ async def play(client: httpx.AsyncClient, slug: str, headers: dict, mode: str, s
                 if r.status_code == 200:
                     used.add(kind)
                     got = r.json()["item"]
+                    item = {**item, "removed": got["removed"]}       # so a wrong answer is never one that was taken away
                     if kind == "fifty":
                         check(len(got["removed"]) == 2 and right not in got["removed"], f"{label}: 50/50 removes two wrong answers")
                     elif kind == "peek":
                         check(bool(got["peek"]), f"{label}: peek returns the passage ({len(got['peek'] or '')} chars)")
                     else:
                         check(bool(got["hint"]), f"{label}: hint returned: {got['hint'][:70]!r}")
-                    check(got["multiplier"] < 1, f"{label}: {kind} reduces the points on offer (x{got['multiplier']})")
+                    refunded = bool(got.get("hintRefunded"))         # a generic fallback hint costs nothing
+                    check(got["multiplier"] < 1 or refunded,
+                          f"{label}: {kind} reduces the points on offer (x{got['multiplier']}{', fallback hint refunded' if refunded else ''})")
                     break
         if random.random() < skill:
             choice = right

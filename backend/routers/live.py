@@ -10,10 +10,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 
 import db
-from dependencies import optional_player
-from routers.play import _branding_view, throttle, upsert_player
+from dependencies import current_player, optional_player
+from routers.play import _branding_view, find_quiz, throttle, upsert_player
 from security import issue_player_token
-from services import live
+from services import live, settings_store
 
 router = APIRouter(prefix="/api/live", tags=["live"])
 
@@ -114,6 +114,22 @@ async def answer(code: str, body: LiveAnswer, player: dict | None = Depends(opti
         raise HTTPException(401, "Join the game first.")
     try:
         return await live.answer(await _session(code), player, body.choiceIndex)
+    except live.LiveError as exc:
+        raise _error(exc) from exc
+
+
+class HostLiveBody(BaseModel):
+    decade: str | None = None
+
+
+@router.post("/quiz/{slug}/host")
+async def host_live(slug: str, body: HostLiveBody, request: Request,
+                    player: dict = Depends(current_player)) -> dict:
+    """Let a signed-in player host a live group room directly from an open quiz's lobby."""
+    throttle(request, "live-host", 20)
+    quiz = await find_quiz(slug)
+    try:
+        return await live.create_session(quiz, await settings_store.quiz_rules(quiz), body.decade)
     except live.LiveError as exc:
         raise _error(exc) from exc
 

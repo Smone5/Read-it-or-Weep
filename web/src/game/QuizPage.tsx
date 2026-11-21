@@ -1,7 +1,7 @@
 // A quiz from the player's side: join → lobby → game → results.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { HostCrt, hostToneFor } from '../components/HostCrt'
 import { IconPlay, IconStop, IconTrophy } from '../components/Icons'
 import { ErrorNote, FullScreenMessage, Logo, SoundToggle, Spinner, Stage, untilText } from '../components/ui'
@@ -487,6 +487,27 @@ function Lobby({ info, player, hostId, onChooseHost, onStart, onResume, onOpenSc
     }
   }
 
+  const navigate = useNavigate()
+  const [liveCode, setLiveCode] = useState('')
+  const [hostingLive, setHostingLive] = useState(false)
+
+  const hostLiveRoom = async () => {
+    if (hostingLive || busy) return
+    setHostingLive(true)
+    setError('')
+    unlockAudio()
+    unlockMusic()
+    try {
+      const created = await api<{ code: string; hostKey: string }>(`/api/live/quiz/${quiz.slug}/host`, {
+        body: { decade: wantsDecade ? decade : null },
+      })
+      navigate(`/host/${created.code}#k=${encodeURIComponent(created.hostKey)}`)
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : 'Could not start a live room.')
+      setHostingLive(false)
+    }
+  }
+
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-4 pb-8 lg:max-w-4xl">
       <header className="flex items-center gap-3">
@@ -536,6 +557,48 @@ function Lobby({ info, player, hostId, onChooseHost, onStart, onResume, onOpenSc
               </div>
             </section>
           )}
+
+          <section className="card card-accent p-4 sm:p-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="pixel text-[10px]" style={{ color: 'var(--accent-text)' }}>Play live together</p>
+              <span className="text-xs text-muted">Big screen + phones</span>
+            </div>
+            <p className="mt-2 text-[15px] text-muted">
+              Put the questions on a shared screen and have everyone answer on their phones at once.
+            </p>
+            <div className="mt-3 flex flex-col gap-2.5 sm:flex-row sm:items-center">
+              <button
+                type="button"
+                className="btn btn-accent sm:flex-none"
+                disabled={hostingLive || busy || !quiz.ready}
+                onClick={() => void hostLiveRoom()}
+              >
+                {hostingLive ? 'Opening room…' : <>Host big screen <IconPlay size={13} /></>}
+              </button>
+              <form
+                className="flex flex-1 items-center gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  const clean = liveCode.trim().toUpperCase()
+                  if (clean.length >= 4) navigate(`/live/${clean}`)
+                }}
+              >
+                <input
+                  className="field pixel min-w-0 flex-1 text-center text-xs tracking-widest"
+                  value={liveCode}
+                  onChange={(e) => setLiveCode(e.target.value.toUpperCase())}
+                  maxLength={6}
+                  autoCapitalize="characters"
+                  autoComplete="off"
+                  placeholder="CODE"
+                  aria-label="Live room join code"
+                />
+                <button type="submit" className="btn btn-ghost flex-none" disabled={liveCode.trim().length < 4}>
+                  Join
+                </button>
+              </form>
+            </div>
+          </section>
         </div>
 
         {/* Right column: music vibe, host CRT picker, start actions */}

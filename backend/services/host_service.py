@@ -191,6 +191,25 @@ _TAGGED_SHAPES = (
     "\"[building] Hold on... [announcing, big] the Lightning Round! [teasing] Fact or fake, no thinking... "
     "[dry] your specialty.\"")
 
+_SOUTHERN_TAGGED_SHAPES = (
+    "# The shape to aim for (never these exact words - keep the rich Southern voice and idioms in every line)\n"
+    "\"[wincing] Well bless your heart - [plainly] 184 million. [amused] ... Bold guess though, sugar, I'll give y'all that.\"\n"
+    "\"[delighted] Hot dog, nailed it! [sassy] Somebody actually read past the cover page, y'all.\"\n"
+    "\"[impressed] Look at you go - quick as a hiccup! [suspicious] ... Almost too quick, darlin'.\"\n"
+    "\"[sighs] Ohh, time's up, sugar - [plainly] Phoenix. [teasing] Even the porch clock moves faster than that.\"\n"
+    "\"[warm] Well now, yes indeed! [delighted] Pure eighties gold... [announcing] Blondie, 'Heart of Glass.'\"\n"
+    "\"[building] Hold your horses, y'all... [announcing, big] the Lightning Round! [teasing] Fact or fake, "
+    "faster than sweet tea at a picnic!\"")
+
+_SOUTHERN_PLAIN_SHAPES = (
+    "# The shape to aim for (never these exact words - keep the rich Southern voice and idioms in every line)\n"
+    "\"Well bless your heart - 184 million. ... Bold guess though, sugar, I'll give y'all that.\"\n"
+    "\"Hot dog, nailed it! Somebody actually read past the cover page, y'all.\"\n"
+    "\"Look at you go - quick as a hiccup! ... Almost too quick, darlin'.\"\n"
+    "\"Ohh, time's up, sugar - Phoenix. Even the porch clock moves faster than that.\"\n"
+    "\"Hold your horses, y'all... Lightning Round! Fact or fake, faster than sweet tea at a picnic!\"\n"
+    "\"Next up, sugar... Picture Round! A chart somebody lost a whole Sunday to.\"")
+
 _TAG = re.compile(r"\[[^\[\]]{0,60}\]")
 
 
@@ -285,14 +304,15 @@ def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, roo
         "- Never reveal or hint at an answer before it has been given, unless you are asked to deliver a hint.\n"
         "- Report facts come only from what you are told. Never invent them.\n"
         "- Do not name real game shows or their hosts, and never say you are an AI.",
-        _TAGGED_SHAPES if tags else (
-            "# The shape to aim for (never these exact words)\n"
-            "\"Nope - 184 million. ... Bold guess, though. I respect bold.\"\n"
-            "\"Correct. Somebody actually opened the attachment.\"\n"
-            "\"Yes! And fast. ... Suspiciously fast.\"\n"
-            "\"Ohh, that's time - Phoenix. The clock didn't read it either.\"\n"
-            "\"Hold on... Lightning Round! Fact or fake, no thinking... your specialty.\"\n"
-            "\"Next up... Picture Round! The diagram somebody lost a weekend to.\""),
+        (_SOUTHERN_TAGGED_SHAPES if "southern" in (style or "").lower() else _TAGGED_SHAPES) if tags else (
+            _SOUTHERN_PLAIN_SHAPES if "southern" in (style or "").lower() else (
+                "# The shape to aim for (never these exact words)\n"
+                "\"Nope - 184 million. ... Bold guess, though. I respect bold.\"\n"
+                "\"Correct. Somebody actually opened the attachment.\"\n"
+                "\"Yes! And fast. ... Suspiciously fast.\"\n"
+                "\"Ohh, that's time - Phoenix. The clock didn't read it either.\"\n"
+                "\"Hold on... Lightning Round! Fact or fake, no thinking... your specialty.\"\n"
+                "\"Next up... Picture Round! The diagram somebody lost a weekend to.\"")),
     ]
     if quiz_title:
         context = f"# Tonight\nThe quiz: \"{quiz_title}\"."

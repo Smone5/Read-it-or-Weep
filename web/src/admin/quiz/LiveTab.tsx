@@ -29,6 +29,21 @@ export default function LiveTab() {
   const [replacing, setReplacing] = useState(false)
   const [viewing, setViewing] = useState<LiveSession | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [reclaimingId, setReclaimingId] = useState<string | null>(null)
+
+  const reclaim = async (session: LiveSession) => {
+    if (reclaimingId) return
+    setReclaimingId(session.id)
+    try {
+      const recovered = await call<LiveCreated>(`/live/${session.id}/reclaim`, { method: 'POST', body: {} })
+      setLiveGame({ ...recovered, questions: session.questions })
+      notify(`Fresh big-screen link ready for ${recovered.code}.`)
+    } catch (reason) {
+      notify(errorText(reason), 'bad')
+    } finally {
+      setReclaimingId(null)
+    }
+  }
 
   const musicInLive = rules.music_enabled && rules.live.music_rounds > 0
 
@@ -168,9 +183,21 @@ export default function LiveTab() {
                         <td className="num">{session.players}</td>
                         <td className="num">{session.questions}</td>
                         <td className="num">
-                          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setViewing(session)} disabled={session.players === 0}>
-                            {session.players === 0 ? 'Nobody joined' : 'See results'}
-                          </button>
+                          <div className="inline-flex items-center gap-2">
+                            {session.status !== 'finished' && (
+                              <button
+                                type="button"
+                                className="btn btn-accent btn-sm"
+                                disabled={reclaimingId === session.id}
+                                onClick={() => void reclaim(session)}
+                              >
+                                {reclaimingId === session.id ? 'Reopening…' : 'Reopen big screen'}
+                              </button>
+                            )}
+                            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setViewing(session)} disabled={session.players === 0}>
+                              {session.players === 0 ? 'Nobody joined' : 'See results'}
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     )
