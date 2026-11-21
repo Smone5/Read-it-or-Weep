@@ -212,3 +212,42 @@ def test_every_mode_starts_easy_and_ramps_harder():
     picked = bank.choose([hard_q, easy_q], seen={}, used=set(), difficulty="easy",
                          section_states={"s1": "cleared", "s2": "new"})
     assert picked is not None and picked["id"] == "e1"
+
+
+def test_reveal_image_only_shows_when_actually_relevant_to_question():
+    imgs = [
+        {"id": "sb", "section_id": "s5",
+         "caption": "Figure 5: Points scored by Denver versus opponents across Denver's three Super Bowl victories.",
+         "description": "Grouped bar chart of Super Bowl XXXII (Green Bay), Super Bowl XXXIII (Atlanta), and Super Bowl 50 (Carolina)."},
+        {"id": "map", "section_id": "s2",
+         "caption": "Figure 2: Fan perimeter map showing gates, four-corner ramps, 50-yard elevators, RTD Light Rail, and rideshare zones.",
+         "description": "Bird's-eye perimeter map with Gate 5 rideshare drop-off and Ball Arena rideshare pick-up."},
+    ]
+    # Unrelated question in Section 5 (Thunder the mascot) must NOT pull up the Super Bowl chart!
+    assert engine._match_reveal_image(
+        "What does Thunder, the Broncos' live mascot, do after every Denver touchdown?",
+        "Gallops across the field",
+        "Thunder gallops across the field after every Denver touchdown.",
+        imgs,
+        section_id="s5",
+    ) is None
+
+    # Directly related Super Bowl question DOES match the Super Bowl chart.
+    matched_sb = engine._match_reveal_image(
+        "Who earned Super Bowl XXXII MVP in Denver's win over Green Bay?",
+        "Terrell Davis",
+        "Terrell Davis won MVP in Super Bowl XXXII against Green Bay.",
+        imgs,
+        section_id="s5",
+    )
+    assert matched_sb is not None and matched_sb["id"] == "sb"
+
+    # Rideshare question matches the Perimeter Map even from Section 1.
+    matched_map = engine._match_reveal_image(
+        "Where should rideshare riders walk after the game for pick-up?",
+        "Ball Arena near 5th and Walnut",
+        "Gate 5 is drop-off; post-game rideshare pick-up is at Ball Arena.",
+        imgs,
+        section_id="s1",
+    )
+    assert matched_map is not None and matched_map["id"] == "map"

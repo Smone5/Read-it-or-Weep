@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -725,6 +726,46 @@ async def submit_answer(run: dict, rules: dict, item_id: str, choice: int | None
     return reveal
 
 
+_REVEAL_IMG_STOP = {
+    "the", "and", "for", "with", "that", "this", "from", "was", "were", "are", "its", "their", "than", "into",
+    "over", "per", "has", "had", "have", "not", "but", "more", "most", "some", "any", "about", "both", "which",
+    "what", "when", "where", "how", "who", "why", "does", "did", "can", "will", "you", "your", "all", "one",
+    "two", "three", "chart", "figure", "graph", "diagram", "visual", "guide", "showing", "shows", "report",
+    "section", "table", "points", "versus", "across", "between", "every", "after", "before", "during",
+    "fan", "fans", "game", "day", "team", "stadium", "field", "empower", "mile", "high", "denver", "broncos",
+}
+
+
+def _topic_tokens(text: str) -> set[str]:
+    return {
+        tok for tok in re.findall(r"[a-z0-9]{3,}", (text or "").lower())
+        if tok not in _REVEAL_IMG_STOP
+    }
+
+
+def _match_reveal_image(
+    question_text: str,
+    correct_answer: str,
+    explanation: str | None,
+    images: list[dict],
+    section_id: str | None,
+) -> dict | None:
+    """Return a chart/map on Answer Reveal ONLY when its caption/description genuinely relates to this question."""
+    q_tokens = _topic_tokens(" ".join(filter(None, [question_text, correct_answer, explanation])))
+    if len(q_tokens) < 2:
+        return None
+    best: tuple[float, dict] | None = None
+    for img in images:
+        img_tokens = _topic_tokens(" ".join(filter(None, [img.get("caption"), img.get("description")])))
+        overlap = q_tokens & img_tokens
+        if len(overlap) < 2:
+            continue
+        score = len(overlap) + (0.5 if section_id and img.get("section_id") == section_id else 0.0)
+        if best is None or score > best[0]:
+            best = (score, img)
+    return best[1] if best else None
+
+
 async def _reveal(item: dict, run: dict, rules: dict) -> dict:
     payload = item["payload"]
     result: dict[str, Any] = {
@@ -756,11 +797,18 @@ async def _reveal(item: dict, run: dict, rules: dict) -> dict:
             row["description"] if row else None,
             row["width"] if row else None, row["height"] if row else None,
         )
-    elif section_id and item["slot"] not in ("fact_fake", *MUSIC_SLOTS):
-        # Show the section's chart/map on Answer Reveal so players learn visually without spoiling the question!
-        ref_img = await db.fetchrow(
-            "select id, caption, description, width, height from doc_images"
-            " where section_id = $1 and usable is not false order by ordinal asc limit 1",
+    elif item["slot"] not in ("fact_fake", *MUSIC_SLOTS) and item["question_id"]:
+        # Only attach a chart/map on Answer Reveal when its caption/description genuinely matches this question.
+        candidates = await db.fetch(
+            "select id, section_id, caption, description, width, height from doc_images"
+            " where quiz_id = $1 and usable is not false order by ordinal asc",
+            run["quiz_id"],
+        )
+        ref_img = _match_reveal_image(
+            payload.get("text", ""),
+            result["correctAnswer"],
+            result.get("explanation"),
+            candidates,
             section_id,
         )
         if ref_img:
