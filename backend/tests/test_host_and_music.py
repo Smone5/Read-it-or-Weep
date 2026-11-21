@@ -72,6 +72,23 @@ def test_a_saved_character_keeps_a_known_manner_only():
     assert [host["manner"] for host in cleaned["hosts"]] == ["showman", "wiseguy", "wiseguy"]
 
 
+def test_default_hosts_cover_all_manners_and_distinct_crt_registers():
+    from services import eleven
+    hosts = settings_store.DEFAULTS["host"]["hosts"]
+    assert {h["manner"] for h in hosts} == set(settings_store.HOST_MANNERS)
+    assert all(h["style"].strip() for h in hosts)
+    registers = [eleven.BY_ID[h["voice"]].register for h in hosts]
+    assert len(set(registers)) == len(hosts)
+
+
+def test_live_final_two_questions_are_double_points():
+    assert not live.is_double_points(0, 10)
+    assert not live.is_double_points(7, 10)
+    assert live.is_double_points(8, 10)
+    assert live.is_double_points(9, 10)
+    assert not live.is_double_points(2, 3)                  # tiny 3-question games skip double points
+
+
 # --- the playlist behind the results ---------------------------------------------------------------------
 
 def track(number, artist):

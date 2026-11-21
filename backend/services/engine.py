@@ -21,7 +21,7 @@ from typing import Any
 
 import db
 from security import sign_media
-from services import favorites, bank, jukebox, music_service
+from services import favorites, bank, jukebox, music_service, stats
 from services.settings_store import MODES
 
 GRACE_MS = 1500           # network + render time not counted against the player
@@ -30,14 +30,16 @@ MUSIC_GRACE_MS = 3000     # a music clip also has to start playing
 # director, 2026-11-20). Its clock waits for the reading - the same wait for everyone, sound on or off - and starts the
 # moment the answers are shown (start_clock), never later than this estimate of how long the reading takes.
 READ_WORDS_PER_SEC = 2.0  # the host's measured pace, pauses included
-READ_LEAD_WORDS = 3       # "Your final question..."
+READ_LEAD_WORDS = 8       # bet-tier reaction + "Your final question..."
 READ_PAD_SEC = 1.5        # his first sound, and a breath before the answers
 READ_MAX_SEC = 20.0
 LATE_MS = 4000            # an answer this long after the limit counts as a timeout
 UNTIMED_SEC = 0
 
 BADGES = [(90, "Briefing Boss"), (70, "Well Read"), (40, "Skimmer"), (0, "Judged It By Its Cover")]
-LIFELINE_MULTIPLIER = {"fifty": 0.6, "hint": 0.6, "peek": 0.5}
+LIFELINE_MULTIPLIER = {"fifty": 0.75, "hint": 0.8, "peek": 0.5}
+PEEK_GRACE_SEC = 10
+UNUSED_LIFELINE_BONUS = 40
 REPORT_SLOTS = ("report", "image", "final", "second_chance")
 MUSIC_SLOTS = ("music", "jargon", "song_or_jargon")    # counted as music in a game's score card
 # A song plays while these are on screen: a music question's clip, and the song behind an Office Jukebox jargon title
@@ -113,7 +115,7 @@ def build_plan(mode: str, rules: dict, stock: dict[str, int], section_ids: list[
     if mode == "straight":
         cfg = rules["straight"]
         per_section = max(1, int(cfg["per_section"]))
-        targets = [sid for sid in section_ids for _ in range(per_section)][: int(cfg["max_questions"])]
+        targets = [sid for _ in range(per_section) for sid in section_ids][: int(cfg["max_questions"])]
         if not targets:
             targets = [None] * min(10, stock["mcq"])
         return [_slot("report", 1, "The Quiz", UNTIMED_SEC, section=sid, any_source=True) for sid in targets]
@@ -266,6 +268,7 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
 
     questions = await bank.approved(run["quiz_id"], rules["question_sources"])
     seen = await bank.history(run["player_id"], run["quiz_id"])
+    sec_states = await stats.section_states(run["quiz_id"], run["player_id"])
     used = {i["question_id"] for i in items if i["question_id"]}
     load = Counter(i["section_id"] for i in items if i["section_id"])
     asked = [bank.key_terms(q) for q in questions if q["id"] in used]   # so the same fact is not asked twice
@@ -275,8 +278,9 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
         facts_so_far = sum(1 for i in items if i["slot"] == "fact_fake" and i["correct_index"] == 0)
         fakes_so_far = sum(1 for i in items if i["slot"] == "fact_fake" and i["correct_index"] == 1)
         want_fact = facts_so_far < fakes_so_far if facts_so_far != fakes_so_far else random.random() < 0.5
-        question = (bank.choose([q for q in pool if q["is_true"] == want_fact], seen, used, section_load=load, asked=asked)
-                    or bank.choose(pool, seen, used, section_load=load, asked=asked))
+        question = (bank.choose([q for q in pool if q["is_true"] == want_fact], seen, used, section_load=load,
+                                asked=asked, section_states=sec_states)
+                    or bank.choose(pool, seen, used, section_load=load, asked=asked, section_states=sec_states))
         if question is None:
             return None
         return {**base, "question_id": question["id"], "section_id": question["section_id"],
@@ -291,9 +295,10 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
     else:
         pool = [q for q in mcqs if q["source_type"] != "image"]
     question = bank.choose(pool, seen, used, section_load=load, difficulty=slot.get("difficulty"),
-                           section_id=slot.get("section"), asked=asked)
+                           section_id=slot.get("section"), asked=asked, section_states=sec_states)
     if question is None and (kind == "image" or slot.get("section")):
-        question = bank.choose(mcqs, seen, used, section_load=load, difficulty=slot.get("difficulty"), asked=asked)
+        question = bank.choose(mcqs, seen, used, section_load=load, difficulty=slot.get("difficulty"),
+                               asked=asked, section_states=sec_states)
     if question is None:
         return None
     row = _mcq_fields(base, question, rules)
@@ -421,6 +426,7 @@ async def public_item(item: dict, run: dict) -> dict:
         "lifelinesUsed": item["lifelines_used"],
         "removed": payload.get("removed", []),
         "hint": payload.get("hint"),
+        "hintRefunded": bool(payload.get("hint_refunded")),
         "peek": payload.get("peek"),
     }
     if waiting_for_wager:
@@ -533,6 +539,7 @@ async def use_lifeline(run: dict, item_id: str, kind: str, hint_writer=None) -> 
     question = await db.fetchrow("select * from questions where id = $1", item["question_id"])
     thinking = timedelta()
 
+    charge = True
     if kind == "fifty":
         wrong = [i for i in range(len(payload["options"])) if i != item["correct_index"]]
         payload["removed"] = sorted(random.sample(wrong, 2))
@@ -552,14 +559,25 @@ async def use_lifeline(run: dict, item_id: str, kind: str, hint_writer=None) -> 
         if not excerpt.strip():                   # a hand-written question with no passage behind it
             raise GameError("There is no passage to peek at for this one. Try another lifeline.")
         payload["peek"] = excerpt[:700]
+        thinking = timedelta(seconds=PEEK_GRACE_SEC)   # reading grace so peeking does not drain the clock
     else:
         asked = _now()
-        payload["hint"] = await hint_writer(question) if hint_writer else "Think about what the report said on this."
+        raw_hint = await hint_writer(question) if hint_writer else "Think about what the report said on this."
+        if isinstance(raw_hint, tuple):
+            hint_str, is_fallback = raw_hint
+        else:
+            hint_str, is_fallback = raw_hint, False
+        payload["hint"] = hint_str
         thinking = _now() - asked                 # the clock does not run while the hint is being written
+        if is_fallback:
+            charge = False                        # never charge 20% + a lifeline for a generic fallback reminder
+            payload["hint_refunded"] = True
 
-    remaining[kind] -= 1
-    multiplier = float(item["points_multiplier"]) * LIFELINE_MULTIPLIER[kind]
-    await db.execute("update runs set lifelines = $2 where id = $1", run["id"], remaining)
+    multiplier = float(item["points_multiplier"])
+    if charge:
+        remaining[kind] -= 1
+        multiplier *= LIFELINE_MULTIPLIER[kind]
+        await db.execute("update runs set lifelines = $2 where id = $1", run["id"], remaining)
     return await db.fetchrow(
         "update run_items set payload = $2, points_multiplier = $3, lifelines_used = array_append(lifelines_used, $4),"
         " served_at = served_at + $5 where id = $1 returning *", item_id, payload, multiplier, kind, thinking)
@@ -748,10 +766,20 @@ async def finish_run(run: dict, rules: dict, abandoned: bool = False) -> dict:
              else next(name for floor, name in BADGES if accuracy >= floor))
     passed = accuracy >= int(rules["straight"]["pass_mark"]) if current["mode"] == "straight" else None
     status = "abandoned" if abandoned and current["questions_answered"] < 3 else "completed"
+    unused_lifelines = (
+        sum(max(0, int(v)) for v in (current["lifelines"] or {}).values())
+        if status == "completed" and not abandoned and (
+            current["mode"] == "show"
+            or (current["mode"] == "sudden_death" and current["strikes"] < int(rules["sudden_death"]["strikes"]))
+        )
+        else 0
+    )
+    lifeline_bonus = unused_lifelines * UNUSED_LIFELINE_BONUS
     duration = int((_now() - current["started_at"]).total_seconds())
     finished = await db.fetchrow(
-        "update runs set status = $2, finished_at = now(), duration_sec = $3, badge = $4, passed = $5, plan = '[]'::jsonb"
-        " where id = $1 and status = 'in_progress' returning *", run["id"], status, duration, badge, passed)
+        "update runs set status = $2, finished_at = now(), duration_sec = $3, badge = $4, passed = $5,"
+        " score = score + $6, plan = '[]'::jsonb"
+        " where id = $1 and status = 'in_progress' returning *", run["id"], status, duration, badge, passed, lifeline_bonus)
     if finished is None:
         return await db.fetchrow("select * from runs where id = $1", run["id"])
     await db.execute("delete from run_items where run_id = $1 and answered_at is null", run["id"])

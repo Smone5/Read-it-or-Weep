@@ -72,14 +72,18 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # The voices are the game-show-host voices of the ElevenLabs voice library, chosen by ear by the
         # organiser (2026-11-20). Without an ElevenLabs key each one is played by the OpenAI voice closest to it.
         "hosts": [
-            {"id": "max", "name": "Max", "voice": "eleven:classic", "manner": "wiseguy", "style": ""},
-            {"id": "roxy", "name": "Roxy", "voice": "eleven:british", "manner": "wiseguy",
-             "style": "Razor-sharp and amused, a little exasperated: the funniest person in any meeting, finally "
-                      "handed a microphone. A laugh is never far away."},
+            {"id": "max", "name": "Max", "voice": "eleven:classic", "manner": "wiseguy",
+             "style": "Polished prime-time game-show anchor: treats quarterly metrics like championship boxing, quick "
+                      "with a raised-eyebrow aside and old-school broadcast swagger."},
+            {"id": "roxy", "name": "Roxy", "voice": "eleven:british", "manner": "deadpan",
+             "style": "Razor-sharp and bone-dry, mildly exasperated: the funniest person in any meeting, finally "
+                      "handed a microphone. Understated British wit where a flat pause does the heavy lifting."},
             {"id": "june", "name": "June", "voice": "eleven:southern", "manner": "wiseguy",
-             "style": "Big-hearted and sassy: she has seen it all twice and loves every minute. Teases like family."},
+             "style": "Big-hearted and sassy: she has seen every slide deck twice and loves every minute. Warm "
+                      "Southern charm that teases like family and cheers like a proud aunt."},
             {"id": "dex", "name": "Dex", "voice": "eleven:hype", "manner": "showman",
-             "style": "Young, quick and hyped: every right answer is a highlight reel, every wrong one a blooper."},
+             "style": "Young, quick and hyped: every right answer is a buzzer-beater highlight reel, every wrong one "
+                      "an instant-replay blooper."},
         ],
         "player_can_choose": True,
         # standard is cheaper; premium is the default because, measured on identical scenes, only the premium
@@ -151,7 +155,7 @@ VOICE_INFO: dict[str, dict] = {
     **{voice: {"provider": "openai", "pitchHz": pitch, "register": voice_register(voice), "clarityDb": clarity,
                "tone": voice_tone(voice)} for voice, (pitch, clarity) in VOICE_FACTS.items()},
     **{voice.id: {"provider": "elevenlabs", "label": voice.label, "blurb": voice.blurb, "short": voice.short,
-                  "fallback": voice.fallback, "addLink": voice.share_link} for voice in eleven.VOICES},
+                  "fallback": voice.fallback, "register": voice.register, "addLink": voice.share_link} for voice in eleven.VOICES},
 }
 
 _cache: dict[str, tuple[float, dict]] = {}

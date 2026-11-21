@@ -397,8 +397,9 @@ _ROUND_ANGLE = {
 # leading into the game. Needs to change each game too.") A returning player gets a shorter one, and anyone can
 # skip it. Every opening gets a different angle, and the host is shown the player's last openings.
 
-_LIFELINE_WORDS = {"fifty": "50/50 (two wrong answers removed)", "peek": "a peek at the report's passage, for half points",
-                   "hint": "a hint from you, the host"}
+_LIFELINE_WORDS = {"fifty": "50/50 (two wrong answers removed, for 75% points)",
+                   "peek": "a peek at the report's passage with extra time, for half points",
+                   "hint": "a hint from you, the host, for 80% points"}
 
 
 def _how_it_works(run: dict, rules: dict, rounds: list[str]) -> str:
@@ -408,7 +409,7 @@ def _how_it_works(run: dict, rules: dict, rounds: list[str]) -> str:
         cfg = rules["show"]
         facts = [f"{len(rounds)} rounds tonight, in this order: {', '.join(rounds)}.",
                  f"About {int(cfg['timer_sec'])} seconds a question. The faster a right answer, the more points; a streak "
-                 "of right answers adds a bonus; a wrong answer costs a few points."]
+                 "of right answers adds a bonus; unused lifelines earn bonus points at the end."]
         if "Music Break" in rounds:
             facts.append("Music Break: a song plays, name that tune.")
         if "Lightning Round" in rounds:
@@ -542,7 +543,7 @@ async def _welcome(run: dict, player: dict | None, name: str) -> str:
         "Open the show. This is the big opening, the one moment you take your time - but it must never drag: "
         f"{limit} spoken words AT MOST, in four to six short beats. Count them.",
         "You start over the theme music as it fades down, so your first two or three words are half heard: begin with "
-        "a [building] run-up in your own words (never a name - not the show's, not yours, not theirs - and not a word "
+        "a building run-up in your own words (never a name - not the show's, not yours, not theirs - and not a word "
         "about the music), then open the "
         "show by name, like the top of a broadcast. Then, in this order: "
         + ("introduce yourself in a line; " if not returning else "welcome them back - you have met before; ")
@@ -594,9 +595,16 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
         record = run["score"] > 0 and run["status"] == "completed" and (best is None or run["score"] > best)
         screen = (" Their screen also says \"New high score!\"" + (" (it is their first game)." if best is None else ".")
                   if record else "")
+        final_row = await db.fetchrow(
+            "select wager, is_correct from run_items where run_id = $1 and slot = 'final' and answered_at is not null limit 1",
+            run["id"])
+        wager_note = ""
+        if final_row and final_row["wager"]:
+            wager_note = (f" They {'won' if final_row['is_correct'] else 'lost'} their {final_row['wager']}-point "
+                          "Final Wager.")
         return (f"The game is over. {name} scored {run['score']} points and got {accuracy}% of the report questions right "
                 f"(best streak {run['streak_max']}), earning the title '{run['badge']}'. The title is on their screen."
-                f"{screen} Sign off, speaking to them directly (\"you\"), in three short beats: the title, announced like an "
+                f"{screen}{wager_note} Sign off, speaking to them directly (\"you\"), in three short beats: the title, announced like an "
                 "award; one last joke; then the show's name as your very last words, like the end of a broadcast - the "
                 "music comes up under it. Word limit: 24.")
     if not run:
@@ -630,9 +638,9 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
             round_name, angle = "Music Break", f"name that tune, hits from the {run['decade']}"
             ending = f"then, if you like, ONE joke of five words or fewer. {throw}"
         elif round_name == "Final Wager":
-            angle = _ROUND_ANGLE.get(round_name, "a new round")
-            ending = ("then ONE joke of six words or fewer, and end by putting the bet to them in three words or fewer "
-                      "(\"Place your bet!\"): the betting screen is next.")
+            angle = f"one final question, bet up to half your {run['score']} points"
+            ending = (f"mention they are sitting on {run['score']} points, then ONE quick joke, and end by putting the "
+                      "bet to them in three words or fewer (\"Place your bet!\"): the betting screen is next.")
         else:
             angle = _ROUND_ANGLE.get(round_name, "a new round")
             ending = "then ONE joke of six words or fewer about it, ending on its funniest word."
@@ -680,11 +688,28 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
                     f"{warm} React: the verdict, one quick joke about that guess, and end on the track's title and artist, "
                     "like a DJ. Word limit: 16.")
         first = " This is their first answer of the game." if run["questions_answered"] <= 1 else ""
+        retry_note = " This was a Second Chance retry of a question they missed earlier." if item["slot"] == "second_chance" else ""
+        # Inspect recent prior answers so the host knows if a hot streak just snapped or if they are on a cold run.
+        prev_rows = await db.fetch(
+            "select is_correct from run_items where run_id = $1 and answered_at is not null and id <> $2"
+            " and slot <> 'fact_fake' order by position desc limit 8", run["id"], item["id"])
+        prev_streak = 0
+        prev_wrong = 0
+        for row in prev_rows:
+            if row["is_correct"]:
+                if prev_wrong:
+                    break
+                prev_streak += 1
+            else:
+                if prev_streak:
+                    break
+                prev_wrong += 1
         # A long answer read out in full stalls the game, and it is on their screen anyway: its gist will do.
         short = " The right answer is long: say only its gist, in four words or fewer." if len(correct_answer.split()) > 4 else ""
-        about = f"Question: \"{payload['text']}\" Correct answer: \"{correct_answer}\".{first}"
+        about = f"Question: \"{payload['text']}\" Correct answer: \"{correct_answer}\".{first}{retry_note}"
         if item["timed_out"]:
-            return (f"{about} {name} ran out of time. React: the verdict with the right answer inside it, then one quick "
+            snapped = f" That snaps a {prev_streak}-question streak." if prev_streak >= 3 else ""
+            return (f"{about} {name} ran out of time.{snapped} React: the verdict with the right answer inside it, then one quick "
                     f"joke, ending on its funniest word.{short} Word limit: 14.")
         if item["is_correct"]:
             streak = f" That is {run['streak']} in a row." if run["streak"] >= 3 else ""
@@ -692,7 +717,9 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
             return (f"{about} {name} got it RIGHT.{speed}{helped}{streak}{wager} React: the verdict, then one quick joke "
                     "that plays on the answer itself, ending on its funniest word. Word limit: 10.")
         wager = f" They had wagered {item['wager']} points and lost them." if item["wager"] else ""
-        return (f"{about} {name} answered \"{_chosen(item)}\", which is WRONG.{speed}{helped}{wager} React: the verdict "
+        snapped = f" That snaps a {prev_streak}-question streak." if prev_streak >= 3 else ""
+        cold = f" That is {prev_wrong + 1} misses in a row." if prev_wrong >= 2 else ""
+        return (f"{about} {name} answered \"{_chosen(item)}\", which is WRONG.{speed}{helped}{wager}{snapped}{cold} React: the verdict "
                 f"with the right answer inside it, then one quick joke about that specific wrong answer, ending on its "
                 f"funniest word.{short} Word limit: 14.")
     return None
@@ -736,12 +763,12 @@ async def _bank_used(line_id: int) -> None:
 
 
 async def round_set(run: dict, item_id: str | None) -> str | None:
-    """Which rotating set a round introduction comes from - or None when it must be said live (after the Lightning
-    Round, when he remarks on its score)."""
+    """Which rotating set a round introduction comes from - or None when it must be said live (Final Wager,
+    Second Chance, or right after the Lightning Round when he remarks on its score)."""
     if not item_id:
         return None
     item = await db.fetchrow("select * from run_items where id = $1 and run_id = $2", item_id, run["id"])
-    if item is None or await _lightning_tally(run, dict(item)):
+    if item is None or item["slot"] in ("final", "second_chance") or await _lightning_tally(run, dict(item)):
         return None
     decade = run["decade"] if item["slot"] == "music" else ""     # a music break's line may mention the decade
     # Jargon Jukebox's set was started afresh when its song began playing under the titles: its lines end on a throw.
@@ -750,16 +777,27 @@ async def round_set(run: dict, item_id: str | None) -> str | None:
 
 
 async def final_question_line(run: dict, item_id: str | None) -> str | None:
-    """The final question as the host reads it: word for word, never through the writer (nothing paraphrased, nothing
-    given away), after a lead-in that says nothing about it, and with no tag inside it to single a word out."""
+    """The final question as the host reads it: a 1-beat bet-tier reaction, then the question word for word
+    (never through the writer: nothing paraphrased, nothing given away, no tag inside it to single a word out)."""
     if not item_id:
         return None
     item = await db.fetchrow("select slot, wager, answered_at, payload from run_items where id = $1 and run_id = $2",
                              item_id, run["id"])
     if not item or item["slot"] != "final" or item["wager"] is None or item["answered_at"] is not None:
         return None
-    text = (item["payload"] or {}).get("text")
-    return f"[dramatic] Your final question... [clearly] {text}" if text else None
+    payload = item["payload"] or {}
+    text = payload.get("text")
+    if not text:
+        return None
+    wager = item["wager"]
+    options = payload.get("wager_options") or []
+    if len(options) >= 2 and wager == options[-1]:
+        lead = f"[excited] Going big — {wager} on the line! [dramatic] Your final question..."
+    elif len(options) >= 2 and wager == options[0]:
+        lead = f"[amused] Playing it safe for {wager}... [dramatic] Your final question..."
+    else:
+        lead = f"[impressed] Bold move, {wager} on the line... [dramatic] Your final question..."
+    return f"{lead} [clearly] {text}"
 
 
 def _chosen(item: dict) -> str:
@@ -1285,8 +1323,8 @@ def _gives_away(hint: str, answer: str) -> bool:
     return bool(words) and len(words & hint_stems) / len(words) >= 0.3
 
 
-async def hint_text(question: dict) -> str:
-    """A hint that narrows the field without handing over the answer."""
+async def hint_with_status(question: dict) -> tuple[str, bool]:
+    """A hint that narrows the field without handing over the answer. Returns ``(text, is_fallback)``."""
     section = None
     if question.get("section_id"):
         section = await db.fetchval("select heading from doc_sections where id = $1", question["section_id"])
@@ -1305,17 +1343,23 @@ async def hint_text(question: dict) -> str:
             max_output_tokens=300)
     except Exception as exc:  # noqa: BLE001 – a hint must never break the game
         log.warning("hint failed: %s", exc)
-        return fallback
+        return fallback, True
     if not hint or _gives_away(hint, answer):
-        return fallback
-    return hint
+        return fallback, True
+    return hint, False
+
+
+async def hint_text(question: dict) -> str:
+    """A hint that narrows the field without handing over the answer."""
+    text, _ = await hint_with_status(question)
+    return text
 
 
 # --------------------------------------------------------------------------- samples for the admin
 
 _SAMPLE_SCENE = ("Question: \"What was quarterly revenue?\" Correct answer: \"184 million dollars\". A contestant called Sam "
-                 "answered \"148 million dollars\", which is WRONG. React: verdict, one quick joke about that specific "
-                 "wrong answer, then the right answer.")
+                 "answered \"148 million dollars\", which is WRONG. React: verdict with the right answer inside it, "
+                 "then one quick joke about that specific wrong answer, ending on its funniest word.")
 
 
 def _sample_persona(sarcasm: int, name: str, style: str | None = None, manner: str | None = None,

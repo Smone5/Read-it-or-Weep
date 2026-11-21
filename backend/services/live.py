@@ -30,6 +30,11 @@ MAX_LEAD_IN_SEC = 26       # however long the question, it opens by itself after
 MAX_PARTICIPANTS = 500
 
 
+def is_double_points(index: int, total: int) -> bool:
+    """The final two questions of a live game pay 2x points so the race stays alive to the end."""
+    return total >= 4 and index >= total - 2
+
+
 class LiveError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
@@ -132,6 +137,21 @@ async def create_session(quiz: dict, rules: dict, decade: str | None = None) -> 
          "ready_threshold": int(rules["ready_threshold"]), "after_party": after_party and bool(decade)}, items)
     base = config.web_base_url or config.public_base_url
     return {"code": session["code"], "hostKey": host_key, "questions": len(items),
+            "hostUrl": f"{base}/host/{session['code']}#k={host_key}", "joinUrl": f"{base}/live/{session['code']}"}
+
+
+async def reclaim_session(session_id: str) -> dict:
+    """Rotate the host control key for an active live session so closing a projector tab never bricks a meeting."""
+    session = await db.fetchrow("select * from live_sessions where id = $1", session_id)
+    if session is None:
+        raise LiveError("We could not find that live game.", 404)
+    if session["status"] == "finished":
+        raise LiveError("That live game has already finished.", 409)
+    host_key = new_host_key()
+    await db.execute("update live_sessions set host_key_hash = $2 where id = $1", session["id"], hash_key(host_key))
+    _recent.pop(session["code"], None)
+    base = config.web_base_url or config.public_base_url
+    return {"code": session["code"], "hostKey": host_key,
             "hostUrl": f"{base}/host/{session['code']}#k={host_key}", "joinUrl": f"{base}/live/{session['code']}"}
 
 
@@ -293,7 +313,8 @@ async def answer(session: dict, player: dict, choice: int) -> dict:
     elapsed = (now - session["phase_started_at"]).total_seconds()
     fraction = max(0.0, min(1.0, 1 - elapsed / max(1, int(item["limit"]))))
     correct = choice == item["correct_index"]
-    points = (500 + round(500 * fraction) + 100 * min(participant["streak"], 5)) if correct else 0
+    mult = 2 if is_double_points(index, len(session["items"])) else 1
+    points = (500 + round(500 * fraction) + 100 * min(participant["streak"], 5)) * mult if correct else 0
     inserted = await db.fetchrow(
         "insert into live_answers (session_id, participant_id, question_index, selected_index, is_correct, time_ms, points)"
         " values ($1,$2,$3,$4,$5,$6,$7) on conflict (session_id, participant_id, question_index) do nothing returning id",
@@ -364,6 +385,7 @@ async def state(session: dict, *, host: bool, player: dict | None) -> dict:
         question: dict[str, Any] = {
             "number": index + 1, "kind": item["kind"], "title": item.get("title"), "text": item["text"],
             "options": item["options"], "limitSec": int(item["limit"]), "section": item.get("section"),
+            "doublePoints": is_double_points(index, len(items)),
             "opensAt": session["phase_started_at"].isoformat() if status == "question" else None,
             "endsAt": session["phase_ends_at"].isoformat() if session["phase_ends_at"] else None,
         }
@@ -390,8 +412,16 @@ async def state(session: dict, *, host: bool, player: dict | None) -> dict:
             for row in distribution:
                 if row["selected_index"] is not None:
                     counts[row["selected_index"]] = row["n"]
-            view["reveal"] = {"correctIndex": item["correct_index"], "counts": counts,
-                              "explanation": item.get("explanation"), "sourceQuote": item.get("source_quote")}
+            fastest_row = await db.fetchrow(
+                "select lp.display_name, la.time_ms from live_answers la"
+                " join live_participants lp on lp.id = la.participant_id"
+                " where la.session_id = $1 and la.question_index = $2 and la.is_correct"
+                " order by la.time_ms asc limit 1", session["id"], index)
+            view["reveal"] = {
+                "correctIndex": item["correct_index"], "counts": counts,
+                "explanation": item.get("explanation"), "sourceQuote": item.get("source_quote"),
+                "fastest": {"name": fastest_row["display_name"], "timeMs": int(fastest_row["time_ms"])} if fastest_row else None,
+            }
             if item["kind"] == "music":
                 view["reveal"]["music"] = {"artist": item["music"]["artist"], "title": item["music"]["title"],
                                            "artworkUrl": item["music"]["artwork_url"]}
@@ -400,15 +430,40 @@ async def state(session: dict, *, host: bool, player: dict | None) -> dict:
                                        "points": mine["points"]} if mine else {"selectedIndex": None, "correct": False, "points": 0})
         return view
 
+    round_points_by_id: dict[str, int] = {}
+    rank_delta_by_id: dict[str, int] = {}
+    biggest_mover: dict[str, Any] | None = None
+    if status == "scoreboard" and index >= 0:
+        round_rows = await db.fetch(
+            "select participant_id, points from live_answers where session_id = $1 and question_index = $2",
+            session["id"], index)
+        round_points_by_id = {r["participant_id"]: int(r["points"]) for r in round_rows}
+        prev_order = sorted(standings, key=lambda s: (-(s["score"] - round_points_by_id.get(s["id"], 0)), s["rank"]))
+        prev_rank = {s["id"]: i for i, s in enumerate(prev_order, start=1)}
+        for s in standings:
+            delta = prev_rank[s["id"]] - s["rank"]
+            rank_delta_by_id[s["id"]] = delta
+            if delta > 0 and (biggest_mover is None or delta > biggest_mover["delta"]
+                              or (delta == biggest_mover["delta"] and round_points_by_id.get(s["id"], 0) > biggest_mover["points"])):
+                biggest_mover = {"name": s["display_name"], "delta": delta, "rank": s["rank"],
+                                 "points": round_points_by_id.get(s["id"], 0)}
+
     def _standing_row(s: dict) -> dict[str, Any]:
-        row = {"rank": s["rank"], "name": s["display_name"], "team": s["team"], "score": s["score"],
-               "streak": s["streak"]}
+        row: dict[str, Any] = {"rank": s["rank"], "name": s["display_name"], "team": s["team"], "score": s["score"],
+                               "streak": s["streak"]}
+        if status == "scoreboard":
+            if round_points_by_id.get(s["id"], 0) > 0:
+                row["roundPoints"] = round_points_by_id[s["id"]]
+            if rank_delta_by_id.get(s["id"], 0) != 0:
+                row["rankDelta"] = rank_delta_by_id[s["id"]]
         if me is not None:
             row["you"] = s["player_id"] == me["player_id"]
         return row
 
     cap = (16 if status == "finished" else 10) if host else 25
     view["standings"] = [_standing_row(s) for s in standings[:cap]]
+    if biggest_mover:
+        view["biggestMover"] = biggest_mover
     if me is not None and not host and me["rank"] > cap:
         idx = me["rank"] - 1
         start = max(cap, idx - 1)

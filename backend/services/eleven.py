@@ -58,6 +58,7 @@ class Voice:
     owner_id: str     # the account it is shared from
     fallback: str     # the OpenAI voice that stands in when ElevenLabs cannot be used
     name: str         # its name on the ElevenLabs page, which it keeps when added to an account
+    register: str = "middle"  # visual/vocal register for the retro CRT phosphor tint
 
     @property
     def share_link(self) -> str:
@@ -72,13 +73,13 @@ class Voice:
 _LIBRARY = "779d91788b0d9e364d32e0a0e4273ec722b92887fa710d82f50b2d034a9fb97b"
 VOICES: tuple[Voice, ...] = (
     Voice("eleven:classic", "Classic game-show host", "Energetic American broadcast host, late 30s: polished and theatrical.",
-          "Classic host", "5XbWatCr4Q4ezek0ZhfT", _LIBRARY, "cedar", "The Classic Game Show Host"),
+          "Classic host", "5XbWatCr4Q4ezek0ZhfT", _LIBRARY, "cedar", "The Classic Game Show Host", "deeper"),
     Voice("eleven:british", "Sophisticated British host", "Smooth and witty, early 30s, a slight British accent.",
-          "British wit", "whydKScabPmVENfyGF8q", _LIBRARY, "coral", "The Sophisticated British Host"),
+          "British wit", "whydKScabPmVENfyGF8q", _LIBRARY, "coral", "The Sophisticated British Host", "brighter"),
     Voice("eleven:southern", "Southern charmer", "Rich and sassy, mid-40s, a vibrant Southern American accent.",
-          "Southern sass", "jphAGjEkmAlXu5DE3FmO", _LIBRARY, "marin", "The Southern Charmer"),
+          "Southern sass", "jphAGjEkmAlXu5DE3FmO", _LIBRARY, "marin", "The Southern Charmer", "middle"),
     Voice("eleven:hype", "Modern hype master", "Fast and hyped, late 20s, American with an urban flair.",
-          "Hype master", "DhaeydPYLLVPtHkt04Qp", _LIBRARY, "verse", "The Modern Hype Master"),
+          "Hype master", "DhaeydPYLLVPtHkt04Qp", _LIBRARY, "verse", "The Modern Hype Master", "hype"),
 )
 BY_ID: dict[str, Voice] = {voice.id: voice for voice in VOICES}
 

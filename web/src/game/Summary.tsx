@@ -7,7 +7,7 @@ import { NowPlaying } from '../components/NowPlaying'
 import { api } from '../lib/api'
 import { play } from '../lib/sound'
 import type { Leaderboard, Summary as SummaryData } from '../lib/types'
-import { HighScores, HostBox, ReadinessMap, type TalkControl } from './parts'
+import { HighScores, HostBox, ReadinessMap, RollingScore, type TalkControl } from './parts'
 
 type Props = {
   slug: string
@@ -48,7 +48,8 @@ export default function Summary({
   const [board, setBoard] = useState<Leaderboard | null>(null)
   const [stars, setStars] = useState(0)
   const [thanked, setThanked] = useState(false)
-  const [reviewOpen, setReviewOpen] = useState(false)
+  const [reviewOpen, setReviewOpen] = useState(true)
+  const [showAllReview, setShowAllReview] = useState(false)
   const celebrate = summary.personalBest && summary.score > 0 && summary.status === 'completed'
   const failed = summary.mode === 'straight' && summary.passed === false
   const jukebox = summary.mode === 'jukebox' // the music side game: no report to be ready for
@@ -87,8 +88,13 @@ export default function Summary({
         <p className="pixel blink text-[10px] text-muted">
           {summary.status !== 'completed' ? 'Game ended early' : failed ? 'Not quite yet' : victory ? 'Stage clear' : 'Run complete'}
         </p>
-        <h1 className="neon mt-3 text-2xl tabular-nums sm:text-4xl">{String(summary.score).padStart(6, '0')}</h1>
+        <h1 className="neon mt-3 text-2xl tabular-nums sm:text-4xl"><RollingScore value={summary.score} pad={6} durationMs={650} /></h1>
         {celebrate && <p className="pixel neon-accent mt-3 text-[11px]">New high score!</p>}
+        {(summary.lifelineBonus ?? 0) > 0 && (
+          <p className="mt-2 text-xs text-muted">
+            Includes <b style={{ color: 'var(--accent)' }}>+{summary.lifelineBonus}</b> unused lifeline bonus ({summary.unusedLifelines} saved)
+          </p>
+        )}
         {bestDelta !== null && previousBest !== null && (
           <p className="mt-2 text-sm text-muted">
             {bestDelta > 0
@@ -185,25 +191,40 @@ export default function Summary({
                 <span className="pixel text-xs" aria-hidden>{reviewOpen ? '−' : '+'}</span>
               </button>
               {reviewOpen && (
-                <ol className="mt-4 grid gap-4">
-                  {summary.review.map((miss, index) => (
-                    <li key={index} className="border-l-4 pl-3" style={{ borderColor: 'var(--bad)' }}>
-                      {miss.section && <p className="text-xs font-bold tracking-wider text-muted uppercase">{miss.section}</p>}
-                      <p className="mt-1">{miss.text}</p>
-                      <p className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[15px]">
-                        <span className="inline-flex items-center gap-1.5" style={{ color: 'var(--good)' }}>
-                          <IconCheck size={14} /> {miss.correctAnswer}
-                        </span>
-                        {miss.yourAnswer && (
-                          <span className="inline-flex items-center gap-1.5 text-muted">
-                            <IconClose size={13} /> {miss.yourAnswer}
+                <>
+                  <ol className="mt-4 grid gap-4">
+                    {(showAllReview ? summary.review : summary.review.slice(0, 3)).map((miss, index) => (
+                      <li key={index} className="border-l-4 pl-3" style={{ borderColor: 'var(--bad)' }}>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {miss.section && <p className="text-xs font-bold tracking-wider text-muted uppercase">{miss.section}</p>}
+                          {miss.slot === 'fact_fake' && <span className="chip text-[10px]">Lightning debrief</span>}
+                        </div>
+                        <p className="mt-1">{miss.text}</p>
+                        <p className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[15px]">
+                          <span className="inline-flex items-center gap-1.5" style={{ color: 'var(--good)' }}>
+                            <IconCheck size={14} /> {miss.correctAnswer}
                           </span>
+                          {miss.yourAnswer && (
+                            <span className="inline-flex items-center gap-1.5 text-muted">
+                              <IconClose size={13} /> {miss.yourAnswer}
+                            </span>
+                          )}
+                        </p>
+                        {miss.explanation && <p className="mt-1 text-[15px] text-muted">{miss.explanation}</p>}
+                        {miss.sourceQuote && (
+                          <blockquote className="mt-1.5 border-l-2 pl-2.5 text-sm text-muted italic" style={{ borderColor: 'var(--line)' }}>
+                            “{miss.sourceQuote}”
+                          </blockquote>
                         )}
-                      </p>
-                      {miss.explanation && <p className="mt-1 text-[15px] text-muted">{miss.explanation}</p>}
-                    </li>
-                  ))}
-                </ol>
+                      </li>
+                    ))}
+                  </ol>
+                  {summary.review.length > 3 && (
+                    <button type="button" className="btn btn-ghost btn-sm mt-4 w-full" onClick={() => setShowAllReview((v) => !v)}>
+                      {showAllReview ? 'Show top 3' : `Show all ${summary.review.length} missed questions`}
+                    </button>
+                  )}
+                </>
               )}
             </section>
           )}

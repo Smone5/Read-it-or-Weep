@@ -51,6 +51,20 @@ def test_a_quote_must_really_be_in_the_passage():
     assert not generate.quote_is_grounded("Revenue fell 6.1% to $148.2 million", passage)
 
 
+def test_mcq_problem_catches_conspicuously_longer_correct_answer():
+    draft = generate.MCQDraft(
+        title="Length tell",
+        question="Which initiative drove the third-quarter margin improvement?",
+        correct_answer="Consolidating regional freight hubs into the Phoenix cross-dock facility",
+        distractors=["Raising fuel surcharges", "Cutting night shifts", "Pausing new leases"],
+        explanation="The Phoenix cross-dock drove the margin gain.",
+        source_quote="driven by the Phoenix cross-dock",
+        difficulty="medium",
+        skill="understanding",
+    )
+    assert generate.mcq_problem(draft, None) == "correct option is conspicuously longer"
+
+
 # --- charts drawn from a Word chart's own numbers ------------------------------------------------------
 
 def test_native_charts_are_drawn_large_enough_to_read_on_a_phone():

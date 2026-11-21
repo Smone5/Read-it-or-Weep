@@ -6,6 +6,8 @@ export type HostCrtState = 'idle' | 'speaking' | 'listening' | 'happy' | 'wince'
 
 type Props = {
   state?: HostCrtState
+  /** Emotional mood kept on the phosphor even while the host is speaking. */
+  mood?: 'idle' | 'happy' | 'wince'
   /** Optional subtle phosphor tint derived from the host's register or choice. */
   tone?: 'accent' | 'brand' | 'cyan' | 'rose'
   size?: 'sm' | 'md'
@@ -22,11 +24,20 @@ export function hostToneFor(register?: string | null): NonNullable<Props['tone']
   if (register === 'brighter') return 'cyan'
   if (register === 'deeper') return 'accent'
   if (register === 'middle') return 'rose'
+  if (register === 'hype') return 'brand'
   return 'accent'
 }
 
-export function HostCrt({ state = 'idle', tone = 'accent', size = 'md' }: Props) {
-  const phosphor = state === 'listening' ? 'var(--bad)' : state === 'happy' ? 'var(--good)' : state === 'wince' ? 'var(--bad)' : TONE_COLOR[tone]
+export function HostCrt({ state = 'idle', mood = 'idle', tone = 'accent', size = 'md' }: Props) {
+  const effectiveMood = state === 'happy' || state === 'wince' ? state : mood
+  const phosphor =
+    state === 'listening'
+      ? 'var(--bad)'
+      : effectiveMood === 'happy'
+        ? 'var(--good)'
+        : effectiveMood === 'wince'
+          ? 'var(--bad)'
+          : TONE_COLOR[tone]
   const dim = size === 'sm' ? 'h-10 w-11' : 'h-11 w-12 sm:h-13 sm:w-14'
 
   return (

@@ -146,7 +146,19 @@ function effectsBus(ctx: AudioContext): GainNode {
   if (!bus) {
     bus = ctx.createGain()
     bus.gain.value = ducked ? UNDER_HOST : 1
-    bus.connect(ctx.destination)
+    // Soft brickwall limiter so loud stings (like levelup) and overlapping SFX never clip on phone speakers.
+    if (typeof ctx.createDynamicsCompressor === 'function') {
+      const limiter = ctx.createDynamicsCompressor()
+      limiter.threshold.value = -3
+      limiter.knee.value = 6
+      limiter.ratio.value = 12
+      limiter.attack.value = 0.003
+      limiter.release.value = 0.08
+      bus.connect(limiter)
+      limiter.connect(ctx.destination)
+    } else {
+      bus.connect(ctx.destination)
+    }
   }
   return bus
 }
@@ -232,20 +244,37 @@ export function blip(name: Blip) {
   if (ctx.state !== 'running') return // never queue a sound for later: a late blip is worse than none
   const { notes, stepSec, lengthSec, volume } = BLIPS[name]
   const start = ctx.currentTime + 0.01
+  const filter = ctx.createBiquadFilter()
+  filter.type = 'lowpass'
+  filter.frequency.value = 2400
+  filter.connect(effectsBus(ctx))
   notes.forEach((frequency, i) => {
     const at = start + i * stepSec
-    const tone = ctx.createOscillator()
-    tone.type = 'square'
-    tone.frequency.value = frequency
+    // Warm triangle + subtle octave-up sine through a 2.4 kHz LPF: crisp arcade feel without harsh square buzz.
+    const body = ctx.createOscillator()
+    body.type = 'triangle'
+    body.frequency.value = frequency
+    const shimmer = ctx.createOscillator()
+    shimmer.type = 'sine'
+    shimmer.frequency.value = frequency * 2
+    const shimmerGain = ctx.createGain()
+    shimmerGain.gain.value = 0.18
     const gain = ctx.createGain()
     gain.gain.setValueAtTime(0, at)
     gain.gain.linearRampToValueAtTime(volume, at + 0.008)
     gain.gain.exponentialRampToValueAtTime(0.0001, at + lengthSec)
-    tone.connect(gain)
-    gain.connect(effectsBus(ctx))
-    tone.onended = () => gain.disconnect()
-    tone.start(at)
-    tone.stop(at + lengthSec + 0.02)
+    body.connect(gain)
+    shimmer.connect(shimmerGain)
+    shimmerGain.connect(gain)
+    gain.connect(filter)
+    body.onended = () => {
+      gain.disconnect()
+      if (i === notes.length - 1) filter.disconnect()
+    }
+    body.start(at)
+    shimmer.start(at)
+    body.stop(at + lengthSec + 0.02)
+    shimmer.stop(at + lengthSec + 0.02)
   })
   trace('sfx', { name })
 }

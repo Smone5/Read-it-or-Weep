@@ -7,7 +7,7 @@ import { Meter } from '../components/ui'
 import { PictureViewer, ZoomImage } from '../components/ZoomImage'
 import type { TalkState } from '../lib/hostVoice'
 import { musicElement, musicFading, playClip, resumeClip, stopMusic } from '../lib/music'
-import { play } from '../lib/sound'
+import { play, buzz } from '../lib/sound'
 import { trace } from '../lib/trace'
 import type { ItemImage, Leaderboard, LeaderboardEntry, Readiness, RunState } from '../lib/types'
 
@@ -107,7 +107,7 @@ export function HostBox({
   return (
     <div className="dialogue rise flex items-center gap-3 px-3 pb-2.5 pt-3.5 text-[15px] leading-snug sm:gap-3.5 sm:px-3.5 sm:text-base">
       <span className="who">{name}</span>
-      <HostCrt state={crtState} tone={tone} />
+      <HostCrt state={crtState} mood={mood} tone={tone} />
       <p className="min-w-0 flex-1" aria-live="polite">
         <span className={speaking && !listening ? 'caret' : ''}>{words}</span>
       </p>
@@ -204,7 +204,10 @@ export function TimerBar({ timerKey, totalMs, remainingMs, running, hold = false
           label.current.style.color = left <= 5000 ? 'var(--bad)' : ''
         }
         second.current?.(seconds)
-        if (!quiet && seconds <= 5 && seconds > 0) play('tick')
+        if (!quiet && seconds <= 5 && seconds > 0) {
+          play(seconds <= 3 ? 'fasttick' : 'tick')
+          if (seconds <= 3) buzz(12)
+        }
       }
       if (left <= 0) {
         if (!done) {
@@ -522,11 +525,41 @@ export function MusicPlayer({ src, active, onBroken, onPlaying, onClipOver }: Mu
 
 // --------------------------------------------------------------------------- HUD
 
+/** Smooth arcade odometer that rolls toward the latest score (instant when reduced motion is enabled). */
+export function RollingScore({ value, pad = 6, durationMs = 420 }: { value: number; pad?: number; durationMs?: number }) {
+  const [shown, setShown] = useState(value)
+  const fromRef = useRef(value)
+
+  useEffect(() => {
+    const startVal = fromRef.current
+    if (startVal === value) return
+    if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      fromRef.current = value
+      setShown(value)
+      return
+    }
+    const startTime = performance.now()
+    let frame = 0
+    const step = (now: number) => {
+      const t = Math.min(1, (now - startTime) / durationMs)
+      const eased = 1 - Math.pow(1 - t, 3)
+      const next = Math.round(startVal + (value - startVal) * eased)
+      fromRef.current = next
+      setShown(next)
+      if (t < 1) frame = requestAnimationFrame(step)
+    }
+    frame = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(frame)
+  }, [value, durationMs])
+
+  return <>{String(Math.max(0, shown)).padStart(pad, '0')}</>
+}
+
 export function Hud({ state, clockMs, position }: { state: RunState; clockMs?: number; position?: string }) {
   return (
     <div className="flex min-w-0 flex-wrap items-end justify-between gap-x-3 gap-y-1.5">
       <div className="hud">
-        Score<b className="neon-accent">{String(state.score).padStart(6, '0')}</b>
+        Score<b className="neon-accent tabular-nums"><RollingScore value={state.score} pad={6} /></b>
       </div>
       {state.mode === 'sudden_death' && (
         <div className="hud text-center">

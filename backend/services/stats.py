@@ -34,9 +34,14 @@ RECENT = 4
 CLEAR_SHARE = 0.75
 
 _SECTION_ANSWERS = (
-    "with answered as (select player_id, section_id, is_correct,"
-    "   slot, row_number() over (partition by player_id, section_id order by answered_at desc) as n"
-    "   from run_items where quiz_id = $1 and section_id is not null and slot <> 'music' and answered_at is not null"
+    "with answered as (select ri.player_id, ri.section_id, ri.is_correct,"
+    "   ri.slot, row_number() over (partition by ri.player_id, ri.section_id order by ri.answered_at desc) as n"
+    "   from run_items ri join runs r on r.id = ri.run_id"
+    "   where ri.quiz_id = $1 and ri.section_id is not null"
+    "   and ri.slot not in ('music', 'jargon', 'song_or_jargon', 'second_chance')"
+    "   and not ('peek' = any(ri.lifelines_used))"
+    "   and not (r.mode = 'speed' and not coalesce(ri.is_correct, false))"
+    "   and ri.answered_at is not null"
     "   {player})"
     " select player_id, section_id, count(*) as answered, count(*) filter (where is_correct) as correct,"
     " count(*) filter (where n <= {recent}) as recent_answered,"
@@ -53,9 +58,21 @@ def _cleared(row: dict | None) -> bool:
     return row["recent_correct"] >= CLEAR_SHARE * row["recent_answered"]
 
 
+async def section_states(quiz_id: str, player_id: str) -> dict[str, str]:
+    """section_id -> 'cleared' | 'tried' | 'new' for steering replays toward blind spots."""
+    sections = await askable_sections(quiz_id)
+    rows = await db.fetch(_SECTION_ANSWERS.format(player="and ri.player_id = $2", recent=RECENT), quiz_id, player_id)
+    by_section = {r["section_id"]: r for r in rows}
+    return {
+        s["id"]: ("cleared" if _cleared(by_section.get(s["id"]))
+                  else ("tried" if by_section.get(s["id"]) and by_section[s["id"]]["answered"] else "new"))
+        for s in sections
+    }
+
+
 async def readiness(quiz_id: str, player_id: str, threshold: int) -> dict:
     sections = await askable_sections(quiz_id)
-    rows = await db.fetch(_SECTION_ANSWERS.format(player="and player_id = $2", recent=RECENT), quiz_id, player_id)
+    rows = await db.fetch(_SECTION_ANSWERS.format(player="and ri.player_id = $2", recent=RECENT), quiz_id, player_id)
     by_section = {r["section_id"]: r for r in rows}
     detail = []
     for section in sections:
@@ -154,13 +171,13 @@ async def _after_party(run: dict, rules: dict, items: list[dict]) -> dict | None
 
 async def run_summary(run: dict, rules: dict) -> dict:
     items = await db.fetch(
-        "select ri.*, s.heading, q.explanation, q.title as question_title from run_items ri"
+        "select ri.*, s.heading, q.explanation, q.source_quote, q.title as question_title from run_items ri"
         " left join doc_sections s on s.id = ri.section_id left join questions q on q.id = ri.question_id"
         " where ri.run_id = $1 and ri.answered_at is not null order by ri.position", run["id"])
     per_section: dict[str, dict] = {}
     review = []
     for item in items:
-        if item["slot"] == "music":
+        if run["mode"] != "jukebox" and item["slot"] in ("music", "jargon", "song_or_jargon"):
             continue
         if item["section_id"]:
             entry = per_section.setdefault(item["section_id"], {"id": item["section_id"], "heading": item["heading"],
@@ -171,15 +188,22 @@ async def run_summary(run: dict, rules: dict) -> dict:
             options = item["payload"]["options"]
             chosen = item["selected_index"]
             review.append({
+                "slot": item["slot"],
                 "title": item["question_title"], "text": item["payload"]["text"], "section": item["heading"],
                 "correctAnswer": options[item["correct_index"]],
                 "yourAnswer": options[chosen] if chosen is not None else None,
                 "explanation": item["explanation"],
+                "sourceQuote": item["source_quote"],
             })
     ready = await readiness(run["quiz_id"], run["player_id"], int(rules["ready_threshold"]))
     cleared_ids = {s["id"] for s in ready["sections"] if s["state"] == "cleared"}
     blind_spots = [{"id": s["id"], "heading": s["heading"]} for s in per_section.values()
                    if s["correct"] < s["answered"] and s["id"] not in cleared_ids]
+    seen_blind = {b["id"] for b in blind_spots}
+    for s in ready["sections"]:
+        if s["state"] == "tried" and s["id"] not in seen_blind:
+            blind_spots.append({"id": s["id"], "heading": s["heading"]})
+            seen_blind.add(s["id"])
     untouched = [{"id": s["id"], "heading": s["heading"]} for s in ready["sections"] if s["state"] == "new"]
 
     board = await leaderboard(run["quiz_id"], run["mode"], player_id=run["player_id"])
@@ -189,6 +213,15 @@ async def run_summary(run: dict, rules: dict) -> dict:
     accuracy = round(100 * run["report_correct"] / run["report_answered"]) if run["report_answered"] else 0
     if run["mode"] == "jukebox":                    # the music side game is scored on its music
         accuracy = round(100 * run["music_correct"] / run["music_answered"]) if run["music_answered"] else 0
+    unused_lifelines = (
+        sum(max(0, int(v)) for v in (run["lifelines"] or {}).values())
+        if run["status"] == "completed" and (
+            run["mode"] == "show"
+            or (run["mode"] == "sudden_death" and run["strikes"] < int(rules["sudden_death"]["strikes"]))
+        )
+        else 0
+    )
+    lifeline_bonus = unused_lifelines * 40
     return {
         "afterParty": await _after_party(run, rules, items),
         "runId": run["id"], "mode": run["mode"], "modeName": MODES[run["mode"]]["name"], "status": run["status"],
@@ -197,6 +230,7 @@ async def run_summary(run: dict, rules: dict) -> dict:
         "accuracy": accuracy, "report": {"answered": run["report_answered"], "correct": run["report_correct"]},
         "music": {"answered": run["music_answered"], "correct": run["music_correct"]},
         "streakMax": run["streak_max"], "durationSec": run["duration_sec"], "decade": run["decade"],
+        "unusedLifelines": unused_lifelines, "lifelineBonus": lifeline_bonus,
         "sections": list(per_section.values()), "blindSpots": blind_spots, "untouched": untouched[:6],
         "review": review[:12], "readiness": ready,
         "rank": board["you"]["rank"] if board["you"] else None, "players": board["players"],

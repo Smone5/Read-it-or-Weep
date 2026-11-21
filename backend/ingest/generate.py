@@ -260,8 +260,9 @@ def mcq_problem(draft: MCQDraft, passage: str | None) -> str | None:
     answer_norm = _norm(answer)
     if len(answer_norm) >= 4 and f" {answer_norm} " in f" {_norm(question)} ":
         return "answer appears in the question"
-    longest_wrong = max(len(d) for d in distractors)
-    if len(answer) > 34 and len(answer) > 1.8 * longest_wrong:
+    wrong_lengths = sorted(len(d) for d in distractors)
+    median_wrong = wrong_lengths[len(wrong_lengths) // 2]
+    if len(answer) > 34 and len(answer) > 1.35 * median_wrong:
         return "correct option is conspicuously longer"
     if any(re.search(r"\b(all|none) of the above\b", o, re.I) for o in options):
         return "all/none of the above"

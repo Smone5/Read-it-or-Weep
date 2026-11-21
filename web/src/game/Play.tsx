@@ -145,10 +145,10 @@ function RoundEmblem({ title }: { title: string }) {
   return <IconSparkle {...props} />
 }
 
-const LIFELINES: { kind: 'fifty' | 'peek' | 'hint'; label: string; help: string }[] = [
-  { kind: 'fifty', label: '50/50', help: 'Remove two wrong answers' },
-  { kind: 'peek', label: 'Peek', help: 'See the passage (half points)' },
-  { kind: 'hint', label: 'Hint', help: 'Ask the host' },
+const LIFELINES: { kind: 'fifty' | 'peek' | 'hint'; label: string; cost: string; help: string }[] = [
+  { kind: 'fifty', label: '50/50', cost: '-25%', help: 'Remove two wrong answers (-25% pts)' },
+  { kind: 'peek', label: 'Peek', cost: '-50%', help: 'See the passage +10s (-50% pts)' },
+  { kind: 'hint', label: 'Hint', cost: '-20%', help: 'Ask the host (-20% pts; free if fallback)' },
 ]
 
 const FLAG_REASONS = ['The marked answer is wrong', 'More than one answer fits', 'The question is unclear', 'Something else']
@@ -552,7 +552,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
           setScorePop({ id: burstId, text, tone: result.points > 0 ? 'good' : 'bad' })
           window.setTimeout(() => setScorePop((now) => (now?.id === burstId ? null : now)), 1350)
         }
-        if (result.strikeRestored) play('cheer')
+        if (result.strikeRestored) window.setTimeout(() => play('cheer'), 380)
         if (result.correct && STREAKS_WORTH_SHOUTING.includes(result.state.streak)) {
           const streak = result.state.streak
           setBanner(`${streak} in a row!`)
@@ -600,6 +600,21 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   const clockMs = useDeadline(mode === 'speed' ? state.deadlineAt : undefined, () => {
     if (phase === 'question' && !busy) void pull()
   })
+
+  // Speed Run final-10s urgency ticks + haptics so the race feels electric down to the buzzer.
+  const speedSecLeft = mode === 'speed' && state.deadlineAt ? Math.ceil(clockMs / 1000) : null
+  const lastSpeedTick = useRef<number | null>(null)
+  useEffect(() => {
+    if (mode !== 'speed' || phase !== 'question' || speedSecLeft === null) {
+      lastSpeedTick.current = null
+      return
+    }
+    if (speedSecLeft > 0 && speedSecLeft <= 10 && speedSecLeft !== lastSpeedTick.current) {
+      lastSpeedTick.current = speedSecLeft
+      play(speedSecLeft <= 5 ? 'fasttick' : 'tick')
+      if (speedSecLeft <= 5) buzz(12)
+    }
+  }, [mode, phase, speedSecLeft])
 
   // Keyboard: A-D or 1-4 to answer, Enter / Space to continue or to skip a title card.
   useEffect(() => {
@@ -815,19 +830,44 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         )}
 
         {phase === 'wager' && item && (
-          <div className="card rise flex flex-1 flex-col items-center justify-center gap-5 p-6 text-center">
+          <div
+            className="card rise flex flex-1 flex-col items-center justify-center gap-5 p-6 text-center"
+            style={{
+              borderColor: 'var(--accent)',
+              boxShadow: 'inset 0 0 0 3px #090716, inset 0 0 0 5px color-mix(in oklab, var(--accent) 55%, transparent), 0 0 36px color-mix(in oklab, var(--accent) 18%, transparent)',
+            }}
+          >
             <p className="chip chip-accent"><IconChip size={13} /> Final wager</p>
             <h2 className="neon text-base sm:text-xl">How sure are you?</h2>
             <p className="max-w-md text-muted">
               One last question{item.section ? <> from <b className="text-ink">{item.section.heading}</b></> : null}. Bet before you see it: right wins the bet, wrong loses it.
             </p>
-            <div className="grid w-full max-w-sm gap-3">
-              {(item.wagerOptions ?? []).map((amount, index, all) => (
-                <button key={amount} className={`btn ${index === all.length - 1 ? 'btn-accent' : 'btn-ghost'} btn-lg justify-between`} disabled={busy} onClick={() => void placeWager(amount)}>
-                  <span>{all.length === 3 ? ['Safe', 'Bold', 'Go big'][index] : 'Bet'}</span>
-                  <span className="tabular-nums">{amount}</span>
-                </button>
-              ))}
+            <p className="pixel text-[11px] text-muted">
+              Current score · <span className="neon-accent tabular-nums">{state.score.toLocaleString()}</span>
+            </p>
+            <div className="grid w-full max-w-md gap-3">
+              {(item.wagerOptions ?? []).map((amount, index, all) => {
+                const winTotal = state.score + amount
+                const loseTotal = Math.max(0, state.score - amount)
+                const isBig = index === all.length - 1
+                return (
+                  <button
+                    key={amount}
+                    className={`btn ${isBig ? 'btn-accent' : 'btn-ghost'} btn-lg flex-col items-stretch gap-1 py-3 text-left`}
+                    disabled={busy}
+                    onClick={() => void placeWager(amount)}
+                  >
+                    <div className="flex w-full items-center justify-between gap-2">
+                      <span>{all.length === 3 ? ['Safe', 'Bold', 'Go big'][index] : 'Bet'}</span>
+                      <span className="tabular-nums">{amount.toLocaleString()} pts</span>
+                    </div>
+                    <div className="flex w-full items-center justify-between text-[11px] font-normal tracking-normal normal-case opacity-85" style={{ fontFamily: 'var(--font-sans)' }}>
+                      <span style={{ color: isBig ? '#0d3b1e' : 'var(--good)' }}>Win → {winTotal.toLocaleString()}</span>
+                      <span style={{ color: isBig ? '#5c1118' : 'var(--bad)' }}>Miss → {loseTotal.toLocaleString()}</span>
+                    </div>
+                  </button>
+                )
+              })}
             </div>
           </div>
         )}
@@ -868,7 +908,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
                 )}
                 {item.hint && phase === 'question' && (
                   <p className="mt-3 text-[15px]" style={{ color: 'var(--accent-text)' }}>
-                    <span className="text-xs font-bold tracking-wider uppercase">Hint · </span>{item.hint}
+                    <span className="text-xs font-bold tracking-wider uppercase">Hint{item.hintRefunded ? ' (free)' : ''} · </span>{item.hint}
                   </p>
                 )}
                 {reading && (
@@ -925,6 +965,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
                       <button key={lifeline.kind} className="btn btn-ghost btn-sm" disabled={busy || left <= 0 || used} onClick={() => void useLifeline(lifeline.kind)} title={lifeline.help}>
                         {lifeline.kind === 'fifty' ? <IconSplit size={13} /> : lifeline.kind === 'peek' ? <IconBook size={13} /> : <IconBulb size={13} />}
                         <span>{lifeline.label}</span>
+                        <span className="text-[11px] opacity-70">{lifeline.cost}</span>
                         <span className="text-muted">×{left}</span>
                       </button>
                     )

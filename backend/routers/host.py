@@ -64,21 +64,29 @@ async def _live_direction(session: dict, cue: str) -> str | None:
                 "two short sentences, under 25 words, and tell them to keep their phones ready.")
     if cue == "live_question" and item and session["status"] == "question":
         # The phones stay locked until this line has been said, so it must end on the question itself.
+        double = " This is a DOUBLE POINTS question!" if live.is_double_points(index, len(items)) else ""
         if item["kind"] == "music":
-            return ("Announce a music break. Its name first, as a headline - \"Music Break!\" - then one quick joke of "
+            return (f"Announce a music break.{double} Its name first, as a headline - \"Music Break!\" - then one quick joke of "
                     "ten words or fewer. Do not name the song or artist. The clip starts as you finish.")
         return (f"Read question {index + 1} to the room, clearly and at an easy pace, exactly as written, after a lead-in "
-                f"of at most three words. Do not read the options and do not add a joke or a comment afterwards: the clock "
-                f"starts as you finish. The question: \"{item['text']}\"")
+                f"of at most four words{(' (mention DOUBLE POINTS in the lead-in)' if double else '')}. Do not read the options "
+                f"and do not add a joke or a comment afterwards: the clock starts as you finish. The question: \"{item['text']}\"")
     if cue == "live_reveal" and item and session["status"] == "reveal":
         totals = await db.fetchrow(
             "select count(*) as answered, count(*) filter (where is_correct) as correct from live_answers"
             " where session_id = $1 and question_index = $2", session["id"], index)
+        fastest = await db.fetchrow(
+            "select lp.display_name, la.time_ms from live_answers la"
+            " join live_participants lp on lp.id = la.participant_id"
+            " where la.session_id = $1 and la.question_index = $2 and la.is_correct"
+            " order by la.time_ms asc limit 1", session["id"], index)
         percent = round(100 * totals["correct"] / totals["answered"]) if totals["answered"] else 0
         answer = item["options"][item["correct_index"]]
         if item["kind"] == "music":
             answer = f"\"{item['music']['title']}\" by {item['music']['artist']}"
-        return (f"Reveal the answer to the room: {answer}. {percent}% of the room got it right. Start with the answer "
+        fast_note = (f" Fastest finger: {fastest['display_name']} in {fastest['time_ms'] / 1000:.1f} seconds."
+                     if fastest else "")
+        return (f"Reveal the answer to the room: {answer}. {percent}% of the room got it right.{fast_note} Start with the answer "
                 "itself - no verdict call such as \"Correct!\", because the room gave many answers - then ONE quick joke "
                 "about how the room did. Under 18 words.")
     if cue in ("live_scoreboard", "live_final") and session["status"] in ("scoreboard", "finished"):

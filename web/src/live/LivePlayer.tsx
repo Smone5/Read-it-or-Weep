@@ -3,9 +3,9 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { IconBolt, IconCrown, IconMusic, IconPlay, IconStar } from '../components/Icons'
+import { IconBolt, IconCheck, IconCrown, IconMusic, IconPlay, IconStar } from '../components/Icons'
 import { ErrorNote, FullScreenMessage, Logo, Spinner, Stage } from '../components/ui'
-import { formatScore, LETTERS, TONE_INKS, TONES } from '../game/parts'
+import { formatScore, LETTERS, PictureView, TONE_INKS, TONES } from '../game/parts'
 import { api, ApiError, session } from '../lib/api'
 import { buzz } from '../lib/sound'
 import { applyBranding, applyDecade } from '../lib/theme'
@@ -34,8 +34,10 @@ export default function LivePlayer() {
           try {
             await api(`/api/live/${code}/join`, { body: {} })
             setJoined(true)
-          } catch {
-            session.setPlayerToken(null)
+          } catch (caught) {
+            if (caught instanceof ApiError && caught.status === 401) {
+              session.setPlayerToken(null)
+            }
           }
         }
       })
@@ -126,6 +128,7 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
   const [sending, setSending] = useState(false)
   const [notSent, setNotSent] = useState(false)
   const [showAllScores, setShowAllScores] = useState(false)
+  const [showMissed, setShowMissed] = useState(false)
   const lastIndex = useRef(-2)
   const lastStatus = useRef('')
   useTicker(state?.status === 'question')
@@ -207,13 +210,23 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
     body = (
       <div className="flex flex-1 flex-col gap-3">
         <div className="flex items-center justify-between gap-3">
-          <span className="chip">Question {question.number}/{state.total}</span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="chip">Question {question.number}/{state.total}</span>
+            {question.doublePoints && <span className="chip chip-accent"><IconBolt size={11} /> 2× PTS</span>}
+          </div>
           <span className="pixel text-sm tabular-nums" style={{ color: left < 5000 ? 'var(--bad)' : 'var(--accent-text)' }}>{opensIn > 0 ? '' : Math.ceil(left / 1000)}</span>
         </div>
         <p className="text-[17px] leading-snug">
           {question.kind === 'music' && <IconMusic size={16} className="mr-1.5" style={{ color: 'var(--accent)' }} />}
           {question.text}
         </p>
+        {question.imageUrl && (
+          <PictureView
+            image={{ url: question.imageUrl, alt: 'Chart from the report', mode: 'show' }}
+            secondsLeft={opensIn <= 0 ? Math.ceil(left / 1000) : null}
+            caption={question.text}
+          />
+        )}
         {notSent && <p className="pixel blink text-[10px]" style={{ color: 'var(--bad)' }} role="alert">That did not send – tap your answer again</p>}
         {opensIn <= 0 && (
           <div className="timer-track"><div className="timer-fill" data-urgent={left < 5000} style={{ transform: `scaleX(${total ? left / total : 0})` }} /></div>
@@ -314,9 +327,21 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
       )
     }
 
+    const finaleHeading = !finished
+      ? 'Scoreboard'
+      : you?.rank === 1
+        ? 'Champion!'
+        : you?.rank === 2
+          ? 'Runner-up!'
+          : you?.rank === 3
+            ? 'Podium finish!'
+            : 'Final standings'
+
     body = (
       <div className="flex flex-1 flex-col justify-center gap-3.5">
-        <p className="pixel blink text-center text-[10px] text-muted">{finished ? 'Game over' : 'Scoreboard'}</p>
+        <p className="pixel blink text-center text-[10px]" style={{ color: finished && you && you.rank <= 3 ? '#ffd60a' : 'var(--muted)' }}>
+          {finaleHeading}
+        </p>
 
         {you && (
           <div className="sb-you-card flex items-center justify-between gap-3 px-4 py-3">
@@ -390,6 +415,36 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
             </button>
           )}
         </section>
+
+        {finished && (state.roomMissed?.length ?? 0) > 0 && (
+          <section className="card card-accent p-3.5 text-left">
+            <button
+              type="button"
+              className="flex min-h-[32px] w-full items-center justify-between gap-2 text-left"
+              onClick={() => setShowMissed((v) => !v)}
+              aria-expanded={showMissed}
+            >
+              <span className="pixel text-[10px]" style={{ color: 'var(--accent-text)' }}>
+                What the room missed ({state.roomMissed!.length})
+              </span>
+              <span className="pixel text-xs" aria-hidden>{showMissed ? '−' : '+'}</span>
+            </button>
+            {showMissed && (
+              <ol className="mt-3 grid gap-3">
+                {state.roomMissed!.map((item, idx) => (
+                  <li key={idx} className="border-l-2 pl-2.5" style={{ borderColor: 'var(--accent)' }}>
+                    <p className="text-xs font-bold" style={{ color: 'var(--bad)' }}>{item.percentCorrect}% got it{item.section ? ` · ${item.section}` : ''}</p>
+                    <p className="mt-0.5 text-sm">{item.text}</p>
+                    <p className="mt-1 inline-flex items-center gap-1.5 text-sm font-bold" style={{ color: 'var(--good)' }}>
+                      <IconCheck size={13} /> {item.correctAnswer}
+                    </p>
+                    {item.explanation && <p className="mt-0.5 text-xs text-muted">{item.explanation}</p>}
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+        )}
 
         {finished && (
           <a className="btn btn-primary btn-lg" href={`/q/${state.quizSlug}`}>

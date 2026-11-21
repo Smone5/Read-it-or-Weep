@@ -703,6 +703,14 @@ async def list_live(quiz_id: str, admin: dict = Depends(current_admin)) -> dict:
     return {"sessions": sessions}
 
 
+@router.post("/live/{session_id}/reclaim")
+async def reclaim_live(session_id: str, admin: dict = Depends(current_admin)) -> dict:
+    try:
+        return await live.reclaim_session(session_id)
+    except live.LiveError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
 @router.get("/live/{session_id}/results")
 async def live_results(session_id: str, admin: dict = Depends(current_admin)) -> dict:
     standings = await db.fetch(

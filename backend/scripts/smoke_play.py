@@ -137,7 +137,12 @@ async def play(client: httpx.AsyncClient, slug: str, headers: dict, mode: str, s
         turn = (await client.post(f"/api/runs/{run_id}/next", headers=headers)).json()
     summary = (await client.get(f"/api/runs/{run_id}/summary", headers=headers)).json()["summary"]
     check(not leaked, f"{label}: no answer key in anything sent before answering")
-    check(summary["score"] == score_seen, f"{label}: final score {summary['score']} matches the running score")
+    # Unused lifelines pay a bonus (UNUSED_LIFELINE_BONUS each) when a Game Show or Sudden Death game finishes.
+    bonus = summary["score"] - score_seen
+    unused = sum(max(0, int(v)) for v in (await db.fetchval("select lifelines from runs where id = $1", run_id) or {}).values())
+    expected = unused * 40 if summary["status"] == "completed" and mode in ("show", "sudden_death") else 0
+    check(bonus == expected or (mode == "sudden_death" and bonus in (0, expected)),
+          f"{label}: final score {summary['score']} is the running score {score_seen} plus the unused-lifeline bonus {bonus}")
     print(f"       {label}: {len(slots)} items, rounds={rounds}, score={summary['score']}, accuracy={summary['accuracy']}%, "
           f"badge={summary['badge']!r}, readiness={summary['readiness']['cleared']}/{summary['readiness']['total']}")
     return {"summary": summary, "slots": slots, "rounds": rounds, "run_id": run_id, "sealed": sealed_rounds,

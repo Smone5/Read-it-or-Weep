@@ -96,8 +96,13 @@ def same_fact(a: frozenset[str], b: frozenset[str]) -> bool:
 
 def choose(candidates: Iterable[dict], seen: dict[str, dict], used: set[str], *,
            section_load: Counter | None = None, difficulty: str | None = None,
-           section_id: str | None = None, asked: list[frozenset[str]] | None = None) -> dict | None:
-    """Pick the best next question. ``asked`` holds the key terms of what this game has already asked."""
+           section_id: str | None = None, asked: list[frozenset[str]] | None = None,
+           section_states: dict[str, str] | None = None) -> dict | None:
+    """Pick the best next question. ``asked`` holds the key terms of what this game has already asked.
+
+    ``section_states`` (section_id -> 'new' | 'tried' | 'cleared') steers replays toward sections
+    the player has not yet cleared so every run moves their Readiness forward.
+    """
     section_load = section_load or Counter()
     best: tuple[float, dict] | None = None
     for question in candidates:
@@ -109,9 +114,11 @@ def choose(candidates: Iterable[dict], seen: dict[str, dict], used: set[str], *,
         tier = 0 if past is None else (1 if not past["correct"] else 2)
         if question["pinned"] and (past is None or not past["correct"]):
             tier = -1
-        cost = tier * 10.0 + section_load[question["section_id"]] * 1.2 + random.random() * 0.9
+        cost = tier * 10.0 + section_load[question["section_id"]] * 1.2 + random.random() * 0.5
+        if section_states and section_states.get(question["section_id"]) in ("new", "tried"):
+            cost -= 4.5                             # prioritise blind spots and untouched sections
         if difficulty:
-            cost += abs(_DIFFICULTY_ORDER[question["difficulty"]] - _DIFFICULTY_ORDER[difficulty]) * 0.7
+            cost += abs(_DIFFICULTY_ORDER[question["difficulty"]] - _DIFFICULTY_ORDER[difficulty]) * 2.5
         if asked and any(same_fact(key_terms(question), terms) for terms in asked):
             cost += 6.0                             # the same fact again: only if nothing else in this tier is left
         if best is None or cost < best[0]:

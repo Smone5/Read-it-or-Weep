@@ -17,7 +17,7 @@ import { formatScore, HostBox, LETTERS, TONE_INKS, TONES } from '../game/parts'
 import { startParty, stopJukebox } from '../lib/jukebox'
 import { api } from '../lib/api'
 import { HostVoice } from '../lib/hostVoice'
-import { fadeOutMusic, playClip, preloadClip, stopMusic, unlockMusic } from '../lib/music'
+import { fadeOutMusic, musicElement, playClip, preloadClip, resumeClip, stopMusic, unlockMusic } from '../lib/music'
 import { play, preloadSounds, unlockAudio } from '../lib/sound'
 import { applyBranding, applyDecade } from '../lib/theme'
 import { trace } from '../lib/trace'
@@ -55,8 +55,11 @@ export default function HostScreen() {
   const [busy, setBusy] = useState(false)
   const [hostLine, setHostLine] = useState('')
   const [hostSpeaking, setHostSpeaking] = useState(false)
+  const [showQr, setShowQr] = useState(false)
   const voice = useRef<HostVoice | null>(null)
   const seen = useRef('')
+  const wasLocked = useRef(true)
+  const unlockedAt = useRef(0)
   const joinUrl = `${window.location.origin}/live/${code}`
   useTicker(state?.status === 'question')
 
@@ -86,9 +89,20 @@ export default function HostScreen() {
   const question = state?.status === 'question' ? state.question : undefined
   const locked = Boolean(question) && until(question?.opensAt) > 0 // on screen, being read out; phones not open yet
 
+  useEffect(() => {
+    if (wasLocked.current && !locked && state?.status === 'question') {
+      unlockedAt.current = performance.now()
+    }
+    wasLocked.current = locked
+  }, [locked, state?.status])
+
   const control = useCallback(
     async (action: 'next' | 'end') => {
       if (busy) return
+      // Guard against a Spacebar / clicker race right after auto-open so we never skip straight to Reveal with 0 answers.
+      if (action === 'next' && state?.status === 'question' && !locked && performance.now() - unlockedAt.current < 2500) {
+        return
+      }
       setBusy(true)
       unlockAudio()
       unlockMusic()
@@ -177,7 +191,7 @@ export default function HostScreen() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if ([' ', 'Enter', 'ArrowRight'].includes(event.key) && state && state.status !== 'finished') {
+      if ([' ', 'Enter', 'ArrowRight', 'PageDown'].includes(event.key) && state && state.status !== 'finished') {
         event.preventDefault()
         void control('next')
       }
@@ -210,6 +224,24 @@ export default function HostScreen() {
             <p className="pixel truncate text-[10px] text-muted lg:text-xs">{branding?.companyName} · {state.quizTitle}</p>
             <p className="pixel neon truncate text-sm lg:text-xl">{branding?.gameTitle ?? 'Live game'}</p>
           </div>
+          {state.status !== 'lobby' && state.status !== 'finished' && (
+            <div className="relative flex-none">
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm text-xs"
+                onClick={() => setShowQr((v) => !v)}
+                title="Show late-join QR code"
+              >
+                Join · {joinUrl.replace(/^https?:\/\//, '')}
+              </button>
+              {showQr && qr && (
+                <div className="card absolute right-0 top-12 z-40 flex flex-col items-center gap-2 p-3 text-center shadow-2xl">
+                  <img src={qr} alt="Late-join QR code" className="h-40 w-40 rounded border-4 border-white" />
+                  <p className="pixel neon-accent text-sm tracking-[0.18em]">{state.code}</p>
+                </div>
+              )}
+            </div>
+          )}
           <div className="hud text-right">Code<b className="neon-accent !text-xl lg:!text-3xl">{state.code}</b></div>
           <div className="hud text-right">Players<b className="!text-xl lg:!text-3xl">{state.players}</b></div>
           <SoundToggle />
@@ -292,11 +324,43 @@ function QuestionView({ state, until }: { state: LiveState; until: (iso: string 
   const answered = state.answersIn ?? 0
   const most = reveal ? Math.max(1, ...reveal.counts) : 1
   const hasPicture = Boolean(question.imageUrl)
+
+  // Animate reveal vote bars from 0 -> final on mount.
+  const [barsReady, setBarsReady] = useState(false)
+  useEffect(() => {
+    if (!reveal) {
+      setBarsReady(false)
+      return
+    }
+    const id = requestAnimationFrame(() => setBarsReady(true))
+    return () => cancelAnimationFrame(id)
+  }, [reveal, question.number])
+
+  // Track real <audio> playback state so the music equalizer never dances while audio is blocked/paused.
+  const [clipPlaying, setClipPlaying] = useState(false)
+  useEffect(() => {
+    if (question.kind !== 'music') return
+    const audio = musicElement()
+    const sync = () => setClipPlaying(!audio.paused && !audio.ended)
+    sync()
+    audio.addEventListener('playing', sync)
+    audio.addEventListener('pause', sync)
+    audio.addEventListener('ended', sync)
+    audio.addEventListener('error', sync)
+    return () => {
+      audio.removeEventListener('playing', sync)
+      audio.removeEventListener('pause', sync)
+      audio.removeEventListener('ended', sync)
+      audio.removeEventListener('error', sync)
+    }
+  }, [question.kind, question.number])
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 lg:gap-5">
       <div className="flex flex-none items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-2">
           <span className="chip lg:text-xs">Question {question.number} of {state.total}</span>
+          {question.doublePoints && <span className="chip chip-accent lg:text-xs"><IconBolt size={12} /> 2× DOUBLE POINTS</span>}
           {question.section && <span className="chip chip-accent lg:text-xs">{question.section}</span>}
         </div>
         {!reveal && (
@@ -315,9 +379,21 @@ function QuestionView({ state, until }: { state: LiveState; until: (iso: string 
           <h1 className="!normal-case text-2xl sm:text-3xl lg:text-[clamp(1.6rem,4.8dvh,2.8rem)]" style={{ fontFamily: 'var(--font-sans)', lineHeight: 1.25 }}>{question.text}</h1>
           {question.kind === 'music' && !reveal && (
             <div className="mt-5 flex items-center gap-5">
-              <div className="eq !h-20" data-on={opensIn <= 0}><i /><i /><i /><i /><i /></div>
-              <p className="pixel neon-accent text-sm lg:text-xl">Listen up</p>
+              <div className="eq !h-20" data-on={opensIn <= 0 && clipPlaying}><i /><i /><i /><i /><i /></div>
+              <div>
+                <p className="pixel neon-accent text-sm lg:text-xl">{opensIn > 0 ? 'Get ready to listen' : clipPlaying ? 'Listen up' : 'Clip paused'}</p>
+                {opensIn <= 0 && !clipPlaying && question.previewUrl && (
+                  <button type="button" className="btn btn-accent btn-sm mt-2" onClick={() => void resumeClip().catch(() => void playClip(question.previewUrl!))}>
+                    <IconPlay size={12} /> Replay clip
+                  </button>
+                )}
+              </div>
             </div>
+          )}
+          {reveal?.fastest && (
+            <p className="zoom-in mt-4 inline-flex items-center gap-2 rounded-[4px] border-2 px-3 py-1.5 text-sm font-bold lg:text-lg" style={{ borderColor: 'var(--accent)', background: 'color-mix(in oklab, var(--accent) 16%, transparent)', color: 'var(--accent-text)' }}>
+              <IconBolt size={15} /> Fastest finger: {reveal.fastest.name} · {(reveal.fastest.timeMs / 1000).toFixed(1)}s
+            </p>
           )}
           {reveal?.music && (
             <div className="zoom-in mt-5 flex items-center gap-5">
@@ -337,35 +413,43 @@ function QuestionView({ state, until }: { state: LiveState; until: (iso: string 
         )}
       </div>
 
-      <div className="grid flex-none gap-3 sm:grid-cols-2 lg:gap-4">
-        {question.options.map((option, index) => {
-          const right = reveal && index === reveal.correctIndex
-          return (
-            <div
-              key={index}
-              className="tile relative min-h-[64px] overflow-hidden px-4 py-2.5 text-lg lg:min-h-[9dvh] lg:px-6 lg:text-[clamp(1.15rem,3.1dvh,1.75rem)]"
-              data-dim={Boolean(reveal) && !right}
-              style={{ ['--tone' as string]: TONES[index % 4], ['--tone-ink' as string]: TONE_INKS[index % 4] }}
-            >
-              {reveal && (
-                <span
-                  className="absolute inset-0 origin-left bg-black/22 transition-transform duration-700"
-                  style={{ transform: `scaleX(${reveal.counts[index] / most})` }}
-                  aria-hidden
-                />
-              )}
-              <span className="pixel relative grid h-10 w-10 flex-none place-items-center rounded-sm bg-black/25 text-base lg:h-12 lg:w-12 lg:text-xl">{LETTERS[index]}</span>
-              <span className="relative min-w-0 flex-1 break-words">{option}</span>
-              {reveal && (
-                <span className="pixel relative inline-flex items-center gap-1.5 text-sm tabular-nums lg:text-xl">
-                  {right && <IconCheck size={18} />}
-                  {reveal.counts[index]}
-                </span>
-              )}
-            </div>
-          )
-        })}
-      </div>
+      {!reveal && opensIn > 0 ? (
+        <div className="card flex-none px-5 py-4 text-center">
+          <p className="pixel blink text-xs lg:text-base" style={{ color: 'var(--accent-text)' }}>
+            Read the question… answers unlock on phones in a moment
+          </p>
+        </div>
+      ) : (
+        <div className="grid flex-none gap-3 sm:grid-cols-2 lg:gap-4">
+          {question.options.map((option, index) => {
+            const right = reveal && index === reveal.correctIndex
+            return (
+              <div
+                key={index}
+                className="tile relative min-h-[64px] overflow-hidden px-4 py-2.5 text-lg lg:min-h-[9dvh] lg:px-6 lg:text-[clamp(1.15rem,3.1dvh,1.75rem)]"
+                data-dim={Boolean(reveal) && !right}
+                style={{ ['--tone' as string]: TONES[index % 4], ['--tone-ink' as string]: TONE_INKS[index % 4] }}
+              >
+                {reveal && (
+                  <span
+                    className="absolute inset-0 origin-left bg-black/22 transition-transform duration-700"
+                    style={{ transform: `scaleX(${barsReady ? reveal.counts[index] / most : 0})` }}
+                    aria-hidden
+                  />
+                )}
+                <span className="pixel relative grid h-10 w-10 flex-none place-items-center rounded-sm bg-black/25 text-base lg:h-12 lg:w-12 lg:text-xl">{LETTERS[index]}</span>
+                <span className="relative min-w-0 flex-1 break-words">{option}</span>
+                {reveal && (
+                  <span className="pixel relative inline-flex items-center gap-1.5 text-sm tabular-nums lg:text-xl">
+                    {right && <IconCheck size={18} />}
+                    {reveal.counts[index]}
+                  </span>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -416,15 +500,30 @@ function BigScreenRow({
               <IconBolt size={12} />x{row.streak}
             </span>
           )}
+          {row.rankDelta !== undefined && row.rankDelta !== 0 && (
+            <span
+              className="flex-none text-xs font-bold tabular-nums lg:text-sm"
+              style={{ color: row.rankDelta > 0 ? 'var(--good)' : 'var(--bad)' }}
+            >
+              {row.rankDelta > 0 ? `▲${row.rankDelta}` : `▼${Math.abs(row.rankDelta)}`}
+            </span>
+          )}
         </div>
         {row.team && <p className="truncate text-sm text-muted lg:text-base">{row.team}</p>}
       </div>
-      <span
-        className={`sb-score ${dense ? '!text-xl lg:!text-2xl' : '!text-2xl lg:!text-3xl'}`}
-        style={{ color: row.rank === 1 ? '#ffd60a' : 'var(--ink)' }}
-      >
-        {formatScore(row.score)}
-      </span>
+      <div className="flex flex-none flex-col items-end">
+        <span
+          className={`sb-score ${dense ? '!text-xl lg:!text-2xl' : '!text-2xl lg:!text-3xl'}`}
+          style={{ color: row.rank === 1 ? '#ffd60a' : 'var(--ink)' }}
+        >
+          {formatScore(row.score)}
+        </span>
+        {row.roundPoints !== undefined && row.roundPoints > 0 && (
+          <span className="text-xs font-bold tabular-nums lg:text-sm" style={{ color: 'var(--good)' }}>
+            +{formatScore(row.roundPoints)}
+          </span>
+        )}
+      </div>
     </li>
   )
 }
@@ -441,6 +540,11 @@ function Scoreboard({ state }: { state: LiveState }) {
     <div className="flex min-h-0 flex-1 flex-col justify-center gap-4 overflow-y-auto">
       <div className="text-center">
         <h1 className="neon text-xl lg:text-4xl">Scoreboard</h1>
+        {state.biggestMover && state.biggestMover.delta > 0 && (
+          <p className="mt-2 inline-flex items-center gap-1.5 rounded-[4px] border px-3 py-1 text-sm font-bold lg:text-base" style={{ borderColor: 'var(--good)', color: 'var(--good)', background: 'color-mix(in oklab, var(--good) 12%, transparent)' }}>
+            ▲ Biggest mover: {state.biggestMover.name} (+{state.biggestMover.delta} {state.biggestMover.delta === 1 ? 'spot' : 'spots'} to #{state.biggestMover.rank})
+          </p>
+        )}
         {state.players > standings.length && (
           <p className="mt-1.5 text-sm text-muted lg:text-base">
             Top {standings.length} of {state.players} players · check your phone for your exact rank

@@ -447,6 +447,9 @@ class _Db:
             return self.tally
         return None
 
+    async def fetch(self, query, *args):
+        return []                                      # no earlier answers (the host looks at the run's last few)
+
     async def fetchval(self, query, *args):
         return self.best if "max(score)" in query else None
 
@@ -561,9 +564,10 @@ def test_the_host_stays_safe_for_work():
 
 def test_the_final_question_s_clock_waits_for_its_reading():
     from services import engine
-    assert engine.reading_seconds("Which hub moved the most pallets in the third quarter of the year?") == (3 + 13) / 2 + 1.5
+    lead = engine.READ_LEAD_WORDS                      # his reaction to the bet, then "Your final question..."
+    assert engine.reading_seconds("Which hub moved the most pallets in the third quarter of the year?") == (lead + 13) / 2 + 1.5
     assert engine.reading_seconds(" ".join(["word"] * 80)) == engine.READ_MAX_SEC        # never a long wait
-    assert engine.reading_seconds(None) == 3 / 2 + 1.5
+    assert engine.reading_seconds(None) == lead / 2 + 1.5
 
 
 async def test_only_the_final_question_is_read_and_word_for_word(monkeypatch):
@@ -571,8 +575,15 @@ async def test_only_the_final_question_is_read_and_word_for_word(monkeypatch):
     final = {"slot": "final", "wager": 100, "answered_at": None, "payload": {"text": question}}
     monkeypatch.setattr(host_service, "db", _Db(item=final))
     line = await host_service.final_question_line(RUN, "item-1")
-    assert line == f"[dramatic] Your final question... [clearly] {question}"
-    assert host_service.spoken_text(line) == f"Your final question... {question}"
+    assert line == f"[impressed] Bold move, 100 on the line... [dramatic] Your final question... [clearly] {question}"
+    assert host_service.spoken_text(line) == f"Bold move, 100 on the line... Your final question... {question}"
+    # His reaction to the bet depends on how big it was (the options are safe, bold, go big).
+    tiers = {50: "Playing it safe for 50", 100: "Bold move, 100", 200: "Going big \u2014 200"}
+    for amount, words in tiers.items():
+        bet = {**final, "wager": amount, "payload": {"text": question, "wager_options": [50, 100, 200]}}
+        monkeypatch.setattr(host_service, "db", _Db(item=bet))
+        assert words in await host_service.final_question_line(RUN, "item-1")
+    monkeypatch.setattr(host_service, "db", _Db(item=final))
     for other in ({**final, "slot": "report"}, {**final, "wager": None}, {**final, "answered_at": "now"}):
         monkeypatch.setattr(host_service, "db", _Db(item=other))
         assert await host_service.final_question_line(RUN, "item-1") is None

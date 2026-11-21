@@ -74,6 +74,7 @@ export type Item = {
   lifelinesUsed: string[]
   removed: number[]
   hint: string | null
+  hintRefunded?: boolean
   peek: string | null
   /** Dealt but not yet shown: only the round is known until the game asks to open it. */
   sealed?: boolean
@@ -169,10 +170,12 @@ export type Summary = {
   streakMax: number
   durationSec: number | null
   decade: string | null
+  unusedLifelines?: number
+  lifelineBonus?: number
   sections: { id: string; heading: string; answered: number; correct: number }[]
   blindSpots: { id: string; heading: string }[]
   untouched: { id: string; heading: string }[]
-  review: { title: string | null; text: string; section: string | null; correctAnswer: string; yourAnswer: string | null; explanation: string | null }[]
+  review: { slot?: Slot; title: string | null; text: string; section: string | null; correctAnswer: string; yourAnswer: string | null; explanation: string | null; sourceQuote?: string | null }[]
   readiness: Readiness
   rank: number | null
   players: number
@@ -231,6 +234,7 @@ export type LiveQuestion = {
   options: string[]
   limitSec: number
   section: string | null
+  doublePoints?: boolean
   opensAt: string | null
   endsAt: string | null
   imageUrl?: string
@@ -260,10 +264,12 @@ export type LiveState = {
     counts: number[]
     explanation: string | null
     sourceQuote: string | null
+    fastest?: { name: string; timeMs: number } | null
     music?: { artist: string; title: string; artworkUrl: string | null }
   }
-  standings?: { rank: number; name: string; team: string | null; score: number; streak: number; you?: boolean }[]
-  aroundYou?: { rank: number; name: string; team: string | null; score: number; streak: number; you?: boolean }[]
+  standings?: { rank: number; name: string; team: string | null; score: number; streak: number; roundPoints?: number; rankDelta?: number; you?: boolean }[]
+  aroundYou?: { rank: number; name: string; team: string | null; score: number; streak: number; roundPoints?: number; rankDelta?: number; you?: boolean }[]
+  biggestMover?: { name: string; delta: number; rank: number; points: number } | null
   teams?: { team: string; average: number; players: number }[]
   roomMissed?: { text: string; correctAnswer: string; section: string | null; explanation: string | null; percentCorrect: number }[]
   /** Big screen only, once the game is over: music for the room while the results are up. */

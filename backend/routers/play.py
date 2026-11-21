@@ -58,17 +58,23 @@ async def find_quiz(slug: str, admin_token: str | None = None) -> dict:
 
 
 def _host_choices(host: dict) -> list[dict]:
-    """The hosts a player may pick from. An ElevenLabs voice is described in a few words ("British wit");
-    the others relative to each other (deeper / brighter voice)."""
+    """The hosts a player may pick from. An ElevenLabs voice carries its own label and CRT register;
+    OpenAI voices are described relative to each other (deeper / brighter voice)."""
     hosts = host["hosts"]
     if not host["player_can_choose"] or len(hosts) < 2:
         return []
     pitch = {c["id"]: settings_store.VOICE_FACTS.get(c["voice"], (180, 6))[0] for c in hosts}
     low, high = min(pitch.values()), max(pitch.values())
-    return [{"id": c["id"], "name": c["name"],
-             "label": eleven.BY_ID[c["voice"]].short if eleven.is_eleven(c["voice"]) else None,
-             "register": "deeper" if pitch[c["id"]] == low and low != high else (
-                 "brighter" if pitch[c["id"]] == high and low != high else "middle")} for c in hosts]
+    choices = []
+    for c in hosts:
+        if eleven.is_eleven(c["voice"]):
+            voice = eleven.BY_ID[c["voice"]]
+            choices.append({"id": c["id"], "name": c["name"], "label": voice.short, "register": voice.register})
+        else:
+            reg = "deeper" if pitch[c["id"]] == low and low != high else (
+                "brighter" if pitch[c["id"]] == high and low != high else "middle")
+            choices.append({"id": c["id"], "name": c["name"], "label": None, "register": reg})
+    return choices
 
 
 async def _branding_view() -> dict:
@@ -372,7 +378,7 @@ async def start_clock(run_id: str, body: ItemBody, player: dict = Depends(curren
 async def lifeline(run_id: str, body: LifelineBody, player: dict = Depends(current_player)) -> dict:
     run, _, rules = await _load_run(run_id, player)
     try:
-        item = await engine.use_lifeline(run, body.itemId, body.kind, hint_writer=host_service.hint_text)
+        item = await engine.use_lifeline(run, body.itemId, body.kind, hint_writer=host_service.hint_with_status)
     except engine.GameError as exc:
         raise _game_error(exc) from exc
     run = await db.fetchrow("select * from runs where id = $1", run_id)

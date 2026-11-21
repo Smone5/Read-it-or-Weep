@@ -65,3 +65,16 @@ def test_questions_spread_across_sections():
 
 def test_nothing_left_is_reported_as_nothing():
     assert bank.choose([question("a", "alpha")], {}, {"a"}) is None
+
+
+def test_blind_spot_sections_are_prioritised_on_replays():
+    pool = [question("cleared-q", "alpha", section="s1"), question("blind-q", "beta", section="s2")]
+    states = {"s1": "cleared", "s2": "tried"}
+    picks = Counter(bank.choose(pool, {}, set(), section_states=states)["id"] for _ in range(40))
+    assert picks == {"blind-q": 40}
+
+
+def test_difficulty_band_beats_random_jitter():
+    pool = [question("easy-q", "alpha", difficulty="easy"), question("hard-q", "beta", difficulty="hard")]
+    picks = Counter(bank.choose(pool, {}, set(), difficulty="easy")["id"] for _ in range(40))
+    assert picks == {"easy-q": 40}
