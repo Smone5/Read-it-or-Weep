@@ -150,7 +150,11 @@ export default function QuizPage() {
           if (soundtrackFor.current !== runId || !music.tracks.length) return
           // A game picked back up does not start its music from the top again.
           const from = isResume ? Math.floor(Math.random() * music.tracks.length) : 0
-          startJukebox([...music.tracks.slice(from), ...music.tracks.slice(0, from)], { volume: music.volume, mix: music.mix })
+          startJukebox([...music.tracks.slice(from), ...music.tracks.slice(0, from)], {
+            volume: music.volume,
+            mix: music.mix,
+            cues: isResume ? { ...music.cues, opener: undefined } : music.cues,
+          })
         },
         () => undefined,
       )

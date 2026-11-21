@@ -312,15 +312,22 @@ async def run_soundtrack(run_id: str, player: dict = Depends(current_player)) ->
     """Songs to play quietly behind this game (none for a Straight Quiz, or when music is switched off)."""
     run, _, rules = await _load_run(run_id, player)
     if not (rules["music_enabled"] and rules.get("soundtrack", True)) or run["mode"] == "straight":
-        return {"decade": None, "tracks": []}
+        return {"decade": None, "tracks": [], "cues": {}}
     decade = music_service.game_decade(run, rules)
     if not decade:
-        return {"decade": None, "tracks": []}
+        return {"decade": None, "tracks": [], "cues": {}}
     music_service.ensure_decade(decade)
-    asked = await db.fetch("select music_track_id from run_items where run_id = $1 and music_track_id is not null", run_id)
-    tracks = await music_service.soundtrack(decade, run["id"], {r["music_track_id"] for r in asked})
-    tracks = favorites.mix(tracks, await favorites.for_player(player["id"]), run["id"], decade)
-    return {"decade": decade, "tracks": tracks, "volume": rules["soundtrack_volume"], "mix": rules["mix"]}
+    music_service.ensure_moods(decade)
+    asked = {r["music_track_id"] for r in await db.fetch(
+        "select music_track_id from run_items where run_id = $1 and music_track_id is not null", run_id)}
+    rows = [r for r in await music_service.soundtrack_rows(decade, run["id"]) if r["id"] not in asked]
+    tracks = [music_service._track_view(r) for r in rows]
+    favs = await favorites.for_player(player["id"])
+    tracks = favorites.mix(tracks, favs, run["id"], decade)
+    fav_views = [t for t in tracks if t.get("because")]
+    sections = await bank.sections(run["quiz_id"])
+    cues = music_service.build_cues(rows, sections, favorite_tracks=fav_views, seed=run["id"])
+    return {"decade": decade, "tracks": tracks, "cues": cues, "volume": rules["soundtrack_volume"], "mix": rules["mix"]}
 
 
 @router.post("/runs/{run_id}/next")

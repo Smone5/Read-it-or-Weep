@@ -318,9 +318,199 @@ async def build_question(decade: str, avoid_track_ids: set[str], asks: str | Non
             "asks": "title" if ask_title else "artist"}
 
 
-def _track_view(track: dict) -> dict:
-    return {"title": track["title"], "artist": track["artist"], "previewUrl": track["preview_url"],
+def _track_view(track: dict, *, because: str | None = None) -> dict:
+    view = {"title": track["title"], "artist": track["artist"], "previewUrl": track["preview_url"],
             "artworkUrl": track["artwork_url"], "trackUrl": track["track_url"]}
+    if because:
+        view["because"] = because
+    return view
+
+
+# --------------------------------------------------------------------------- contextual mood & theme cues
+
+_MOOD_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "tension": (
+        "final countdown", "eye of the tiger", "under pressure", "danger zone", "thriller", "psycho",
+        "sweet dreams", "in the air tonight", "lose yourself", "smooth criminal", "bites the dust",
+        "bad guy", "rolling in the deep", "watching me", "pressure", "danger", "midnight", "shadow",
+        "fire", "storm", "edge", "waiting", "clock", "time", "run", "chase", "battle", "fight",
+    ),
+    "hype": (
+        "jump", "don't stop", "electric", "thunder", "lightning", "pump", "shake", "uptown", "crazy",
+        "dynamite", "blinding lights", "levitating", "physical", "footloose", "beat it", "push it",
+        "titanium", "stronger", "power", "fast", "speed", "rush", "fever", "dance", "party", "funk",
+        "rock", "groove", "wild", "energy", "boom", "go",
+    ),
+    "victory": (
+        "champion", "winner", "celebrat", "glory", "king", "queen", "gold", "shine", "best",
+        "unstoppable", "happy", "good as hell", "sunshine", "all star", "victorious", "rise",
+        "proud", "top", "triumph", "amazing", "fantastic", "wonderful", "great",
+    ),
+    "opener": (
+        "welcome", "start", "begin", "show", "tonight", "ready", "hello", "spotlight", "stage",
+        "magic", "super", "live", "let's go", "here comes", "feeling good", "september",
+        "take on me", "brightside", "believin", "alive",
+    ),
+}
+
+_THEME_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "finance": ("money", "dollar", "cash", "rich", "gold", "million", "billion", "price", "pay", "bill", "bank", "diamond", "material", "fortune", "wealth", "profit", "cost", "tax"),
+    "work": ("work", "9 to 5", "boss", "office", "hustle", "busy", "monday", "friday", "weekend", "business", "deal", "talk", "call", "shift", "career"),
+    "travel": ("road", "drive", "car", "highway", "train", "plane", "fly", "flight", "jet", "mile", "wheel", "cruise", "ride", "rocket", "ship", "route", "move", "city", "coast"),
+    "risk": ("danger", "fire", "storm", "trouble", "warning", "pressure", "edge", "crash", "break", "watch", "siren", "wild", "gamble", "bet", "luck", "chance", "dark"),
+    "tech": ("electric", "digital", "robot", "machine", "future", "wire", "radio", "video", "satellite", "laser", "computer", "signal", "space", "star", "neon", "system"),
+    "people": ("team", "together", "friend", "family", "people", "everyone", "crowd", "stand by", "lean on", "help", "trust", "heart", "human", "voice"),
+    "growth": ("higher", "rise", "climb", "grow", "top", "peak", "build", "stronger", "better", "faster", "bigger", "sky", "mountain", "reach", "level", "win"),
+}
+
+_SECTION_THEME_WORDS: dict[str, tuple[str, ...]] = {
+    "finance": ("financ", "revenue", "margin", "profit", "ebitda", "cost", "budget", "cash", "capital", "pricing", "earnings", "sales", "q1", "q2", "q3", "q4"),
+    "work": ("operat", "executive", "summary", "overview", "governance", "meeting", "policy", "workflow", "productivity", "service"),
+    "travel": ("fleet", "logistic", "supply", "freight", "shipping", "delivery", "transport", "route", "hub", "warehouse", "distribution", "network", "regional"),
+    "risk": ("risk", "compliance", "security", "audit", "threat", "incident", "safety", "mitigation", "challenge", "headwind", "legal", "regulatory"),
+    "tech": ("tech", "digital", "data", "ai", "automation", "software", "platform", "system", "cloud", "infrastructure", "cyber", "product", "engineering"),
+    "people": ("people", "talent", "hiring", "turnover", "retention", "culture", "team", "workforce", "employee", "hr", "staff", "leadership", "customer"),
+    "growth": ("growth", "outlook", "strategy", "expansion", "forecast", "roadmap", "goal", "target", "milestone", "initiative", "market", "future"),
+}
+
+
+def infer_mood(title: str, artist: str = "") -> str:
+    """Zero-cost instant mood classification for any track."""
+    hay = f"{title} {artist}".lower()
+    for mood in ("tension", "victory", "hype", "opener"):
+        if any(word in hay for word in _MOOD_KEYWORDS[mood]):
+            return mood
+    return "groove"
+
+
+def infer_themes(title: str, artist: str = "") -> list[str]:
+    """Zero-cost instant corporate/report topic tags for any track."""
+    hay = f"{title} {artist}".lower()
+    return [theme for theme, words in _THEME_KEYWORDS.items() if any(word in hay for word in words)]
+
+
+def section_themes(heading: str) -> list[str]:
+    """Map a report section heading to matching music themes."""
+    low = (heading or "").lower()
+    return [theme for theme, words in _SECTION_THEME_WORDS.items() if any(word in low for word in words)]
+
+
+def build_cues(tracks: list[dict], sections: list[dict] | None = None,
+               favorite_tracks: list[dict] | None = None, seed: str = "") -> dict:
+    """Build pre-resolved contextual soundtrack cues from this game's own soundtrack rows (zero extra API calls,
+    zero spoilers since soundtrack rows are already excluded from Name That Tune)."""
+    if not tracks:
+        return {}
+    rng = random.Random(f"cues:{seed}")
+    pool = list(tracks)
+    rng.shuffle(pool)
+
+    by_mood: dict[str, list[dict]] = {"opener": [], "hype": [], "tension": [], "victory": [], "groove": []}
+    for t in pool:
+        m = (t.get("mood") or infer_mood(t.get("title", ""), t.get("artist", ""))).lower()
+        by_mood.setdefault(m, []).append(t)
+
+    used_urls: set[str] = set()
+
+    def pick(preferred_moods: tuple[str, ...], reason: str | None = None) -> dict | None:
+        for mood in preferred_moods:
+            for t in by_mood.get(mood, []):
+                if t["preview_url"] not in used_urls:
+                    used_urls.add(t["preview_url"])
+                    return _track_view(t, because=reason)
+        return None
+
+    cues: dict = {}
+    if opener := pick(("opener", "hype"), None):
+        cues["opener"] = opener
+    if hype := pick(("hype", "opener"), "Lightning energy"):
+        cues["hype"] = hype
+    if tension := pick(("tension",), "High-stakes moment"):
+        cues["tension"] = tension
+
+    # Victory prefers a player's favourite artist if available, otherwise a celebratory track.
+    victory = None
+    for fav in (favorite_tracks or []):
+        if fav.get("previewUrl") and fav["previewUrl"] not in used_urls:
+            victory = dict(fav)
+            used_urls.add(fav["previewUrl"])
+            break
+    if victory is None:
+        victory = pick(("victory", "hype"), "Victory lap")
+    if victory:
+        cues["victory"] = victory
+
+    # Per-section thematic matching against report headings.
+    by_section: dict[str, dict] = {}
+    section_used: set[str] = set()
+    for section in (sections or []):
+        wanted = set(section_themes(section.get("heading", "")))
+        if not wanted:
+            continue
+        match = None
+        for t in pool:
+            if t["preview_url"] in section_used:
+                continue
+            t_themes = set(t.get("themes") or infer_themes(t.get("title", ""), t.get("artist", "")))
+            if wanted & t_themes:
+                match = t
+                break
+        if match:
+            section_used.add(match["preview_url"])
+            by_section[section["id"]] = _track_view(match, because=f"Matched to: {section['heading']}")
+    if by_section:
+        cues["bySection"] = by_section
+
+    return cues
+
+
+class _MoodBatch(BaseModel):
+    class Tag(BaseModel):
+        id: str
+        mood: str
+        themes: list[str]
+
+    tracks: list[Tag]
+
+
+async def _tag_moods_if_needed(decade: str) -> None:
+    """One-time background mood/theme tagging per decade (~$0.005 once ever, never on the gameplay path)."""
+    if not config.openai_api_key:
+        return
+    untagged = await db.fetch(
+        "select id, artist, title from music_tracks where decade = $1 and active and mood is null limit 90", decade)
+    if not untagged:
+        return
+    listing = "\n".join(f"{r['id']}|{r['artist']} - {r['title']}" for r in untagged)
+    try:
+        result = await llm.parse(
+            model=config.model_fast,
+            system=("Tag each song with one game-show mood (opener, groove, hype, tension, victory) and 0-2 corporate "
+                    "report themes from: finance, work, travel, risk, tech, people, growth. Return only the given ids."),
+            user=listing,
+            schema=_MoodBatch,
+            max_output_tokens=2500,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.debug("mood tagging skipped for %s: %s", decade, exc)
+        return
+    valid_moods = {"opener", "groove", "hype", "tension", "victory"}
+    valid_themes = set(_THEME_KEYWORDS)
+    updates = [
+        (tag.mood if tag.mood in valid_moods else "groove",
+         [th for th in tag.themes if th in valid_themes][:3],
+         tag.id)
+        for tag in result.tracks
+    ]
+    if updates:
+        await db.executemany("update music_tracks set mood = $1, themes = $2 where id = $3", updates)
+        _cache.pop(decade, None)
+
+
+def ensure_moods(decade: str) -> None:
+    key = f"moods:{decade}"
+    if key not in _seeding or _seeding[key].done():
+        _seeding[key] = asyncio.create_task(_tag_moods_if_needed(decade))
 
 
 def game_decade(run: dict, rules: dict) -> str | None:

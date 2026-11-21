@@ -14,7 +14,7 @@
 import { onVoiceOver, voiceIsOver } from './music'
 import { audioContext, onSoundChange, soundOn } from './sound'
 import { trace } from './trace'
-import type { PartyTrack } from './types'
+import type { JukeboxCues, PartyTrack } from './types'
 
 /**
  * Where the game is: reading a question ('think'), between things ('gap'), waiting for Next after the host ('wait',
@@ -132,6 +132,8 @@ type Decoded = { buffer: AudioBuffer; gain: number }
 type Voice = { source: AudioBufferSourceNode; gain: GainNode; track: PartyTrack; level: number; startsAt: number; fadeIn: number; endsAt: number }
 
 let queue: PartyTrack[] = []
+let cues: JukeboxCues = {}
+const triggeredCues = new Set<string>()
 let index = -1
 let level: JukeboxLevel = 'out'
 let volume: JukeboxVolume = 'medium'
@@ -597,6 +599,8 @@ function shutDown() {
   on = false
   rest()
   queue = []
+  cues = {}
+  triggeredCues.clear()
   index = -1
   shown = null
   paused = false
@@ -624,11 +628,20 @@ export function jukeboxMix(): JukeboxMix {
 }
 
 /** Start the soundtrack for a game. The level is whatever the game last asked for. */
-export function startJukebox(list: PartyTrack[], options: { volume?: JukeboxVolume; mix?: Partial<JukeboxMix> } = {}) {
+export function startJukebox(
+  list: PartyTrack[],
+  options: { volume?: JukeboxVolume; mix?: Partial<JukeboxMix>; cues?: JukeboxCues } = {},
+) {
   if (!list.length) return
   session += 1
   listen()
-  queue = list
+  cues = options.cues ?? {}
+  triggeredCues.clear()
+  // Lead with the contextual opener if one was picked for this run.
+  const opener = cues.opener
+  queue = opener
+    ? [opener, ...list.filter((track) => track.previewUrl !== opener.previewUrl)]
+    : list
   index = -1
   failures = 0
   heard.clear()
@@ -636,8 +649,31 @@ export function startJukebox(list: PartyTrack[], options: { volume?: JukeboxVolu
   mix = { ...MIX_AS_TUNED, ...(options.mix ?? {}) }
   on = true
   paused = false
-  trace('jukebox.start', { songs: list.length, volume })
+  trace('jukebox.start', { songs: queue.length, volume, contextual: Object.keys(cues).length > 0 })
   sync()
+}
+
+/**
+ * Smoothly crossfade into a pre-resolved contextual track for a game moment (Lightning, Final Wager,
+ * Victory, or a report section). Fully non-blocking: if the track is not yet decoded, it loads in the
+ * background and crossfades only if the game is still active; otherwise the current song carries on.
+ */
+export function cueJukebox(kind: 'hype' | 'tension' | 'victory' | 'section', sectionId?: string) {
+  if (!on || !wanted()) return
+  const key = kind === 'section' ? `section:${sectionId ?? ''}` : kind
+  if (triggeredCues.has(key)) return
+  const track = kind === 'section' ? (sectionId ? cues.bySection?.[sectionId] : undefined) : cues[kind]
+  if (!track || current?.track.previewUrl === track.previewUrl) return
+  triggeredCues.add(key)
+  const mine = session
+  void decode(track.previewUrl).then(async (song) => {
+    if (!song || mine !== session || !on || !wanted()) return
+    if (current?.track.previewUrl === track.previewUrl) return
+    if (!(await awake())) return
+    if (mine !== session || !on || !wanted()) return
+    trace('jukebox.cue', { kind, title: track.title })
+    begin(track, song, SKIP_FADE_SEC)
+  })
 }
 
 /**

@@ -29,7 +29,7 @@ import { MusicToggle } from '../components/NowPlaying'
 import { ErrorNote, Modal, SoundToggle } from '../components/ui'
 import { api, ApiError, onConnectionTrouble } from '../lib/api'
 import type { HostVoice } from '../lib/hostVoice'
-import { jukeboxMix, musicOn, onJukeboxChange, setJukeboxLevel, type JukeboxState } from '../lib/jukebox'
+import { cueJukebox, jukeboxMix, musicOn, onJukeboxChange, setJukeboxLevel, type JukeboxState } from '../lib/jukebox'
 import { fadeOutMusic, preloadClip, stopMusic } from '../lib/music'
 import { blip, buzz, play } from '../lib/sound'
 import { trace } from '../lib/trace'
@@ -615,6 +615,20 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       if (speedSecLeft <= 5) buzz(12)
     }
   }, [mode, phase, speedSecLeft])
+
+  // Trigger pre-resolved contextual soundtrack cues (tension for Final Wager / 1-life Sudden Death,
+  // hype for Lightning / Speed Run / hot streaks, and thematic tracks matched to report sections).
+  useEffect(() => {
+    if (mode === 'straight' || hasClip) return
+    const lastLife = mode === 'sudden_death' && (state.maxStrikes ?? 3) - (state.strikes ?? 0) === 1
+    if (phase === 'wager' || lastLife) {
+      cueJukebox('tension')
+    } else if (item?.slot === 'fact_fake' || mode === 'speed' || state.streak >= 5) {
+      cueJukebox('hype')
+    } else if (phase === 'question' && item?.section?.id && item.slot !== 'music' && item.slot !== 'jargon') {
+      cueJukebox('section', item.section.id)
+    }
+  }, [phase, item?.slot, item?.section?.id, mode, state.streak, state.strikes, state.maxStrikes, hasClip])
 
   // Keyboard: A-D or 1-4 to answer, Enter / Space to continue or to skip a title card.
   useEffect(() => {

@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react'
 import { IconCheck, IconClose, IconPlay, IconStar, IconTrophy } from '../components/Icons'
 import { NowPlaying } from '../components/NowPlaying'
 import { api } from '../lib/api'
+import { cueJukebox } from '../lib/jukebox'
 import { play } from '../lib/sound'
 import type { Leaderboard, Summary as SummaryData } from '../lib/types'
 import { HighScores, HostBox, ReadinessMap, RollingScore, type TalkControl } from './parts'
@@ -60,6 +61,7 @@ export default function Summary({
 
   useEffect(() => {
     play(victory ? 'cheer' : completed ? 'levelup' : 'gameover')
+    if (victory) cueJukebox('victory')
     if (celebrate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       const colors = [getComputedStyle(document.documentElement).getPropertyValue('--brand').trim() || '#6d5ef8', '#ffb020', '#ffffff']
       void confetti({ particleCount: 110, spread: 75, origin: { y: 0.35 }, colors, shapes: ['square'], scalar: 0.9 })

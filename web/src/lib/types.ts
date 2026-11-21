@@ -144,10 +144,19 @@ export type PartyTrack = {
   because?: string | null
 }
 export type AfterParty = { decade: string; tracks: PartyTrack[] }
+export type JukeboxCues = {
+  opener?: PartyTrack
+  hype?: PartyTrack
+  tension?: PartyTrack
+  victory?: PartyTrack
+  bySection?: Record<string, PartyTrack>
+}
+
 /** The songs that play quietly behind a game (an empty list when it has no music). */
 export type Soundtrack = {
   decade: string | null
   tracks: PartyTrack[]
+  cues?: JukeboxCues
   volume?: 'quiet' | 'medium' | 'loud'
   /** The organiser's music levels, moment by moment (see jukebox.JukeboxMix). */
   mix?: { opening: number; opening_sec: number; under_host: number; questions: number; between: number; ease_down: boolean }

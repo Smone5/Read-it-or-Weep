@@ -89,6 +89,27 @@ def test_live_final_two_questions_are_double_points():
     assert not live.is_double_points(2, 3)                  # tiny 3-question games skip double points
 
 
+def test_contextual_music_cues_match_moods_sections_and_favorites():
+    sample = [
+        {"id": "1", "title": "The Final Countdown", "artist": "Europe", "preview_url": "https://a/1.m4a", "artwork_url": None, "track_url": None},
+        {"id": "2", "title": "Jump", "artist": "Van Halen", "preview_url": "https://a/2.m4a", "artwork_url": None, "track_url": None},
+        {"id": "3", "title": "Money for Nothing", "artist": "Dire Straits", "preview_url": "https://a/3.m4a", "artwork_url": None, "track_url": None},
+        {"id": "4", "title": "On the Road Again", "artist": "Willie Nelson", "preview_url": "https://a/4.m4a", "artwork_url": None, "track_url": None},
+        {"id": "5", "title": "We Are the Champions", "artist": "Queen", "preview_url": "https://a/5.m4a", "artwork_url": None, "track_url": None},
+    ]
+    sections = [
+        {"id": "sec-fin", "heading": "2. Q3 Financial Performance & Margin"},
+        {"id": "sec-fleet", "heading": "4. Fleet & Supply Chain Logistics"},
+    ]
+    fav = [{"title": "Your Fav", "artist": "Prince", "previewUrl": "https://a/fav.m4a", "artworkUrl": None, "trackUrl": None, "because": "Prince"}]
+    cues = music_service.build_cues(sample, sections, favorite_tracks=fav, seed="run-42")
+    assert cues["tension"]["title"] == "The Final Countdown"
+    assert cues["victory"]["title"] == "Your Fav"           # prefers player's favorite artist for victory
+    assert cues["bySection"]["sec-fin"]["title"] == "Money for Nothing"
+    assert "Matched to:" in cues["bySection"]["sec-fin"]["because"]
+    assert cues["bySection"]["sec-fleet"]["title"] == "On the Road Again"
+
+
 # --- the playlist behind the results ---------------------------------------------------------------------
 
 def track(number, artist):
