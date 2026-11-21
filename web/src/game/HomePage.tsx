@@ -130,9 +130,14 @@ export default function HomePage() {
         </header>
 
         <section className="card rise p-5">
-          <div className="flex items-center justify-between gap-2">
-            <h2 className="text-xs">Choose a report</h2>
-            {quizzes.length > 0 && <span className="text-xs text-muted">{filtered.length} open</span>}
+          <div className="flex items-baseline justify-between gap-2">
+            <div>
+              <h2 className="text-xs">Pick a report to play</h2>
+              {quizzes.length > 1 && (
+                <p className="mt-1 text-xs text-muted">Choose any topic below to start a solo or group game.</p>
+              )}
+            </div>
+            {quizzes.length > 0 && <span className="text-xs text-muted">{filtered.length} available</span>}
           </div>
 
           {showFilters && (
@@ -177,23 +182,34 @@ export default function HomePage() {
               </div>
             </div>
           ) : (
-            <div className="scroll-thin mt-3 flex max-h-[52dvh] flex-col gap-2.5 overflow-y-auto pr-0.5">
+            <div className="scroll-thin mt-4 flex max-h-[56dvh] flex-col gap-3 overflow-y-auto pr-0.5">
               {filtered.map(renderQuizButton)}
             </div>
           )}
         </section>
 
         <form
-          className="card card-accent p-5"
+          className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface/65 px-4 py-3"
           onSubmit={(event) => {
             event.preventDefault()
             if (code.trim()) navigate(`/live/${code.trim().toUpperCase()}`)
           }}
         >
-          <label className="label" htmlFor="live-code">Joining a live game? Enter the code on the big screen</label>
-          <div className="flex gap-2.5">
-            <input id="live-code" className="field pixel flex-1 text-base tracking-widest" value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} maxLength={6} autoCapitalize="characters" autoComplete="off" placeholder="ABCDE" />
-            <button className="btn btn-accent" disabled={code.trim().length < 4}>Join</button>
+          <label className="text-xs text-muted sm:flex-1" htmlFor="live-code">
+            Joining a live big-screen game?
+          </label>
+          <div className="flex w-full items-center gap-2 sm:w-auto">
+            <input
+              id="live-code"
+              className="field pixel w-28 flex-1 text-center text-xs tracking-widest sm:flex-none"
+              value={code}
+              onChange={(e) => setCode(e.target.value.toUpperCase())}
+              maxLength={6}
+              autoCapitalize="characters"
+              autoComplete="off"
+              placeholder="CODE"
+            />
+            <button className="btn btn-ghost btn-sm" disabled={code.trim().length < 4}>Join</button>
           </div>
         </form>
       </div>

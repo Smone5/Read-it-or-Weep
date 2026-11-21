@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { HostCrt, hostToneFor } from '../components/HostCrt'
-import { IconPlay, IconStop, IconTrophy } from '../components/Icons'
-import { ErrorNote, FullScreenMessage, Logo, SoundToggle, Spinner, Stage, untilText } from '../components/ui'
+import { IconCheck, IconPlay, IconStop, IconTrophy } from '../components/Icons'
+import { ErrorNote, FullScreenMessage, Logo, Modal, SoundToggle, Spinner, Stage, untilText } from '../components/ui'
 import { api, ApiError, session } from '../lib/api'
 import { HostVoice, type TalkState } from '../lib/hostVoice'
 import { setJukeboxLevel, startJukebox, startParty, stopJukebox } from '../lib/jukebox'
@@ -95,6 +95,12 @@ export default function QuizPage() {
   }, [slug])
 
   useEffect(() => {
+    setScreen('loading')
+    setInfo(null)
+    setSummary(null)
+    setTurn(null)
+    setScoresView(null)
+    setFatal('')
     void load()
     preloadSounds()
     return () => {
@@ -375,6 +381,7 @@ function ChallengeBanner({ challenge, modes }: { challenge: Challenge | null; mo
 // --------------------------------------------------------------------------- join
 
 function JoinForm({ info, challenge, onJoined }: { info: QuizInfo; challenge: Challenge | null; onJoined: () => void }) {
+  const navigate = useNavigate()
   const { quiz, branding } = info
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
@@ -418,7 +425,12 @@ function JoinForm({ info, challenge, onJoined }: { info: QuizInfo; challenge: Ch
 
       <form className="card rise grid gap-4 p-5" onSubmit={submit}>
         <div>
-          <p className="chip chip-accent">{quiz.status === 'draft' ? 'Play-test · not open yet' : 'Now playing'}</p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="chip chip-accent">{quiz.status === 'draft' ? 'Play-test · not open yet' : 'Now playing'}</p>
+            <button type="button" className="text-xs font-medium text-muted underline hover:text-ink" onClick={() => navigate('/')}>
+              All reports
+            </button>
+          </div>
           <h2 className="mt-3 !normal-case text-[21px]" style={{ fontFamily: 'var(--font-sans)', lineHeight: 1.3 }}>{quiz.title}</h2>
           {quiz.description && <p className="mt-1 text-[15px] text-muted">{quiz.description}</p>}
           {meeting && <p className="mt-2 text-[15px]" style={{ color: 'var(--accent-text)' }}>Meeting {meeting}</p>}
@@ -530,6 +542,23 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onStart, onResum
   const navigate = useNavigate()
   const [liveCode, setLiveCode] = useState('')
   const [hostingLive, setHostingLive] = useState(false)
+  const [liveOpen, setLiveOpen] = useState(false)
+  const [customizeOpen, setCustomizeOpen] = useState(false)
+  const [readinessOpen, setReadinessOpen] = useState(false)
+  const [switcherOpen, setSwitcherOpen] = useState(false)
+  const [openReports, setOpenReports] = useState<{ slug: string; title: string; description?: string | null }[]>([])
+
+  useEffect(() => {
+    api<{ quizzes: { slug: string; title: string; description?: string | null }[] }>('/api/config')
+      .then((data) => setOpenReports(data.quizzes ?? []))
+      .catch(() => undefined)
+  }, [quiz.slug])
+
+  const activeHost = branding.host.choices.find((c) => c.id === hostId) ?? branding.host.choices[0]
+  const activeHostTone = activeHost ? hostToneFor(activeHost.register) : 'accent'
+  const showCustomize = chosen?.id !== 'straight' && (branding.host.choices.length > 1 || quiz.decades.length > 0)
+  const readiness = player.readiness
+  const hasMultipleReports = openReports.length > 1
 
   const hostLiveRoom = async () => {
     if (hostingLive || busy) return
@@ -549,224 +578,357 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onStart, onResum
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-4 pb-8 lg:max-w-4xl">
+    <div className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-4 pb-8 lg:max-w-2xl">
       <header className="flex items-center gap-3">
-        <Logo branding={branding} size={40} />
+        <Logo branding={branding} size={38} />
         <div className="min-w-0 flex-1">
           <p className="pixel truncate text-[10px] text-muted">{branding.companyName}</p>
           <p className="pixel neon truncate text-xs sm:text-sm">{branding.gameTitle}</p>
         </div>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => navigate('/')} title="Switch to another report">
-          All reports
-        </button>
         <SoundToggle />
       </header>
 
       <ChallengeBanner challenge={challenge} modes={quiz.modes} />
 
-      <div className="grid items-start gap-4 lg:grid-cols-12 lg:gap-5">
-        {/* Left column: player status, readiness map, game modes */}
-        <div className="flex flex-col gap-4 lg:col-span-7">
-          <section className="card rise p-5">
-            <p className="pixel text-[10px] text-muted">Player 1</p>
-            <h1 className="mt-2 text-base sm:text-xl">Ready, {firstName}?</h1>
-            <p className="mt-3 !normal-case text-[19px]" style={{ fontFamily: 'var(--font-sans)' }}>{quiz.title}</p>
-            {meeting && <p className="mt-1" style={{ color: 'var(--accent-text)' }}>Meeting {meeting}</p>}
-            {!quiz.ready && <p className="mt-3" style={{ color: 'var(--bad)' }}>This quiz is still being prepared. Check back soon.</p>}
-            {(quiz.reportUrl || (quiz.reportFiles && quiz.reportFiles.length > 0)) && (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {quiz.reportUrl && (
-                  <a className="btn btn-ghost btn-sm" href={quiz.reportUrl} target="_blank" rel="noopener noreferrer">
-                    Read the report ↗
-                  </a>
-                )}
-                {(quiz.reportFiles ?? []).map((file) => (
-                  <a key={file.id} className="btn btn-ghost btn-sm" href={file.url} target="_blank" rel="noopener noreferrer">
-                    {quiz.reportFiles!.length === 1 && !quiz.reportUrl ? 'Open report ↗' : `${file.filename} ↗`}
-                  </a>
-                ))}
-              </div>
+      {/* 1. Hero Launchpad: Report + Switcher + Primary Start CTA */}
+      <section className="card rise p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="pixel text-[10px] text-muted">Now playing · {firstName}</span>
+          {hasMultipleReports ? (
+            <button
+              type="button"
+              className="btn btn-accent btn-sm"
+              onClick={() => setSwitcherOpen((open) => !open)}
+              aria-expanded={switcherOpen}
+            >
+              Switch report ({openReports.length}) {switcherOpen ? '▴' : '▾'}
+            </button>
+          ) : (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => navigate('/')}>
+              All reports
+            </button>
+          )}
+        </div>
+
+        {switcherOpen && hasMultipleReports && (
+          <div className="mt-3 grid gap-1.5 rounded-lg border border-line bg-surface-2 p-2">
+            {openReports.map((r) => {
+              const current = r.slug === quiz.slug
+              return (
+                <button
+                  key={r.slug}
+                  type="button"
+                  className="flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition hover:bg-surface"
+                  style={current ? { background: 'color-mix(in oklab, var(--brand) 20%, var(--surface))' } : undefined}
+                  onClick={() => {
+                    setSwitcherOpen(false)
+                    if (!current) navigate(`/q/${r.slug}`)
+                  }}
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-semibold leading-snug">{r.title}</span>
+                    {r.description && <span className="mt-0.5 block truncate text-xs text-muted">{r.description}</span>}
+                  </span>
+                  {current && <IconCheck size={14} className="flex-none" style={{ color: 'var(--good)' }} />}
+                </button>
+              )
+            })}
+          </div>
+        )}
+
+        <h1 className="mt-3 !normal-case text-[22px] font-bold sm:text-2xl" style={{ fontFamily: 'var(--font-sans)', lineHeight: 1.25 }}>
+          {quiz.title}
+        </h1>
+        {quiz.description && <p className="mt-1.5 text-sm leading-relaxed text-muted">{quiz.description}</p>}
+        {meeting && <p className="mt-1.5 text-sm font-medium" style={{ color: 'var(--accent-text)' }}>Meeting {meeting}</p>}
+        {!quiz.ready && <p className="mt-2 text-sm" style={{ color: 'var(--bad)' }}>This quiz is still being prepared. Check back soon.</p>}
+
+        {(quiz.reportUrl || (quiz.reportFiles && quiz.reportFiles.length > 0)) && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {quiz.reportUrl && (
+              <a className="text-xs font-semibold underline hover:opacity-80" style={{ color: 'var(--accent-text)' }} href={quiz.reportUrl} target="_blank" rel="noopener noreferrer">
+                Read the report first ↗
+              </a>
             )}
-          </section>
+            {(quiz.reportFiles ?? []).map((file) => (
+              <a key={file.id} className="text-xs font-semibold underline hover:opacity-80" style={{ color: 'var(--accent-text)' }} href={file.url} target="_blank" rel="noopener noreferrer">
+                {quiz.reportFiles!.length === 1 && !quiz.reportUrl ? 'Open report to read ↗' : `${file.filename} ↗`}
+              </a>
+            ))}
+          </div>
+        )}
 
-          {player.readiness.total > 0 && (
-            <section className="card p-5">
-              <ReadinessMap readiness={player.readiness} />
-            </section>
-          )}
-
-          {quiz.modes.length > 1 && (
-            <section>
-              <p className="pixel mb-2 text-[10px] text-muted">Choose your game</p>
-              <div className="grid gap-2.5 sm:grid-cols-2">
-                {quiz.modes.map((option) => (
-                  <button
-                    key={option.id}
-                    className="answer flex-col items-start gap-1.5"
-                    data-state={option.id === mode ? 'picked' : 'idle'}
-                    style={{ ['--tone' as string]: 'var(--brand)' }}
-                    onClick={() => { setMode(option.id); play('click') }}
-                    aria-pressed={option.id === mode}
-                  >
-                    <span className="pixel text-[11px]">{option.name}</span>
-                    <span className="text-[15px] text-muted">{option.tagline}</span>
-                    {player.best[option.id] !== undefined && <span className="pixel text-[9px]" style={{ color: 'var(--accent-text)' }}>Your best {player.best[option.id]}</span>}
-                  </button>
-                ))}
-              </div>
-            </section>
-          )}
-
-          <section className="card card-accent p-4 sm:p-5">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="pixel text-[10px]" style={{ color: 'var(--accent-text)' }}>Play live together</p>
-              <span className="text-xs text-muted">Big screen + phones</span>
-            </div>
-            <p className="mt-2 text-[15px] text-muted">
-              Put the questions on a shared screen and have everyone answer on their phones at once.
-            </p>
-            <div className="mt-3 flex flex-col gap-2.5 sm:flex-row sm:items-center">
+        {readiness.total > 0 && (
+          <div className="mt-4 rounded-lg border border-line bg-surface-2/70 px-3 py-2.5">
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="font-semibold" style={{ color: readiness.ready ? 'var(--good)' : 'var(--ink)' }}>
+                {readiness.ready ? 'Ready!' : 'Report progress'} · {readiness.cleared}/{readiness.total} sections ({readiness.percent}%)
+              </span>
               <button
                 type="button"
-                className="btn btn-accent sm:flex-none"
-                disabled={hostingLive || busy || !quiz.ready}
-                onClick={() => void hostLiveRoom()}
+                className="text-xs text-muted underline hover:text-ink"
+                onClick={() => setReadinessOpen((open) => !open)}
+                aria-expanded={readinessOpen}
               >
-                {hostingLive ? 'Opening room…' : <>Host big screen <IconPlay size={13} /></>}
+                {readinessOpen ? 'Hide' : 'Details'}
               </button>
-              <form
-                className="flex flex-1 items-center gap-2"
-                onSubmit={(e) => {
-                  e.preventDefault()
-                  const clean = liveCode.trim().toUpperCase()
-                  if (clean.length >= 4) navigate(`/live/${clean}`)
+            </div>
+            <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-black/35">
+              <div
+                className="h-full transition-all"
+                style={{
+                  width: `${Math.max(4, readiness.percent)}%`,
+                  background: readiness.ready ? 'var(--good)' : 'var(--accent)',
                 }}
-              >
-                <input
-                  className="field pixel min-w-0 flex-1 text-center text-xs tracking-widest"
-                  value={liveCode}
-                  onChange={(e) => setLiveCode(e.target.value.toUpperCase())}
-                  maxLength={6}
-                  autoCapitalize="characters"
-                  autoComplete="off"
-                  placeholder="CODE"
-                  aria-label="Live room join code"
-                />
-                <button type="submit" className="btn btn-ghost flex-none" disabled={liveCode.trim().length < 4}>
-                  Join
-                </button>
-              </form>
+              />
             </div>
-          </section>
-        </div>
-
-        {/* Right column: music vibe, host CRT picker, start actions */}
-        <div className="flex flex-col gap-4 lg:col-span-5">
-          {wantsDecade && (
-            <section className="card p-4">
-              <p className="pixel mb-2.5 text-[10px] text-muted">Pick the music</p>
-              <div className="grid grid-cols-3 gap-2 sm:grid-cols-9 lg:grid-cols-3">
-                <button
-                  className="answer min-h-[52px] flex-col justify-center gap-1 px-1.5 py-2"
-                  data-state={decade === null ? 'picked' : 'idle'}
-                  style={{ ['--tone' as string]: 'var(--accent)' }}
-                  onClick={() => setDecade(null)}
-                  aria-pressed={decade === null}
-                  title="Surprise me"
-                >
-                  <span className="pixel text-[10px]">Any</span>
-                  <span className="h-1.5 w-7 rounded-full" style={{ background: 'linear-gradient(90deg, var(--brand), var(--accent))' }} aria-hidden />
-                </button>
-                {quiz.decades.map((d) => {
-                  const [c1, c2] = DECADE_SWATCH[d] ?? ['var(--brand)', 'var(--accent)']
-                  return (
-                    <button
-                      key={d}
-                      className="answer min-h-[52px] flex-col justify-center gap-1 px-1.5 py-2"
-                      data-state={decade === d ? 'picked' : 'idle'}
-                      style={{ ['--tone' as string]: c1 }}
-                      onClick={() => { setDecade(d); play('click') }}
-                      aria-pressed={decade === d}
-                      title={DECADE_LABEL[d]}
-                    >
-                      <span className="pixel text-[10px]">{d}</span>
-                      <span className="h-1.5 w-7 rounded-full" style={{ background: `linear-gradient(90deg, ${c1}, ${c2})` }} aria-hidden />
-                    </button>
-                  )
-                })}
+            {readinessOpen && (
+              <div className="mt-3 border-t border-line pt-3">
+                <ReadinessMap readiness={readiness} />
               </div>
-              <p className="mt-2.5 text-[15px] text-muted">{decade ? `${DECADE_LABEL[decade]} · ${DECADE_FLAVOUR[decade]}` : 'Surprise me'}</p>
-            </section>
-          )}
-
-          {chosen?.id !== 'straight' && quiz.decades.length > 0 && <FavouriteArtist initial={player.favoriteArtist ?? null} />}
-
-          {branding.host.choices.length > 1 && chosen?.id !== 'straight' && (
-            <section>
-              <p className="pixel mb-2 text-[10px] text-muted">Choose your host</p>
-              <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-1">
-                {branding.host.choices.map((choice, index) => {
-                  const selected = hostId ? choice.id === hostId : index === 0
-                  const isHearing = hearing?.id === choice.id
-                  const tone = hostToneFor(choice.register)
-                  return (
-                    <div key={choice.id} className="flex items-stretch gap-2">
-                      <button
-                        className="answer min-w-0 flex-1 items-center gap-3 py-2.5"
-                        data-state={selected ? 'picked' : 'idle'}
-                        style={{ ['--tone' as string]: 'var(--accent)' }}
-                        onClick={() => { onChooseHost(choice.id); play('click') }}
-                        aria-pressed={selected}
-                      >
-                        <HostCrt size="sm" tone={tone} state={isHearing && hearing.playing ? 'speaking' : isHearing ? 'thinking' : 'idle'} />
-                        <span className="min-w-0 flex-1">
-                          <span className="pixel block truncate text-[11px]">{choice.name}</span>
-                          <span className="block truncate text-[14px] text-muted">{choice.label ?? REGISTER_LABEL[choice.register] ?? 'Host'}</span>
-                        </span>
-                      </button>
-                      {branding.host.voiceEnabled && (
-                        <button
-                          type="button"
-                          className="btn btn-ghost min-w-[48px] flex-none px-0"
-                          onClick={() => hear(choice.id)}
-                          aria-label={isHearing ? `Stop ${choice.name}` : `Hear ${choice.name}`}
-                          title={isHearing ? 'Stop' : `Hear ${choice.name}`}
-                        >
-                          {isHearing ? (hearing.playing ? <IconStop size={14} /> : <span className="pixel text-[10px]">…</span>) : <IconPlay size={14} />}
-                        </button>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            </section>
-          )}
-
-          <ErrorNote>{error}</ErrorNote>
-
-          <div className="flex flex-col gap-3">
-            {player.unfinishedRun && (
-              <button className="btn btn-accent btn-lg w-full" disabled={busy} onClick={() => void go(() => onResume(player.unfinishedRun!.id))}>
-                Continue your game <IconPlay size={14} />
-              </button>
             )}
-            <button className="btn btn-primary btn-lg w-full" disabled={busy || !quiz.ready} onClick={() => void go(() => onStart(mode, wantsDecade ? decade : null))}>
-              {busy ? 'Loading…' : player.unfinishedRun ? 'Start a new game' : <>Press start <IconPlay size={14} /></>}
-            </button>
-            <div className="grid grid-cols-2 gap-3">
-              {quiz.leaderboard ? (
-                <button className="btn btn-ghost" onClick={() => onOpenScores(mode)}>
-                  <IconTrophy size={14} style={{ color: 'var(--accent)' }} /> High scores
-                </button>
-              ) : (
-                <span />
-              )}
-              <button className="btn btn-ghost" onClick={onSwitchPlayer}>Not {firstName}?</button>
-            </div>
           </div>
-          {branding.supportEmail && <p className="text-center text-sm text-muted">Trouble? <a className="underline" href={`mailto:${branding.supportEmail}`}>{branding.supportEmail}</a></p>}
+        )}
+
+        <ErrorNote>{error}</ErrorNote>
+
+        {/* Hero Start Action */}
+        <div className="mt-5 flex flex-col gap-2.5">
+          {player.unfinishedRun && (
+            <button className="btn btn-accent btn-lg w-full" disabled={busy} onClick={() => void go(() => onResume(player.unfinishedRun!.id))}>
+              Continue your game <IconPlay size={14} />
+            </button>
+          )}
+          <button
+            className="btn btn-primary btn-lg w-full"
+            disabled={busy || !quiz.ready}
+            onClick={() => void go(() => onStart(mode, wantsDecade ? decade : null))}
+          >
+            {busy ? 'Loading…' : player.unfinishedRun ? 'Start a fresh game' : <>Press start <IconPlay size={14} /></>}
+          </button>
+          <p className="text-center text-xs text-muted">
+            {chosen?.name ?? 'The Show'}
+            {chosen?.id !== 'straight' && activeHost ? ` · Host: ${activeHost.name}` : ''}
+            {wantsDecade ? ` · Music: ${decade ? DECADE_LABEL[decade] : 'Any decade'}` : ''}
+          </p>
         </div>
-      </div>
+
+        <div className="mt-4 grid grid-cols-2 gap-2.5 border-t border-line pt-4">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setLiveOpen(true)}>
+            Play live together
+          </button>
+          {quiz.leaderboard ? (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => onOpenScores(mode)}>
+              <IconTrophy size={13} style={{ color: 'var(--accent)' }} /> High scores
+            </button>
+          ) : (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onSwitchPlayer}>
+              Not {firstName}?
+            </button>
+          )}
+        </div>
+      </section>
+
+      {/* 2. Compact Game Style Selector */}
+      {quiz.modes.length > 1 && (
+        <section className="card p-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <p className="pixel text-[10px] text-muted">Game style</p>
+            {chosen && player.best[chosen.id] !== undefined && (
+              <span className="pixel text-[9px]" style={{ color: 'var(--accent-text)' }}>
+                Your best: {player.best[chosen.id]?.toLocaleString()}
+              </span>
+            )}
+          </div>
+          <div className="mt-2.5 flex flex-wrap gap-2" role="group" aria-label="Game style">
+            {quiz.modes.map((option) => {
+              const picked = option.id === mode
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`btn btn-sm ${picked ? 'btn-primary' : 'btn-ghost'}`}
+                  onClick={() => { setMode(option.id); play('click') }}
+                  aria-pressed={picked}
+                >
+                  {option.name}
+                </button>
+              )
+            })}
+          </div>
+          {chosen && <p className="mt-2.5 text-sm text-muted">{chosen.tagline}</p>}
+        </section>
+      )}
+
+      {/* 3. Collapsed Host & Music Customization Drawer */}
+      {showCustomize && (
+        <section className="card p-4">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-3 text-left"
+            onClick={() => setCustomizeOpen((open) => !open)}
+            aria-expanded={customizeOpen}
+          >
+            <div className="flex min-w-0 items-center gap-3">
+              {activeHost && <HostCrt size="sm" tone={activeHostTone} state="idle" />}
+              <div className="min-w-0">
+                <p className="pixel text-[10px] text-muted">Host &amp; music</p>
+                <p className="mt-0.5 truncate text-sm font-medium">
+                  {activeHost ? activeHost.name : 'Default host'}
+                  {wantsDecade ? ` · ${decade ? DECADE_LABEL[decade] : 'Any decade'}` : ''}
+                  {player.favoriteArtist ? ` · ♥ ${player.favoriteArtist}` : ''}
+                </p>
+              </div>
+            </div>
+            <span className="btn btn-ghost btn-sm flex-none">{customizeOpen ? 'Done ▴' : 'Change ▾'}</span>
+          </button>
+
+          {customizeOpen && (
+            <div className="mt-4 flex flex-col gap-4 border-t border-line pt-4">
+              {branding.host.choices.length > 1 && (
+                <div>
+                  <p className="pixel mb-2 text-[10px] text-muted">Choose your host</p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {branding.host.choices.map((choice, index) => {
+                      const selected = hostId ? choice.id === hostId : index === 0
+                      const isHearing = hearing?.id === choice.id
+                      const tone = hostToneFor(choice.register)
+                      return (
+                        <div key={choice.id} className="flex items-stretch gap-1.5">
+                          <button
+                            type="button"
+                            className="answer min-w-0 flex-1 items-center gap-2.5 py-2"
+                            data-state={selected ? 'picked' : 'idle'}
+                            style={{ ['--tone' as string]: 'var(--accent)' }}
+                            onClick={() => { onChooseHost(choice.id); play('click') }}
+                            aria-pressed={selected}
+                          >
+                            <HostCrt size="sm" tone={tone} state={isHearing && hearing.playing ? 'speaking' : isHearing ? 'thinking' : 'idle'} />
+                            <span className="min-w-0 flex-1">
+                              <span className="pixel block truncate text-[10px]">{choice.name}</span>
+                              <span className="block truncate text-xs text-muted">{choice.label ?? REGISTER_LABEL[choice.register] ?? 'Host'}</span>
+                            </span>
+                          </button>
+                          {branding.host.voiceEnabled && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost min-w-[42px] flex-none px-0"
+                              onClick={() => hear(choice.id)}
+                              aria-label={isHearing ? `Stop ${choice.name}` : `Hear ${choice.name}`}
+                              title={isHearing ? 'Stop' : `Hear ${choice.name}`}
+                            >
+                              {isHearing ? (hearing.playing ? <IconStop size={13} /> : <span className="pixel text-[10px]">…</span>) : <IconPlay size={13} />}
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {wantsDecade && (
+                <div>
+                  <p className="pixel mb-2 text-[10px] text-muted">Pick the music</p>
+                  <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+                    <button
+                      type="button"
+                      className="answer min-h-[46px] flex-col justify-center gap-1 px-1 py-1.5"
+                      data-state={decade === null ? 'picked' : 'idle'}
+                      style={{ ['--tone' as string]: 'var(--accent)' }}
+                      onClick={() => setDecade(null)}
+                      aria-pressed={decade === null}
+                      title="Surprise me"
+                    >
+                      <span className="pixel text-[9px]">Any</span>
+                      <span className="h-1 w-6 rounded-full" style={{ background: 'linear-gradient(90deg, var(--brand), var(--accent))' }} aria-hidden />
+                    </button>
+                    {quiz.decades.map((d) => {
+                      const [c1, c2] = DECADE_SWATCH[d] ?? ['var(--brand)', 'var(--accent)']
+                      return (
+                        <button
+                          key={d}
+                          type="button"
+                          className="answer min-h-[46px] flex-col justify-center gap-1 px-1 py-1.5"
+                          data-state={decade === d ? 'picked' : 'idle'}
+                          style={{ ['--tone' as string]: c1 }}
+                          onClick={() => { setDecade(d); play('click') }}
+                          aria-pressed={decade === d}
+                          title={DECADE_LABEL[d]}
+                        >
+                          <span className="pixel text-[9px]">{d}</span>
+                          <span className="h-1 w-6 rounded-full" style={{ background: `linear-gradient(90deg, ${c1}, ${c2})` }} aria-hidden />
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <p className="mt-2 text-xs text-muted">{decade ? `${DECADE_LABEL[decade]} · ${DECADE_FLAVOUR[decade]}` : 'Surprise me — a fresh decade mix'}</p>
+                </div>
+              )}
+
+              {quiz.decades.length > 0 && <FavouriteArtist initial={player.favoriteArtist ?? null} />}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Subtle account footer */}
+      <footer className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-xs text-muted">
+        <span>Signed in as <b className="text-ink">{player.name}</b></span>
+        <button type="button" className="underline hover:text-ink" onClick={onSwitchPlayer}>Switch player</button>
+        {branding.supportEmail && <a className="underline hover:text-ink" href={`mailto:${branding.supportEmail}`}>Need help?</a>}
+      </footer>
+
+      {/* Play Live Together Modal */}
+      <Modal open={liveOpen} onClose={() => setLiveOpen(false)}>
+        <div className="flex flex-col gap-4">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <p className="pixel text-[10px]" style={{ color: 'var(--accent-text)' }}>Play live together</p>
+              <h2 className="mt-1 !normal-case text-lg font-bold" style={{ fontFamily: 'var(--font-sans)' }}>
+                Big screen + phones
+              </h2>
+            </div>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setLiveOpen(false)}>Close</button>
+          </div>
+          <p className="text-sm text-muted">
+            Put the questions on a shared TV or projector and have everyone join with a room code on their phones.
+          </p>
+          <button
+            type="button"
+            className="btn btn-accent btn-lg w-full"
+            disabled={hostingLive || busy || !quiz.ready}
+            onClick={() => void hostLiveRoom()}
+          >
+            {hostingLive ? 'Opening room…' : <>Host big screen for this report <IconPlay size={13} /></>}
+          </button>
+          <div className="border-t border-line pt-4">
+            <p className="label">Already have a room code?</p>
+            <form
+              className="mt-2 flex items-center gap-2"
+              onSubmit={(e) => {
+                e.preventDefault()
+                const clean = liveCode.trim().toUpperCase()
+                if (clean.length >= 4) navigate(`/live/${clean}`)
+              }}
+            >
+              <input
+                className="field pixel min-w-0 flex-1 text-center text-sm tracking-widest"
+                value={liveCode}
+                onChange={(e) => setLiveCode(e.target.value.toUpperCase())}
+                maxLength={6}
+                autoCapitalize="characters"
+                autoComplete="off"
+                placeholder="ABCDE"
+                aria-label="Live room join code"
+              />
+              <button type="submit" className="btn btn-primary" disabled={liveCode.trim().length < 4}>
+                Join room
+              </button>
+            </form>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }
