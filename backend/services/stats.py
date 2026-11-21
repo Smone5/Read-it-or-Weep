@@ -25,18 +25,42 @@ async def askable_sections(quiz_id: str) -> list[dict]:
         " order by d.created_at, s.ordinal", quiz_id)
 
 
+# A section is cleared when the player knows it now: of their latest answers in it (up to RECENT), CLEAR_SHARE
+# right - 2/2, 3/3, 3/4 or 4/4 - or, with only one answer so far, a right multiple-choice one (a Straight Quiz asks
+# each section about once; a lone Fact or Fake call is a coin toss). Missing it again takes it away.
+# (It used to be one right answer ever, in any game: a player on 12% was told they were ready with 8/8 sections,
+# from lucky guesses in earlier games. User, 2026-11-21.)
+RECENT = 4
+CLEAR_SHARE = 0.75
+
+_SECTION_ANSWERS = (
+    "with answered as (select player_id, section_id, is_correct,"
+    "   slot, row_number() over (partition by player_id, section_id order by answered_at desc) as n"
+    "   from run_items where quiz_id = $1 and section_id is not null and slot <> 'music' and answered_at is not null"
+    "   {player})"
+    " select player_id, section_id, count(*) as answered, count(*) filter (where is_correct) as correct,"
+    " count(*) filter (where n <= {recent}) as recent_answered,"
+    " count(*) filter (where n <= {recent} and is_correct) as recent_correct,"
+    " count(*) filter (where n <= {recent} and is_correct and slot <> 'fact_fake') as recent_choice_correct"
+    " from answered group by player_id, section_id")
+
+
+def _cleared(row: dict | None) -> bool:
+    if not row or not row["recent_answered"]:
+        return False
+    if row["recent_answered"] == 1:
+        return row["recent_choice_correct"] == 1
+    return row["recent_correct"] >= CLEAR_SHARE * row["recent_answered"]
+
+
 async def readiness(quiz_id: str, player_id: str, threshold: int) -> dict:
     sections = await askable_sections(quiz_id)
-    rows = await db.fetch(
-        "select section_id, count(*) filter (where answered_at is not null) as answered,"
-        " count(*) filter (where is_correct) as correct from run_items"
-        " where quiz_id = $1 and player_id = $2 and section_id is not null and slot <> 'music' group by section_id",
-        quiz_id, player_id)
+    rows = await db.fetch(_SECTION_ANSWERS.format(player="and player_id = $2", recent=RECENT), quiz_id, player_id)
     by_section = {r["section_id"]: r for r in rows}
     detail = []
     for section in sections:
         stats = by_section.get(section["id"])
-        state = "cleared" if stats and stats["correct"] else ("tried" if stats and stats["answered"] else "new")
+        state = "cleared" if _cleared(stats) else ("tried" if stats and stats["answered"] else "new")
         detail.append({"id": section["id"], "heading": section["heading"], "state": state,
                        "answered": stats["answered"] if stats else 0, "correct": stats["correct"] if stats else 0})
     cleared = sum(1 for d in detail if d["state"] == "cleared")
@@ -144,17 +168,23 @@ async def quiz_overview(quiz_id: str) -> dict[str, Any]:
 
 
 async def participants(quiz: dict, rules: dict) -> list[dict]:
-    sections_total = len(await askable_sections(quiz["id"]))
+    askable = {s["id"] for s in await askable_sections(quiz["id"])}
+    sections_total = len(askable)
     threshold = int(rules["ready_threshold"])
+    cleared_by_player: dict[str, int] = {}
+    for row in await db.fetch(_SECTION_ANSWERS.format(player="", recent=RECENT), quiz["id"]):
+        if row["section_id"] in askable and _cleared(row):
+            cleared_by_player[row["player_id"]] = cleared_by_player.get(row["player_id"], 0) + 1
     rows = await db.fetch(
         "select p.id, p.name, p.email, p.team, s.report_answered, s.report_correct, s.unique_questions,"
         " s.sections_cleared, s.sections_seen, s.games, s.peeks_used, s.last_played_at,"
         " (select max(score) from runs r where r.player_id = p.id and r.quiz_id = $1 and r.status = 'completed') as best_score,"
         " (select bool_or(passed) from runs r where r.player_id = p.id and r.quiz_id = $1 and r.mode = 'straight') as passed"
         " from player_quiz_stats s join players p on p.id = s.player_id where s.quiz_id = $1"
-        " order by s.sections_cleared desc, s.report_correct desc", quiz["id"])
+        " order by s.report_correct desc", quiz["id"])
     result = []
     for r in rows:
+        r = {**r, "sections_cleared": cleared_by_player.get(r["id"], 0)}   # the same rule as the player's own screen
         percent = round(100 * r["sections_cleared"] / sections_total) if sections_total else 0
         result.append({
             "id": r["id"], "name": r["name"], "email": r["email"], "team": r["team"], "games": r["games"],
@@ -164,6 +194,7 @@ async def participants(quiz: dict, rules: dict) -> list[dict]:
             "ready": percent >= threshold, "peeksUsed": r["peeks_used"], "passed": r["passed"],
             "lastPlayedAt": r["last_played_at"],
         })
+    result.sort(key=lambda p: (-p["sectionsCleared"], -(p["correct"] or 0)))
     return result
 
 
