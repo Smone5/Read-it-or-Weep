@@ -731,38 +731,44 @@ _REVEAL_IMG_STOP = {
     "over", "per", "has", "had", "have", "not", "but", "more", "most", "some", "any", "about", "both", "which",
     "what", "when", "where", "how", "who", "why", "does", "did", "can", "will", "you", "your", "all", "one",
     "two", "three", "chart", "figure", "graph", "diagram", "visual", "guide", "showing", "shows", "report",
-    "section", "table", "points", "versus", "across", "between", "every", "after", "before", "during",
+    "section", "table", "points", "versus", "across", "between", "every", "after", "before", "during", "only",
     "fan", "fans", "game", "day", "team", "stadium", "field", "empower", "mile", "high", "denver", "broncos",
+    "level", "upper", "lower", "deck", "main", "part", "parts", "way",
 }
 
 
 def _topic_tokens(text: str) -> set[str]:
-    return {
-        tok for tok in re.findall(r"[a-z0-9]{3,}", (text or "").lower())
-        if tok not in _REVEAL_IMG_STOP
-    }
+    tokens: set[str] = set()
+    for tok in re.findall(r"[a-z0-9]{3,}", (text or "").lower()):
+        if len(tok) > 4 and tok.endswith("s") and not tok.endswith("ss"):
+            tok = tok[:-1]
+        if tok not in _REVEAL_IMG_STOP:
+            tokens.add(tok)
+    return tokens
 
 
 def _match_reveal_image(
     question_text: str,
     correct_answer: str,
-    explanation: str | None,
     images: list[dict],
     section_id: str | None,
 ) -> dict | None:
-    """Return a chart/map on Answer Reveal ONLY when its caption/description genuinely relates to this question."""
-    q_tokens = _topic_tokens(" ".join(filter(None, [question_text, correct_answer, explanation])))
+    """Return a chart/map on Answer Reveal ONLY from the same section AND when it directly matches the question."""
+    if not section_id:
+        return None
+    q_tokens = _topic_tokens(f"{question_text} {correct_answer}")
     if len(q_tokens) < 2:
         return None
-    best: tuple[float, dict] | None = None
+    best: tuple[int, dict] | None = None
     for img in images:
+        if img.get("section_id") != section_id:
+            continue
         img_tokens = _topic_tokens(" ".join(filter(None, [img.get("caption"), img.get("description")])))
         overlap = q_tokens & img_tokens
         if len(overlap) < 2:
             continue
-        score = len(overlap) + (0.5 if section_id and img.get("section_id") == section_id else 0.0)
-        if best is None or score > best[0]:
-            best = (score, img)
+        if best is None or len(overlap) > best[0]:
+            best = (len(overlap), img)
     return best[1] if best else None
 
 
@@ -797,17 +803,16 @@ async def _reveal(item: dict, run: dict, rules: dict) -> dict:
             row["description"] if row else None,
             row["width"] if row else None, row["height"] if row else None,
         )
-    elif item["slot"] not in ("fact_fake", *MUSIC_SLOTS) and item["question_id"]:
-        # Only attach a chart/map on Answer Reveal when its caption/description genuinely matches this question.
+    elif section_id and item["slot"] not in ("fact_fake", *MUSIC_SLOTS) and item["question_id"]:
+        # Only attach a chart/map from this same section when it directly matches the question & answer.
         candidates = await db.fetch(
             "select id, section_id, caption, description, width, height from doc_images"
-            " where quiz_id = $1 and usable is not false order by ordinal asc",
-            run["quiz_id"],
+            " where section_id = $1 and usable is not false order by ordinal asc",
+            section_id,
         )
         ref_img = _match_reveal_image(
             payload.get("text", ""),
             result["correctAnswer"],
-            result.get("explanation"),
             candidates,
             section_id,
         )

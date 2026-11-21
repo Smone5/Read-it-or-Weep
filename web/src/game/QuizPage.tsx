@@ -611,25 +611,32 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onStart, onResum
         </div>
 
         {switcherOpen && hasMultipleReports && (
-          <div className="mt-3 grid gap-1.5 rounded-lg border border-line bg-surface-2 p-2">
+          <div className="mt-3 flex flex-col gap-1.5 overflow-hidden rounded-lg border border-line bg-surface-2 p-2">
             {openReports.map((r) => {
               const current = r.slug === quiz.slug
               return (
                 <button
                   key={r.slug}
                   type="button"
-                  className="flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition hover:bg-surface"
-                  style={current ? { background: 'color-mix(in oklab, var(--brand) 20%, var(--surface))' } : undefined}
+                  className="flex w-full min-w-0 items-center justify-between gap-3 overflow-hidden rounded-md border px-3 py-2.5 text-left text-sm transition hover:bg-surface"
+                  style={{
+                    borderColor: current ? 'var(--brand)' : 'transparent',
+                    background: current ? 'color-mix(in oklab, var(--brand) 18%, var(--surface))' : 'transparent',
+                  }}
                   onClick={() => {
                     setSwitcherOpen(false)
                     if (!current) navigate(`/q/${r.slug}`)
                   }}
                 >
                   <span className="min-w-0 flex-1">
-                    <span className="block font-semibold leading-snug">{r.title}</span>
+                    <span className="block truncate font-semibold leading-snug">{r.title}</span>
                     {r.description && <span className="mt-0.5 block truncate text-xs text-muted">{r.description}</span>}
                   </span>
-                  {current && <IconCheck size={14} className="flex-none" style={{ color: 'var(--good)' }} />}
+                  {current && (
+                    <span className="pixel inline-flex flex-none items-center gap-1 text-[9px]" style={{ color: 'var(--good)' }}>
+                      <IconCheck size={12} /> Active
+                    </span>
+                  )}
                 </button>
               )
             })}

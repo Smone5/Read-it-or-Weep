@@ -221,33 +221,33 @@ def test_reveal_image_only_shows_when_actually_relevant_to_question():
          "description": "Grouped bar chart of Super Bowl XXXII (Green Bay), Super Bowl XXXIII (Atlanta), and Super Bowl 50 (Carolina)."},
         {"id": "map", "section_id": "s2",
          "caption": "Figure 2: Fan perimeter map showing gates, four-corner ramps, 50-yard elevators, RTD Light Rail, and rideshare zones.",
-         "description": "Bird's-eye perimeter map with Gate 5 rideshare drop-off and Ball Arena rideshare pick-up."},
+         "description": "Bird's-eye perimeter map with NW, NE, SW, SE ramps, Gate 5 rideshare drop-off, and Ball Arena pick-up."},
+        {"id": "food", "section_id": "s3",
+         "caption": "Figure 3: Level-by-level fan directory of food favorites, First Aid centers, and guest services.",
+         "description": "500 Level Upper Deck First Aid Sec 534, Cupbop 518, Chillville 539, 100 Level Reverse ATMs."},
     ]
     # Unrelated question in Section 5 (Thunder the mascot) must NOT pull up the Super Bowl chart!
     assert engine._match_reveal_image(
         "What does Thunder, the Broncos' live mascot, do after every Denver touchdown?",
         "Gallops across the field",
-        "Thunder gallops across the field after every Denver touchdown.",
         imgs,
         section_id="s5",
     ) is None
 
-    # Directly related Super Bowl question DOES match the Super Bowl chart.
+    # Directly related Super Bowl question DOES match Section 5's Super Bowl chart.
     matched_sb = engine._match_reveal_image(
         "Who earned Super Bowl XXXII MVP in Denver's win over Green Bay?",
         "Terrell Davis",
-        "Terrell Davis won MVP in Super Bowl XXXII against Green Bay.",
         imgs,
         section_id="s5",
     )
     assert matched_sb is not None and matched_sb["id"] == "sb"
 
-    # Rideshare question matches the Perimeter Map even from Section 1.
-    matched_map = engine._match_reveal_image(
-        "Where should rideshare riders walk after the game for pick-up?",
-        "Ball Arena near 5th and Walnut",
-        "Gate 5 is drop-off; post-game rideshare pick-up is at Ball Arena.",
+    # Section 2 ramp question matches Section 2's Perimeter Map (NEVER Section 3's food directory!).
+    matched_ramp = engine._match_reveal_image(
+        "From which parts of Empower Field can fans take an ADA-compliant pedestrian ramp all the way to the Upper Deck?",
+        "All four stadium corners",
         imgs,
-        section_id="s1",
+        section_id="s2",
     )
-    assert matched_map is not None and matched_map["id"] == "map"
+    assert matched_ramp is not None and matched_ramp["id"] == "map"
