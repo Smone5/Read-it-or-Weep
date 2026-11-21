@@ -140,6 +140,8 @@ let volume: JukeboxVolume = 'medium'
 let mix: JukeboxMix = MIX_AS_TUNED
 let on = false
 let paused = false
+let videoLock = 0 // ref-counted mute while an inline YouTube video clip is playing
+let tabHidden = false // silence music while the player switches to another tab (e.g. YouTube highlight)
 let needsTap = false
 let master: GainNode | null = null
 let carve: BiquadFilterNode | null = null
@@ -231,7 +233,7 @@ export function onMusicChange(listener: (on: boolean) => void): () => void {
 // --------------------------------------------------------------------------- state
 
 function wanted(): boolean {
-  return on && level !== 'out' && !paused && soundOn() && musicLevel > 0 && queue.length > 0
+  return on && level !== 'out' && !paused && videoLock === 0 && !tabHidden && soundOn() && musicLevel > 0 && queue.length > 0
 }
 
 function snapshot(): JukeboxState {
@@ -271,8 +273,8 @@ function goal(): number {
 
 /** Seconds to cover about two thirds of the way to a new level. Each kind of move has its own speed. */
 function settleFor(target: number): number {
-  // Into a music break the song fades away (about a second) as the clip comes in; anything else fades a little faster.
-  if (target === 0) return level === 'out' ? 0.45 : 0.3
+  // Into a music break the song fades away (about a second) as the clip comes in; a video clip ducks at once.
+  if (target === 0) return videoLock > 0 || tabHidden ? 0.12 : level === 'out' ? 0.45 : 0.3
   if (target < riding) {
     if (voiceIsOver()) return level === 'intro' ? 0.35 : 0.07 // the opening hands over to the host in a glide; a duck is quick
     if (level === 'linger') return 1.5 // the player is lingering on the answer: the music eases away
@@ -586,7 +588,17 @@ function onVoice() {
 
 function listen() {
   if (timer) return
-  stopListening = [onVoiceOver(onVoice), onSoundChange(sync)]
+  tabHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden'
+  const onVisibility = () => {
+    tabHidden = document.visibilityState === 'hidden'
+    if (on) sync()
+  }
+  document.addEventListener('visibilitychange', onVisibility)
+  stopListening = [
+    onVoiceOver(onVoice),
+    onSoundChange(sync),
+    () => document.removeEventListener('visibilitychange', onVisibility),
+  ]
   timer = window.setInterval(tick, TICK_MS)
 }
 
@@ -619,6 +631,13 @@ export function setJukeboxLevel(next: JukeboxLevel) {
   if (level === next) return
   level = next
   trace('jukebox.level', { level })
+  if (on) sync()
+}
+
+/** Mute/duck the soundtrack while an inline video clip plays, immune to level transitions (wait/swell/linger/party). */
+export function setJukeboxVideoPlaying(active: boolean) {
+  videoLock = Math.max(0, videoLock + (active ? 1 : -1))
+  trace('jukebox.video', { active, videoLock })
   if (on) sync()
 }
 

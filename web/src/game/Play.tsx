@@ -1024,7 +1024,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
                           {reveal.sourceQuote}
                         </blockquote>
                       )}
-                      {reveal.video && <VideoClipCard video={reveal.video} />}
+                      {reveal.video && <VideoClipCard video={reveal.video} onPlayStart={() => host?.skip()} />}
                     </>
                   )}
                 </section>

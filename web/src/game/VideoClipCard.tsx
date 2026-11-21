@@ -5,16 +5,16 @@
 
 import { useEffect, useState } from 'react'
 import { IconClose, IconExternal, IconPlay } from '../components/Icons'
-import { setJukeboxLevel } from '../lib/jukebox'
+import { setJukeboxVideoPlaying } from '../lib/jukebox'
 import type { VideoClip } from '../lib/types'
 
 type Props = {
   video: VideoClip
   compact?: boolean
-  restoreLevel?: 'wait' | 'party'
+  onPlayStart?: () => void
 }
 
-export function VideoClipCard({ video, compact = false, restoreLevel = 'wait' }: Props) {
+export function VideoClipCard({ video, compact = false, onPlayStart }: Props) {
   const [playing, setPlaying] = useState(false)
 
   useEffect(() => {
@@ -23,9 +23,10 @@ export function VideoClipCard({ video, compact = false, restoreLevel = 'wait' }:
 
   useEffect(() => {
     if (!playing) return
-    setJukeboxLevel('out')
-    return () => setJukeboxLevel(restoreLevel)
-  }, [playing, restoreLevel])
+    onPlayStart?.()
+    setJukeboxVideoPlaying(true)
+    return () => setJukeboxVideoPlaying(false)
+  }, [playing]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const canEmbed = Boolean(video.embedUrl)
 

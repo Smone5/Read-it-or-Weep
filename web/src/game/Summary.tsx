@@ -450,7 +450,7 @@ export default function Summary({
                             “{miss.sourceQuote}”
                           </blockquote>
                         )}
-                        {miss.video && <VideoClipCard video={miss.video} compact restoreLevel="party" />}
+                        {miss.video && <VideoClipCard video={miss.video} compact />}
                       </li>
                     ))}
                   </ol>
