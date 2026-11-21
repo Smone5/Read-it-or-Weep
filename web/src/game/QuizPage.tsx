@@ -205,7 +205,8 @@ export default function QuizPage() {
     setSummary(result)
     setScreen('summary')
     void load()
-    const party = result.afterParty
+    const answeredAny = result.report.answered + result.music.answered > 0
+    const party = answeredAny ? result.afterParty : null
     partyFor.current = result.runId
     soundtrackFor.current = null
     window.clearTimeout(summaryCueTimer.current)

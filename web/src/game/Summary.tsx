@@ -120,6 +120,8 @@ export default function Summary({
   const matchingChallenge =
     challenge && (!challenge.mode || challenge.mode === summary.mode) ? challenge : null
   const isCompleted = summary.status === 'completed'
+  const answeredAny = summary.report.answered + summary.music.answered > 0
+  const quitEmpty = !isCompleted && !answeredAny
   const isNewBest = Boolean(summary.personalBest && summary.score > 0 && isCompleted)
   const beatChallenge = Boolean(matchingChallenge && isCompleted && summary.score > matchingChallenge.score)
   const failed = summary.mode === 'straight' && summary.passed === false
@@ -142,11 +144,12 @@ export default function Summary({
   const canCertificate = !jukebox && completed && (summary.readiness.ready || summary.passed === true)
 
   const tabs = useMemo(() => {
+    if (quitEmpty) return []
     const list: { id: DebriefTab; label: string; badge: string; tone?: string }[] = []
     if (!jukebox && summary.readiness.total > 0) {
       list.push({
         id: 'readiness',
-        label: 'Readiness',
+        label: 'Overall readiness',
         badge: summary.readiness.ready ? 'Ready' : `${summary.readiness.cleared}/${summary.readiness.total}`,
         tone: summary.readiness.ready ? 'var(--good)' : undefined,
       })
@@ -166,7 +169,7 @@ export default function Summary({
       })
     }
     return list
-  }, [jukebox, summary.readiness.total, summary.readiness.ready, summary.readiness.cleared, summary.review.length, board, summary.rank])
+  }, [quitEmpty, jukebox, summary.readiness.total, summary.readiness.ready, summary.readiness.cleared, summary.review.length, board, summary.rank])
 
   const [activeTab, setActiveTab] = useState<DebriefTab>(() =>
     !jukebox && summary.readiness.total > 0 ? 'readiness' : summary.review.length > 0 ? 'missed' : 'standings',
@@ -328,7 +331,13 @@ export default function Summary({
 
   // Single highest-leverage hook line below the badge (prevents stacked metadata clutter).
   let hookNode: React.ReactNode = null
-  if (matchingChallenge && isCompleted) {
+  if (quitEmpty) {
+    hookNode = (
+      <span className="text-muted">
+        This run wasn&rsquo;t counted — your previous progress on this report is unchanged.
+      </span>
+    )
+  } else if (matchingChallenge && isCompleted) {
     hookNode = beatChallenge ? (
       <span className="font-semibold" style={{ color: 'var(--good)' }}>
         Beat {matchingChallenge.by} by +{(summary.score - matchingChallenge.score).toLocaleString()} pts!
@@ -433,7 +442,11 @@ export default function Summary({
             {kickerLabel}
           </p>
 
-          {summary.mode === 'straight' ? (
+          {quitEmpty ? (
+            <h1 className="mt-2 !normal-case text-2xl font-bold text-ink" style={{ fontFamily: 'var(--font-sans)' }}>
+              No questions answered
+            </h1>
+          ) : summary.mode === 'straight' ? (
             <>
               <h1 className="neon mt-2 text-3xl tabular-nums sm:text-4xl">
                 <span className="sr-only">{failed ? 'Quiz score: ' : 'Passed with '}</span>
@@ -474,16 +487,20 @@ export default function Summary({
           )}
         </header>
 
-        {/* Recessed 4-metric strip */}
-        <h2 className="sr-only">Run statistics</h2>
-        <dl className="mt-4 grid grid-cols-2 gap-3 rounded-lg border border-line bg-surface-2/70 px-3 py-2.5 sm:grid-cols-4">
-          {stats.map((stat) => (
-            <div key={stat.label} className="text-center">
-              <dt className="text-[11px] font-bold tracking-wider text-muted uppercase">{stat.label}</dt>
-              <dd className="mt-0.5 text-base font-bold tabular-nums text-ink">{stat.value}</dd>
-            </div>
-          ))}
-        </dl>
+        {/* Recessed 4-metric strip (omitted when quitting before answering anything) */}
+        {!quitEmpty && (
+          <>
+            <h2 className="sr-only">Run statistics</h2>
+            <dl className="mt-4 grid grid-cols-2 gap-3 rounded-lg border border-line bg-surface-2/70 px-3 py-2.5 sm:grid-cols-4">
+              {stats.map((stat) => (
+                <div key={stat.label} className="text-center">
+                  <dt className="text-[11px] font-bold tracking-wider text-muted uppercase">{stat.label}</dt>
+                  <dd className="mt-0.5 text-base font-bold tabular-nums text-ink">{stat.value}</dd>
+                </div>
+              ))}
+            </dl>
+          </>
+        )}
 
         {/* Primary CTA + Quiet Secondary Actions */}
         <div className="mt-4 flex flex-col gap-3">
@@ -526,8 +543,18 @@ export default function Summary({
         </div>
       </section>
 
-      {/* 2. Host sign-off directly beneath Card 1 (delayed appearance never shifts the score or Play Again CTA) */}
-      <HostBox name={hostName} line={hostLine} speaking={hostSpeaking} talk={talk} tone={hostTone} mood={completed ? 'happy' : 'wince'} />
+      {/* 2. Host sign-off directly beneath Card 1 (omitted on silent quit-early runs with no host line) */}
+      {(isCompleted || hostLine || hostSpeaking) && (
+        <HostBox
+          name={hostName}
+          line={hostLine}
+          speaking={hostSpeaking}
+          talk={talk}
+          tone={hostTone}
+          mood={completed ? 'happy' : 'wince'}
+          idleHint={`Tap the mic to talk to ${hostName} about your run.`}
+        />
+      )}
 
       {/* 3. Unified Tabbed Debrief Card (Readiness · Missed · Standings) */}
       {tabs.length > 0 && (
@@ -573,11 +600,14 @@ export default function Summary({
             >
               <div className="pt-4">
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-semibold" style={{ color: summary.readiness.ready ? 'var(--good)' : 'var(--ink)' }}>
-                    {summary.readiness.ready
-                      ? 'Ready for the meeting!'
-                      : `Clear ${sectionsNeeded} more section${sectionsNeeded === 1 ? '' : 's'} to be ready`}
-                  </p>
+                  <div>
+                    <p className="text-sm font-semibold" style={{ color: summary.readiness.ready ? 'var(--good)' : 'var(--ink)' }}>
+                      {summary.readiness.ready
+                        ? 'Ready for the meeting!'
+                        : `Clear ${sectionsNeeded} more section${sectionsNeeded === 1 ? '' : 's'} to be ready`}
+                    </p>
+                    <p className="text-xs text-muted">Cumulative progress across all your runs on this report</p>
+                  </div>
                   <div className="flex flex-wrap items-center gap-3 text-xs font-semibold">
                     {reportUrl && (
                       <a className="underline hover:opacity-80" style={{ color: 'var(--accent-text)' }} href={reportUrl} target="_blank" rel="noopener noreferrer">
@@ -646,7 +676,7 @@ export default function Summary({
                     <summary>
                       {sectionsToReview.length === 0
                         ? `All ${clearedSections.length} sections cleared`
-                        : `Show ${clearedSections.length} cleared section${clearedSections.length === 1 ? '' : 's'}`}
+                        : `Cleared sections (${clearedSections.length})`}
                     </summary>
                     <ul className="grid gap-1.5 pb-1 pt-1 sm:grid-cols-2">
                       {clearedSections.map((section) => (

@@ -37,6 +37,7 @@ export function HostBox({
   talk,
   mood = 'idle',
   tone = 'accent',
+  idleHint,
 }: {
   name: string
   line: string
@@ -44,6 +45,7 @@ export function HostBox({
   talk?: TalkControl | null
   mood?: 'idle' | 'happy' | 'wince'
   tone?: 'accent' | 'brand' | 'cyan' | 'rose'
+  idleHint?: string
 }) {
   const pressedAt = useRef(0)
   const pressing = useRef(false)
@@ -102,7 +104,11 @@ export function HostBox({
   if (listening) words = <span style={{ color: 'var(--accent)' }}>{tapped ? 'Listening… tap the mic again to send.' : 'Listening… let go when you are done.'}</span>
   else if (!line && thinking) words = <span className="text-white/60">…</span>
   else if (!line && !speaking) {
-    words = <span className="text-white/60">{talk?.problem ?? `Tap the mic to talk to ${name}: heckle, ask your score, or have the question read out.`}</span>
+    words = (
+      <span className="text-white/60">
+        {talk?.problem ?? idleHint ?? `Tap the mic to talk to ${name}: heckle, ask your score, or have the question read out.`}
+      </span>
+    )
   }
   return (
     <div className="dialogue rise flex items-center gap-3 px-3 pb-2.5 pt-3.5 text-[15px] leading-snug sm:gap-3.5 sm:px-3.5 sm:text-base">
