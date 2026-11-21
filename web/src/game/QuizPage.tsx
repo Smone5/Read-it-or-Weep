@@ -2,15 +2,18 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { ErrorNote, FullScreenMessage, Logo, Modal, SoundToggle, Spinner, Stage, untilText } from '../components/ui'
+import { HostCrt, hostToneFor } from '../components/HostCrt'
+import { IconPlay, IconStop, IconTrophy } from '../components/Icons'
+import { ErrorNote, FullScreenMessage, Logo, SoundToggle, Spinner, Stage, untilText } from '../components/ui'
 import { api, ApiError, session } from '../lib/api'
 import { HostVoice, type TalkState } from '../lib/hostVoice'
 import { setJukeboxLevel, startJukebox, startParty, stopJukebox } from '../lib/jukebox'
 import { unlockMusic } from '../lib/music'
 import { play, preloadSounds, unlockAudio } from '../lib/sound'
-import { applyBranding, applyDecade, DECADE_FLAVOUR, DECADE_LABEL } from '../lib/theme'
-import type { Leaderboard, ModeId, PlayerView, QuizInfo, Soundtrack, Summary as SummaryData, Turn } from '../lib/types'
-import { HighScores, ReadinessMap, type TalkControl } from './parts'
+import { applyBranding, applyDecade, DECADE_FLAVOUR, DECADE_LABEL, DECADE_SWATCH } from '../lib/theme'
+import type { ModeId, PlayerView, QuizInfo, Soundtrack, Summary as SummaryData, Turn } from '../lib/types'
+import { HighScoresScreen } from './HighScoresScreen'
+import { ReadinessMap, type TalkControl } from './parts'
 import Play from './Play'
 import Summary from './Summary'
 
@@ -66,6 +69,7 @@ export default function QuizPage() {
   const [talkAvailable, setTalkAvailable] = useState(false)
   const [talkProblem, setTalkProblem] = useState('')
   const [hostId, setHostId] = useState<string | null>(savedHost)
+  const [scoresView, setScoresView] = useState<{ from: 'lobby' | 'summary'; mode: ModeId } | null>(null)
 
   const chooseHost = (id: string) => {
     setHostId(id)
@@ -243,6 +247,21 @@ export default function QuizPage() {
     void start(last.mode, last.decade).catch(() => backToLobby()) // could not start one: the main menu instead
   }
 
+  /** From Office Jukebox warm-up straight into the quiz's main report game, keeping the player's decade and host. */
+  const playReport = () => {
+    if (!info) {
+      backToLobby()
+      return
+    }
+    const targetMode =
+      info.quiz.defaultMode !== 'jukebox'
+        ? info.quiz.defaultMode
+        : (info.quiz.modes.find((m) => m.id !== 'jukebox')?.id ?? 'show')
+    const decade = lastStart.current?.decade ?? summary?.decade ?? null
+    leaveResults()
+    void start(targetMode, decade).catch(() => backToLobby())
+  }
+
   if (fatal) {
     return <FullScreenMessage title="Hold on" action={<a className="btn btn-primary" href="/">Start page</a>}>{fatal}</FullScreenMessage>
   }
@@ -250,7 +269,9 @@ export default function QuizPage() {
     return <Stage className="grid place-items-center"><Spinner /></Stage>
   }
 
-  const hostName = info.branding.host.choices.find((choice) => choice.id === hostId)?.name ?? info.branding.host.name
+  const chosenHost = info.branding.host.choices.find((choice) => choice.id === hostId) ?? info.branding.host.choices[0]
+  const hostName = chosenHost?.name ?? info.branding.host.name
+  const hostTone = hostToneFor(chosenHost?.register)
   const talk: TalkControl | null = talkAvailable
     ? {
         state: talkState,
@@ -261,15 +282,53 @@ export default function QuizPage() {
     : null
   return (
     <Stage>
-      {screen === 'join' && <JoinForm info={info} onJoined={() => void load().then(() => setScreen('lobby'))} />}
-      {screen === 'lobby' && info.player && (
-        <Lobby info={info} player={info.player} hostId={hostId} onChooseHost={chooseHost} onStart={start} onResume={resume} onSwitchPlayer={() => { session.setPlayerToken(null); setInfo({ ...info, player: null }); setScreen('join') }} />
-      )}
-      {screen === 'play' && turn && (
-        <Play key={turn.state.runId} firstTurn={turn} resumed={resumed} hostName={hostName} hostLine={hostLine} hostSpeaking={hostSpeaking} host={hostRef.current} talk={talk} onDone={finished} />
-      )}
-      {screen === 'summary' && summary && (
-        <Summary slug={slug} summary={summary} hostName={hostName} hostLine={hostLine} hostSpeaking={hostSpeaking} talk={talk} showLeaderboard={info.quiz.leaderboard} onPlayAgain={playAgain} onMainMenu={backToLobby} />
+      {scoresView ? (
+        <HighScoresScreen
+          slug={slug}
+          quizTitle={info.quiz.title}
+          branding={info.branding}
+          initialMode={scoresView.mode}
+          modes={info.quiz.modes}
+          teams={info.quiz.teams}
+          bestByMode={info.player?.best}
+          backLabel={scoresView.from === 'summary' ? 'Results' : 'Lobby'}
+          onBack={() => setScoresView(null)}
+        />
+      ) : (
+        <>
+          {screen === 'join' && <JoinForm info={info} onJoined={() => void load().then(() => setScreen('lobby'))} />}
+          {screen === 'lobby' && info.player && (
+            <Lobby
+              info={info}
+              player={info.player}
+              hostId={hostId}
+              onChooseHost={chooseHost}
+              onStart={start}
+              onResume={resume}
+              onOpenScores={(selectedMode) => setScoresView({ from: 'lobby', mode: selectedMode })}
+              onSwitchPlayer={() => { session.setPlayerToken(null); setInfo({ ...info, player: null }); setScreen('join') }}
+            />
+          )}
+          {screen === 'play' && turn && (
+            <Play key={turn.state.runId} firstTurn={turn} resumed={resumed} hostName={hostName} hostLine={hostLine} hostSpeaking={hostSpeaking} hostTone={hostTone} host={hostRef.current} talk={talk} onDone={finished} />
+          )}
+          {screen === 'summary' && summary && (
+            <Summary
+              slug={slug}
+              summary={summary}
+              hostName={hostName}
+              hostLine={hostLine}
+              hostSpeaking={hostSpeaking}
+              hostTone={hostTone}
+              talk={talk}
+              showLeaderboard={info.quiz.leaderboard}
+              onOpenScores={() => setScoresView({ from: 'summary', mode: summary.mode })}
+              onPlayReport={info.quiz.modes.some((m) => m.id !== 'jukebox') ? playReport : undefined}
+              onPlayAgain={playAgain}
+              onMainMenu={backToLobby}
+            />
+          )}
+        </>
       )}
     </Stage>
   )
@@ -289,6 +348,8 @@ function JoinForm({ info, onJoined }: { info: QuizInfo; onJoined: () => void }) 
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
+    unlockAudio()
+    unlockMusic()
     setBusy(true)
     setError('')
     try {
@@ -308,7 +369,7 @@ function JoinForm({ info, onJoined }: { info: QuizInfo; onJoined: () => void }) 
   }
 
   return (
-    <div className="mx-auto flex min-h-[calc(100dvh-28px)] w-full max-w-md flex-col justify-center gap-5">
+    <div className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center gap-5 py-4 lg:max-w-lg">
       <header className="text-center">
         <div className="mb-4 flex justify-center"><Logo branding={branding} size={52} /></div>
         <h1 className="neon text-lg sm:text-2xl">{branding.gameTitle}</h1>
@@ -320,7 +381,7 @@ function JoinForm({ info, onJoined }: { info: QuizInfo; onJoined: () => void }) 
           <p className="chip chip-accent">{quiz.status === 'draft' ? 'Play-test · not open yet' : 'Now playing'}</p>
           <h2 className="mt-3 !normal-case text-[21px]" style={{ fontFamily: 'var(--font-sans)', lineHeight: 1.3 }}>{quiz.title}</h2>
           {quiz.description && <p className="mt-1 text-[15px] text-muted">{quiz.description}</p>}
-          {meeting && <p className="mt-2 text-[15px]" style={{ color: 'var(--accent)' }}>Meeting {meeting}</p>}
+          {meeting && <p className="mt-2 text-[15px]" style={{ color: 'var(--accent-text)' }}>Meeting {meeting}</p>}
         </div>
         <div>
           <label className="label" htmlFor="join-name">Your name</label>
@@ -346,7 +407,9 @@ function JoinForm({ info, onJoined }: { info: QuizInfo; onJoined: () => void }) 
           </div>
         )}
         <ErrorNote>{error}</ErrorNote>
-        <button className="btn btn-primary btn-lg" disabled={busy}>{busy ? 'Joining…' : 'Insert coin ▶'}</button>
+        <button className="btn btn-primary btn-lg" disabled={busy}>
+          {busy ? 'Joining…' : <>Insert coin <IconPlay size={14} /></>}
+        </button>
         <p className="text-center text-sm text-muted">No password. Your results are saved under your email so the organiser can see who is ready.</p>
       </form>
     </div>
@@ -362,19 +425,18 @@ type LobbyProps = {
   onChooseHost: (id: string) => void
   onStart: (mode: ModeId, decade: string | null) => Promise<void>
   onResume: (runId: string) => Promise<void>
+  onOpenScores: (mode: ModeId) => void
   onSwitchPlayer: () => void
 }
 
 const REGISTER_LABEL: Record<string, string> = { deeper: 'Deeper voice', middle: 'Mid voice', brighter: 'Brighter voice' }
 
-function Lobby({ info, player, hostId, onChooseHost, onStart, onResume, onSwitchPlayer }: LobbyProps) {
+function Lobby({ info, player, hostId, onChooseHost, onStart, onResume, onOpenScores, onSwitchPlayer }: LobbyProps) {
   const { quiz, branding } = info
   const [mode, setMode] = useState<ModeId>(quiz.defaultMode)
   const [decade, setDecade] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [board, setBoard] = useState<Leaderboard | null>(null)
-  const [boardOpen, setBoardOpen] = useState(false)
   const chosen = quiz.modes.find((m) => m.id === mode) ?? quiz.modes[0]
   const wantsDecade = chosen?.music && quiz.decades.length > 0
   const meeting = untilText(quiz.meetingAt)
@@ -421,128 +483,164 @@ function Lobby({ info, player, hostId, onChooseHost, onStart, onResume, onSwitch
     }
   }
 
-  const openBoard = async () => {
-    setBoardOpen(true)
-    setBoard(await api<Leaderboard>(`/api/quiz/${quiz.slug}/leaderboard?mode=${mode}`).catch(() => null))
-  }
-
   return (
-    <div className="mx-auto flex w-full max-w-2xl flex-col gap-4 pb-8">
+    <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-4 pb-8 lg:max-w-4xl">
       <header className="flex items-center gap-3">
         <Logo branding={branding} size={40} />
         <div className="min-w-0 flex-1">
-          <p className="pixel truncate text-[9px] text-muted">{branding.companyName}</p>
-          <p className="pixel neon truncate text-[11px] sm:text-sm">{branding.gameTitle}</p>
+          <p className="pixel truncate text-[10px] text-muted">{branding.companyName}</p>
+          <p className="pixel neon truncate text-xs sm:text-sm">{branding.gameTitle}</p>
         </div>
         <SoundToggle />
       </header>
 
-      <section className="card rise p-5">
-        <p className="pixel text-[9px] text-muted">Player 1</p>
-        <h1 className="mt-2 text-base sm:text-xl">Ready, {firstName}?</h1>
-        <p className="mt-3 !normal-case text-[19px]" style={{ fontFamily: 'var(--font-sans)' }}>{quiz.title}</p>
-        {meeting && <p className="mt-1" style={{ color: 'var(--accent)' }}>Meeting {meeting}</p>}
-        {!quiz.ready && <p className="mt-3" style={{ color: 'var(--bad)' }}>This quiz is still being prepared. Check back soon.</p>}
-      </section>
+      <div className="grid items-start gap-4 lg:grid-cols-12 lg:gap-5">
+        {/* Left column: player status, readiness map, game modes */}
+        <div className="flex flex-col gap-4 lg:col-span-7">
+          <section className="card rise p-5">
+            <p className="pixel text-[10px] text-muted">Player 1</p>
+            <h1 className="mt-2 text-base sm:text-xl">Ready, {firstName}?</h1>
+            <p className="mt-3 !normal-case text-[19px]" style={{ fontFamily: 'var(--font-sans)' }}>{quiz.title}</p>
+            {meeting && <p className="mt-1" style={{ color: 'var(--accent-text)' }}>Meeting {meeting}</p>}
+            {!quiz.ready && <p className="mt-3" style={{ color: 'var(--bad)' }}>This quiz is still being prepared. Check back soon.</p>}
+          </section>
 
-      {player.readiness.total > 0 && (
-        <section className="card p-5">
-          <ReadinessMap readiness={player.readiness} />
-        </section>
-      )}
+          {player.readiness.total > 0 && (
+            <section className="card p-5">
+              <ReadinessMap readiness={player.readiness} />
+            </section>
+          )}
 
-      {quiz.modes.length > 1 && (
-        <section>
-          <p className="pixel mb-2 text-[9px] text-muted">Choose your game</p>
-          <div className="grid gap-2.5 sm:grid-cols-2">
-            {quiz.modes.map((option) => (
-              <button
-                key={option.id}
-                className="answer !items-start flex-col !gap-1.5"
-                data-state={option.id === mode ? 'picked' : 'idle'}
-                style={{ ['--tone' as string]: 'var(--brand)' }}
-                onClick={() => { setMode(option.id); play('click') }}
-                aria-pressed={option.id === mode}
-              >
-                <span className="pixel text-[11px]">{option.name}</span>
-                <span className="text-[15px] text-muted">{option.tagline}</span>
-                {player.best[option.id] !== undefined && <span className="pixel text-[8px]" style={{ color: 'var(--accent)' }}>Your best {player.best[option.id]}</span>}
-              </button>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {wantsDecade && (
-        <section>
-          <p className="pixel mb-2 text-[9px] text-muted">Pick the music</p>
-          <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
-            <button className="answer !min-h-[54px] justify-center !px-1" data-state={decade === null ? 'picked' : 'idle'} style={{ ['--tone' as string]: 'var(--accent)' }} onClick={() => setDecade(null)} aria-pressed={decade === null} title="Surprise me">
-              <span className="pixel text-[10px]">Any</span>
-            </button>
-            {quiz.decades.map((d) => (
-              <button key={d} className="answer !min-h-[54px] justify-center !px-1" data-state={decade === d ? 'picked' : 'idle'} style={{ ['--tone' as string]: 'var(--accent)' }} onClick={() => { setDecade(d); play('click') }} aria-pressed={decade === d} title={DECADE_LABEL[d]}>
-                <span className="pixel text-[10px]">{d}</span>
-              </button>
-            ))}
-          </div>
-          <p className="mt-2 text-[15px] text-muted">{decade ? `${DECADE_LABEL[decade]} · ${DECADE_FLAVOUR[decade]}` : 'Surprise me'}</p>
-        </section>
-      )}
-
-      {chosen?.id !== 'straight' && quiz.decades.length > 0 && <FavouriteArtist initial={player.favoriteArtist ?? null} />}
-
-      {branding.host.choices.length > 1 && chosen?.id !== 'straight' && (
-        <section>
-          <p className="pixel mb-2 text-[9px] text-muted">Choose your host</p>
-          <div className={`grid grid-cols-2 gap-2.5 ${branding.host.choices.length >= 4 ? 'sm:grid-cols-4' : 'sm:grid-cols-3'}`}>
-            {branding.host.choices.map((choice, index) => {
-              const selected = hostId ? choice.id === hostId : index === 0
-              return (
-                <div key={choice.id} className="relative">
-                  <button className="answer w-full !items-start flex-col !gap-1 pr-12" data-state={selected ? 'picked' : 'idle'} style={{ ['--tone' as string]: 'var(--accent)' }} onClick={() => { onChooseHost(choice.id); play('click') }} aria-pressed={selected}>
-                    <span className="pixel text-[11px]">{choice.name}</span>
-                    <span className="text-[14px] text-muted">{choice.label ?? REGISTER_LABEL[choice.register] ?? 'Host'}</span>
+          {quiz.modes.length > 1 && (
+            <section>
+              <p className="pixel mb-2 text-[10px] text-muted">Choose your game</p>
+              <div className="grid gap-2.5 sm:grid-cols-2">
+                {quiz.modes.map((option) => (
+                  <button
+                    key={option.id}
+                    className="answer flex-col items-start gap-1.5"
+                    data-state={option.id === mode ? 'picked' : 'idle'}
+                    style={{ ['--tone' as string]: 'var(--brand)' }}
+                    onClick={() => { setMode(option.id); play('click') }}
+                    aria-pressed={option.id === mode}
+                  >
+                    <span className="pixel text-[11px]">{option.name}</span>
+                    <span className="text-[15px] text-muted">{option.tagline}</span>
+                    {player.best[option.id] !== undefined && <span className="pixel text-[9px]" style={{ color: 'var(--accent-text)' }}>Your best {player.best[option.id]}</span>}
                   </button>
-                  {branding.host.voiceEnabled && (
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-sm absolute right-1.5 top-1/2 h-9 w-9 -translate-y-1/2 !p-0"
-                      onClick={() => hear(choice.id)}
-                      aria-label={hearing?.id === choice.id ? `Stop ${choice.name}` : `Hear ${choice.name}`}
-                      title={hearing?.id === choice.id ? 'Stop' : `Hear ${choice.name}`}
-                    >
-                      <span aria-hidden>{hearing?.id === choice.id ? (hearing.playing ? '■' : '…') : '▶'}</span>
-                    </button>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        </section>
-      )}
-
-      <ErrorNote>{error}</ErrorNote>
-
-      {player.unfinishedRun && (
-        <button className="btn btn-accent btn-lg" disabled={busy} onClick={() => void go(() => onResume(player.unfinishedRun!.id))}>Continue your game ▶</button>
-      )}
-      <button className={`btn btn-primary btn-lg ${busy ? '' : 'blink-off'}`} disabled={busy || !quiz.ready} onClick={() => void go(() => onStart(mode, wantsDecade ? decade : null))}>
-        {busy ? 'Loading…' : player.unfinishedRun ? 'Start a new game' : 'Press start ▶'}
-      </button>
-      <div className="grid grid-cols-2 gap-3">
-        {quiz.leaderboard ? <button className="btn btn-ghost" onClick={() => void openBoard()}>High scores</button> : <span />}
-        <button className="btn btn-ghost" onClick={onSwitchPlayer}>Not {firstName}?</button>
-      </div>
-      {branding.supportEmail && <p className="text-center text-sm text-muted">Trouble? <a className="underline" href={`mailto:${branding.supportEmail}`}>{branding.supportEmail}</a></p>}
-
-      <Modal open={boardOpen} onClose={() => setBoardOpen(false)}>
-        <div className="arcade">
-          <h2 className="neon mb-4 text-sm">High scores · {chosen?.name}</h2>
-          {board ? <HighScores board={board} /> : <Spinner />}
-          <button className="btn btn-primary mt-5 w-full" onClick={() => setBoardOpen(false)}>Close</button>
+                ))}
+              </div>
+            </section>
+          )}
         </div>
-      </Modal>
+
+        {/* Right column: music vibe, host CRT picker, start actions */}
+        <div className="flex flex-col gap-4 lg:col-span-5">
+          {wantsDecade && (
+            <section className="card p-4">
+              <p className="pixel mb-2.5 text-[10px] text-muted">Pick the music</p>
+              <div className="grid grid-cols-3 gap-2 sm:grid-cols-9 lg:grid-cols-3">
+                <button
+                  className="answer min-h-[52px] flex-col justify-center gap-1 px-1.5 py-2"
+                  data-state={decade === null ? 'picked' : 'idle'}
+                  style={{ ['--tone' as string]: 'var(--accent)' }}
+                  onClick={() => setDecade(null)}
+                  aria-pressed={decade === null}
+                  title="Surprise me"
+                >
+                  <span className="pixel text-[10px]">Any</span>
+                  <span className="h-1.5 w-7 rounded-full" style={{ background: 'linear-gradient(90deg, var(--brand), var(--accent))' }} aria-hidden />
+                </button>
+                {quiz.decades.map((d) => {
+                  const [c1, c2] = DECADE_SWATCH[d] ?? ['var(--brand)', 'var(--accent)']
+                  return (
+                    <button
+                      key={d}
+                      className="answer min-h-[52px] flex-col justify-center gap-1 px-1.5 py-2"
+                      data-state={decade === d ? 'picked' : 'idle'}
+                      style={{ ['--tone' as string]: c1 }}
+                      onClick={() => { setDecade(d); play('click') }}
+                      aria-pressed={decade === d}
+                      title={DECADE_LABEL[d]}
+                    >
+                      <span className="pixel text-[10px]">{d}</span>
+                      <span className="h-1.5 w-7 rounded-full" style={{ background: `linear-gradient(90deg, ${c1}, ${c2})` }} aria-hidden />
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="mt-2.5 text-[15px] text-muted">{decade ? `${DECADE_LABEL[decade]} · ${DECADE_FLAVOUR[decade]}` : 'Surprise me'}</p>
+            </section>
+          )}
+
+          {chosen?.id !== 'straight' && quiz.decades.length > 0 && <FavouriteArtist initial={player.favoriteArtist ?? null} />}
+
+          {branding.host.choices.length > 1 && chosen?.id !== 'straight' && (
+            <section>
+              <p className="pixel mb-2 text-[10px] text-muted">Choose your host</p>
+              <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-1">
+                {branding.host.choices.map((choice, index) => {
+                  const selected = hostId ? choice.id === hostId : index === 0
+                  const isHearing = hearing?.id === choice.id
+                  const tone = hostToneFor(choice.register)
+                  return (
+                    <div key={choice.id} className="flex items-stretch gap-2">
+                      <button
+                        className="answer min-w-0 flex-1 items-center gap-3 py-2.5"
+                        data-state={selected ? 'picked' : 'idle'}
+                        style={{ ['--tone' as string]: 'var(--accent)' }}
+                        onClick={() => { onChooseHost(choice.id); play('click') }}
+                        aria-pressed={selected}
+                      >
+                        <HostCrt size="sm" tone={tone} state={isHearing && hearing.playing ? 'speaking' : isHearing ? 'thinking' : 'idle'} />
+                        <span className="min-w-0 flex-1">
+                          <span className="pixel block truncate text-[11px]">{choice.name}</span>
+                          <span className="block truncate text-[14px] text-muted">{choice.label ?? REGISTER_LABEL[choice.register] ?? 'Host'}</span>
+                        </span>
+                      </button>
+                      {branding.host.voiceEnabled && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost min-w-[48px] flex-none px-0"
+                          onClick={() => hear(choice.id)}
+                          aria-label={isHearing ? `Stop ${choice.name}` : `Hear ${choice.name}`}
+                          title={isHearing ? 'Stop' : `Hear ${choice.name}`}
+                        >
+                          {isHearing ? (hearing.playing ? <IconStop size={14} /> : <span className="pixel text-[10px]">…</span>) : <IconPlay size={14} />}
+                        </button>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
+          )}
+
+          <ErrorNote>{error}</ErrorNote>
+
+          <div className="flex flex-col gap-3">
+            {player.unfinishedRun && (
+              <button className="btn btn-accent btn-lg w-full" disabled={busy} onClick={() => void go(() => onResume(player.unfinishedRun!.id))}>
+                Continue your game <IconPlay size={14} />
+              </button>
+            )}
+            <button className="btn btn-primary btn-lg w-full" disabled={busy || !quiz.ready} onClick={() => void go(() => onStart(mode, wantsDecade ? decade : null))}>
+              {busy ? 'Loading…' : player.unfinishedRun ? 'Start a new game' : <>Press start <IconPlay size={14} /></>}
+            </button>
+            <div className="grid grid-cols-2 gap-3">
+              {quiz.leaderboard ? (
+                <button className="btn btn-ghost" onClick={() => onOpenScores(mode)}>
+                  <IconTrophy size={14} style={{ color: 'var(--accent)' }} /> High scores
+                </button>
+              ) : (
+                <span />
+              )}
+              <button className="btn btn-ghost" onClick={onSwitchPlayer}>Not {firstName}?</button>
+            </div>
+          </div>
+          {branding.supportEmail && <p className="text-center text-sm text-muted">Trouble? <a className="underline" href={`mailto:${branding.supportEmail}`}>{branding.supportEmail}</a></p>}
+        </div>
+      </div>
     </div>
   )
 }

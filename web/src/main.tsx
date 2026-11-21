@@ -2,6 +2,7 @@ import { lazy, StrictMode, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { FullScreenMessage, Spinner } from './components/ui'
+import HighScoresPage from './game/HighScoresScreen'
 import HomePage from './game/HomePage'
 import QuizPage from './game/QuizPage'
 import HostScreen from './live/HostScreen'
@@ -29,6 +30,7 @@ createRoot(document.getElementById('root')!).render(
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/q/:slug" element={<QuizPage />} />
+          <Route path="/q/:slug/scores" element={<HighScoresPage />} />
           <Route path="/live" element={<LivePlayer />} />
           <Route path="/live/:code" element={<LivePlayer />} />
           <Route path="/host/:code" element={<HostScreen />} />

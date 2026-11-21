@@ -106,7 +106,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # Plus how long the theme plays on its own before the host, and whether it eases off while a player lingers.
         "mix": {"opening": 0, "opening_sec": 6, "under_host": 0, "questions": 0, "between": 0, "ease_down": True},
         "decades": ["60s", "70s", "80s", "90s", "00s", "10s", "20s"],
-        "picture_mode": "auto",           # auto | show | memory
+        "picture_mode": "show",           # show | auto | memory
         "ready_threshold": 80,            # % of sections cleared to count as "ready"
         "leaderboard": True,
         "show": {

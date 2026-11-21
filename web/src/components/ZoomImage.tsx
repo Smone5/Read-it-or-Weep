@@ -1,13 +1,19 @@
-// A picture you can pinch, drag and double-tap, like a photo on a phone.
+// A picture you can pinch, drag and double-tap, like a photo on a phone, or wheel-zoom and pan on desktop.
 //
 // Charts from a report are drawn for a page, not for a pocket: at phone width their labels are a
 // few pixels tall. So wherever the game shows a picture it can be enlarged in place with two
 // fingers, and opened full screen – where a wide picture is turned on its side to use the long
 // edge of the phone, which roughly doubles its size before any zooming at all.
 
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type Ref } from 'react'
+import { IconClose, IconRotate, IconZoomIn, IconZoomOut } from './Icons'
 
 type Size = { w: number; h: number }
+
+export type ZoomHandle = {
+  zoomBy: (factor: number) => void
+  reset: () => void
+}
 
 type ZoomImageProps = {
   src: string
@@ -25,6 +31,8 @@ type ZoomImageProps = {
   onTap?: () => void
   /** The picture's own size, once known. */
   onSize?: (size: Size) => void
+  onZoomChange?: (zoom: number) => void
+  zoomRef?: Ref<ZoomHandle>
   maxZoom?: number
   className?: string
   style?: React.CSSProperties
@@ -39,12 +47,13 @@ const clamp = (value: number, low: number, high: number) => Math.min(high, Math.
 
 const MOST_COVER = 2.8 // never start more zoomed-in than this, however wide the picture
 
-export function ZoomImage({ src, alt, quarterTurn = false, doubleTapZoom = false, cover = false, onTap, onSize, maxZoom = 6, className = '', style, children }: ZoomImageProps) {
+export function ZoomImage({ src, alt, quarterTurn = false, doubleTapZoom = false, cover = false, onTap, onSize, onZoomChange, zoomRef, maxZoom = 6, className = '', style, children }: ZoomImageProps) {
   const frame = useRef<HTMLDivElement>(null)
   const image = useRef<HTMLImageElement>(null)
   const [natural, setNatural] = useState<Size | null>(null)
   const [box, setBox] = useState<Size>({ w: 0, h: 0 })
   const [zoomed, setZoomed] = useState(false)
+  const [dragging, setDragging] = useState(false)
   const [tall, setTall] = useState(false) // zoomed in so far that it also overflows up and down
   const [touched, setTouched] = useState(false)
   // Zoom is relative to "fits the frame"; x and y are how far the picture's centre sits from the frame's, in screen pixels.
@@ -71,7 +80,8 @@ export function ZoomImage({ src, alt, quarterTurn = false, doubleTapZoom = false
     picture.style.transform = `translate(-50%, -50%) translate(${v.x}px, ${v.y}px) rotate(${quarterTurn ? 90 : 0}deg) scale(${fit * v.zoom})`
     setZoomed(v.zoom > 1.02)
     setTall(spareY > 1)
-  }, [fit, box.w, box.h, shownWide, shownTall, quarterTurn, maxZoom])
+    onZoomChange?.(v.zoom)
+  }, [fit, box.w, box.h, shownWide, shownTall, quarterTurn, maxZoom, onZoomChange])
 
   /** Where a picture starts: the whole of it, or (cover) filling the height from its left-hand end. */
   const home = useCallback(() => {
@@ -86,6 +96,21 @@ export function ZoomImage({ src, alt, quarterTurn = false, doubleTapZoom = false
     const ratio = next / from.zoom
     view.current = { zoom: next, x: cx - (cx - from.x) * ratio, y: cy - (cy - from.y) * ratio }
   }, [maxZoom])
+
+  useImperativeHandle(
+    zoomRef,
+    () => ({
+      zoomBy: (factor: number) => {
+        zoomAbout(view.current.zoom * factor, 0, 0)
+        paint()
+      },
+      reset: () => {
+        view.current = home()
+        paint()
+      },
+    }),
+    [zoomAbout, paint, home],
+  )
 
   // Follow the frame's size (the phone turning, the layout settling).
   useEffect(() => {
@@ -133,6 +158,7 @@ export function ZoomImage({ src, alt, quarterTurn = false, doubleTapZoom = false
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerType === 'mouse' && event.button !== 0) return
     setTouched(true)
+    if (view.current.zoom > 1.02) setDragging(true)
     try {
       event.currentTarget.setPointerCapture(event.pointerId) // keep following a finger that slides off the picture
     } catch {
@@ -174,6 +200,7 @@ export function ZoomImage({ src, alt, quarterTurn = false, doubleTapZoom = false
     if (fingers.current.size >= 2) startPinch()
     else pinch.current = null
     if (fingers.current.size > 0) return
+    setDragging(false)
     const tap = press.current
     press.current = null
     if (view.current.zoom < 1.04) {
@@ -200,7 +227,11 @@ export function ZoomImage({ src, alt, quarterTurn = false, doubleTapZoom = false
       className={`relative overflow-hidden select-none ${className}`}
       // An up-and-down drag scrolls the page for as long as the picture has nothing more to show that way;
       // sideways drags (and every drag, once it is zoomed in further) move the picture.
-      style={{ touchAction: doubleTapZoom || tall ? 'none' : 'pan-y', cursor: zoomed ? 'grab' : onTap ? 'zoom-in' : 'default', ...style }}
+      style={{
+        touchAction: doubleTapZoom || tall ? 'none' : 'pan-y',
+        cursor: dragging ? 'grabbing' : zoomed ? 'grab' : onTap ? 'zoom-in' : 'default',
+        ...style,
+      }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -220,7 +251,7 @@ export function ZoomImage({ src, alt, quarterTurn = false, doubleTapZoom = false
         style={{ width: natural?.w, height: natural?.h, visibility: fit ? 'visible' : 'hidden', transformOrigin: 'center' }}
       />
       {cover && zoomed && !touched && (
-        <span className="pixel pointer-events-none absolute bottom-1.5 left-1.5 rounded-sm bg-black/75 px-2 py-1.5 text-[8px] text-white" aria-hidden>
+        <span className="pixel pointer-events-none absolute bottom-2 left-2 rounded-sm bg-black/80 px-2.5 py-1.5 text-[10px] text-white" aria-hidden>
           ← swipe →
         </span>
       )}
@@ -239,50 +270,104 @@ type ViewerProps = {
   onClose: () => void
 }
 
-/** The picture on its own, using the whole screen. */
+/** The picture on its own, using the whole screen in a native modal top-layer dialog. */
 export function PictureViewer({ src, alt, secondsLeft, caption, onClose }: ViewerProps) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const zoomRef = useRef<ZoomHandle>(null)
   const [size, setSize] = useState<Size | null>(null)
   const [turned, setTurned] = useState<boolean | null>(null) // null = decide from the picture and the screen
   const [upright, setUpright] = useState(() => window.innerHeight > window.innerWidth * 1.15)
+  const [zoom, setZoom] = useState(1)
+  const [isDesktop, setIsDesktop] = useState(() => window.matchMedia('(hover: hover) and (pointer: fine)').matches)
 
   useEffect(() => {
+    const dialog = dialogRef.current
+    if (dialog && !dialog.open) dialog.showModal()
+    const media = window.matchMedia('(hover: hover) and (pointer: fine)')
+    const onMedia = () => setIsDesktop(media.matches)
     const onResize = () => setUpright(window.innerHeight > window.innerWidth * 1.15)
-    const onKey = (event: KeyboardEvent) => event.key === 'Escape' && onClose()
     window.addEventListener('resize', onResize)
-    window.addEventListener('keydown', onKey)
+    media.addEventListener('change', onMedia)
     const scroll = document.documentElement.style.overflow
-    document.documentElement.style.overflow = 'hidden' // the page behind must not scroll under the fingers
+    document.documentElement.style.overflow = 'hidden'
     return () => {
       window.removeEventListener('resize', onResize)
-      window.removeEventListener('keydown', onKey)
+      media.removeEventListener('change', onMedia)
       document.documentElement.style.overflow = scroll
+      if (dialog?.open) dialog.close()
     }
-  }, [onClose])
+  }, [])
 
   // A wide picture on an upright phone is shown on its side: it then uses the long edge of the screen.
   const wide = size ? size.w > size.h * 1.15 : false
   const quarterTurn = turned ?? (wide && upright)
 
   return (
-    <div className="arcade fixed inset-0 z-50 bg-black" role="dialog" aria-modal="true" aria-label="The picture, full screen">
+    <dialog
+      ref={dialogRef}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      className="arcade fixed inset-0 z-50 m-0 h-dvh max-h-none w-screen max-w-none bg-[#06050f] p-0 text-white backdrop:bg-black/90"
+      aria-label="The picture, full screen"
+    >
       <div className="absolute inset-0">
-        <ZoomImage src={src} alt={alt} quarterTurn={quarterTurn} doubleTapZoom onSize={setSize} className="h-full w-full" />
+        <ZoomImage src={src} alt={alt} quarterTurn={quarterTurn} doubleTapZoom onSize={setSize} onZoomChange={setZoom} zoomRef={zoomRef} className="h-full w-full" />
       </div>
-      <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-3" style={{ paddingTop: 'max(12px, env(safe-area-inset-top))' }}>
-        <button className="btn btn-primary btn-sm pointer-events-auto" onClick={onClose} autoFocus>✕ Back</button>
+      <div
+        className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-3"
+        style={{ paddingTop: 'max(12px, env(safe-area-inset-top))' }}
+      >
+        <button className="btn btn-primary btn-sm pointer-events-auto" onClick={onClose} autoFocus>
+          <IconClose size={13} /> Back <span className="kbd">ESC</span>
+        </button>
         {secondsLeft != null && (
-          <span className="pixel rounded-sm bg-black/80 px-2.5 py-2 text-sm" style={{ color: secondsLeft <= 5 ? 'var(--bad)' : 'var(--accent)' }} role="timer" aria-label="Time left">
-            {secondsLeft}
+          <span
+            className="pixel rounded-sm border-2 bg-black/85 px-3 py-2 text-sm tabular-nums"
+            style={{
+              borderColor: secondsLeft <= 5 ? 'var(--bad)' : 'var(--accent)',
+              color: secondsLeft <= 5 ? 'var(--bad)' : 'var(--accent)',
+            }}
+            role="timer"
+            aria-label="Time left"
+          >
+            {secondsLeft}s
           </span>
         )}
-        <button className="btn btn-ghost btn-sm pointer-events-auto !bg-black/70" style={{ fontFamily: 'system-ui, sans-serif' }} onClick={() => setTurned(!quarterTurn)} aria-label="Turn the picture" title="Turn the picture">
-          <span className="text-lg leading-none">⟳</span>
-        </button>
+        <div className="pointer-events-auto flex items-center gap-1.5">
+          {isDesktop && (
+            <>
+              <button className="btn btn-ghost btn-sm bg-black/75" onClick={() => zoomRef.current?.zoomBy(1 / 1.45)} disabled={zoom <= 1.02} aria-label="Zoom out" title="Zoom out">
+                <IconZoomOut size={15} />
+              </button>
+              <button className="btn btn-ghost btn-sm bg-black/75 tabular-nums" onClick={() => zoomRef.current?.reset()} disabled={zoom <= 1.02} aria-label="Reset zoom" title="Reset zoom">
+                {Math.round(zoom * 100)}%
+              </button>
+              <button className="btn btn-ghost btn-sm bg-black/75" onClick={() => zoomRef.current?.zoomBy(1.45)} disabled={zoom >= 5.9} aria-label="Zoom in" title="Zoom in">
+                <IconZoomIn size={15} />
+              </button>
+            </>
+          )}
+          <button
+            className="btn btn-ghost btn-sm bg-black/75"
+            onClick={() => setTurned(!quarterTurn)}
+            aria-label="Turn the picture"
+            title="Turn the picture"
+          >
+            <IconRotate size={15} />
+          </button>
+        </div>
       </div>
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent px-4 pb-3 pt-8 text-center" style={{ paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }}>
-        {caption && <p className="mx-auto line-clamp-2 max-w-xl text-[15px] text-white">{caption}</p>}
-        <p className="pixel mt-1.5 text-[8px] text-white/60">Pinch or double-tap to zoom · drag to move</p>
+      <div
+        className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 to-transparent px-4 pb-3 pt-8 text-center"
+        style={{ paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }}
+      >
+        {caption && <p className="mx-auto line-clamp-2 max-w-2xl text-[15px] text-white">{caption}</p>}
+        <p className="mt-1.5 text-xs tracking-wider text-white/65 uppercase">
+          {isDesktop ? 'Scroll or use + / − to zoom · drag to pan · Esc to close' : 'Pinch or double-tap to zoom · drag to move'}
+        </p>
       </div>
-    </div>
+    </dialog>
   )
 }

@@ -342,8 +342,15 @@ async def state(session: dict, *, host: bool, player: dict | None) -> dict:
         "decade": session["settings"].get("decade"),
     }
     if me:
-        view["you"] = {"name": me["display_name"], "score": me["score"], "rank": me["rank"], "streak": me["streak"],
-                       "headStart": me["head_start"]}
+        you_view: dict[str, Any] = {
+            "name": me["display_name"], "score": me["score"], "rank": me["rank"], "streak": me["streak"],
+            "headStart": me["head_start"],
+        }
+        if me["rank"] > 1:
+            ahead = standings[me["rank"] - 2]
+            you_view["gapToNext"] = max(0, ahead["score"] - me["score"])
+            you_view["aheadName"] = ahead["display_name"]
+        view["you"] = you_view
     elif not host:
         view["you"] = None
 
@@ -393,9 +400,19 @@ async def state(session: dict, *, host: bool, player: dict | None) -> dict:
                                        "points": mine["points"]} if mine else {"selectedIndex": None, "correct": False, "points": 0})
         return view
 
-    top = [{"rank": s["rank"], "name": s["display_name"], "team": s["team"], "score": s["score"],
-            "streak": s["streak"]} for s in standings[:10 if status == "finished" else 5]]
-    view["standings"] = top
+    def _standing_row(s: dict) -> dict[str, Any]:
+        row = {"rank": s["rank"], "name": s["display_name"], "team": s["team"], "score": s["score"],
+               "streak": s["streak"]}
+        if me is not None:
+            row["you"] = s["player_id"] == me["player_id"]
+        return row
+
+    cap = (16 if status == "finished" else 10) if host else 25
+    view["standings"] = [_standing_row(s) for s in standings[:cap]]
+    if me is not None and not host and me["rank"] > cap:
+        idx = me["rank"] - 1
+        start = max(cap, idx - 1)
+        view["aroundYou"] = [_standing_row(s) for s in standings[start:idx + 2]]
     view["teams"] = _teams(standings)
     if status == "finished":
         totals = await db.fetch(
@@ -406,9 +423,11 @@ async def state(session: dict, *, host: bool, player: dict | None) -> dict:
             source = items[row["question_index"]]
             if source["kind"] != "mcq" or not row["answered"]:
                 continue
-            missed.append({"text": source["text"], "correctAnswer": source["options"][source["correct_index"]],
-                           "section": source.get("section"), "explanation": source.get("explanation"),
-                           "percentCorrect": round(100 * row["correct"] / row["answered"])})
+            pct = round(100 * row["correct"] / row["answered"])
+            if pct < 75:
+                missed.append({"text": source["text"], "correctAnswer": source["options"][source["correct_index"]],
+                               "section": source.get("section"), "explanation": source.get("explanation"),
+                               "percentCorrect": pct})
         view["roomMissed"] = sorted(missed, key=lambda m: m["percentCorrect"])[:3]
         if host and session["settings"].get("after_party") and session["settings"].get("decade"):
             # Music for the room while the results are up (the same list every time this is asked for).

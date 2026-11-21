@@ -60,7 +60,7 @@ export type QuizInfo = { branding: Branding; quiz: QuizView; player: PlayerView 
 
 export type Slot = 'report' | 'image' | 'music' | 'fact_fake' | 'second_chance' | 'final' | 'jargon' | 'song_or_jargon'
 
-export type ItemImage = { url: string; alt: string; mode: 'show' | 'memory' }
+export type ItemImage = { url: string; alt: string; mode: 'show' | 'memory'; width?: number | null; height?: number | null }
 
 export type Item = {
   id: string
@@ -180,14 +180,42 @@ export type Summary = {
   previousBest: number | null
 }
 
-export type LeaderboardEntry = { rank: number; name: string; team: string | null; score: number; badge: string | null; decade: string | null; passed: boolean | null; you: boolean }
+export type LeaderboardEntry = {
+  rank: number
+  name: string
+  team: string | null
+  score: number
+  badge: string | null
+  decade: string | null
+  passed: boolean | null
+  you: boolean
+  gapToNext?: number
+  aheadName?: string
+}
+
+export type PlayerRunRecord = {
+  id: string
+  score: number
+  badge: string | null
+  passed: boolean | null
+  streakMax: number
+  correct: number
+  answered: number
+  finishedAt: string | null
+  isBest: boolean
+}
 
 export type Leaderboard = {
   mode: ModeId
   modeName: string
+  team?: string | null
   entries: LeaderboardEntry[]
+  aroundYou?: LeaderboardEntry[]
+  yourRuns?: PlayerRunRecord[]
   you: LeaderboardEntry | null
   players: number
+  matched?: number
+  hasMore?: boolean
   teams: { team: string; average: number; players: number }[]
 }
 
@@ -221,7 +249,7 @@ export type LiveState = {
   serverNow: string
   role: 'host' | 'player'
   decade: string | null
-  you?: { name: string; score: number; rank: number; streak: number; headStart: number } | null
+  you?: { name: string; score: number; rank: number; streak: number; headStart: number; gapToNext?: number; aheadName?: string } | null
   roster?: { name: string; team: string | null; prepared: boolean }[]
   headStart?: number
   question?: LiveQuestion
@@ -234,7 +262,8 @@ export type LiveState = {
     sourceQuote: string | null
     music?: { artist: string; title: string; artworkUrl: string | null }
   }
-  standings?: { rank: number; name: string; team: string | null; score: number; streak: number }[]
+  standings?: { rank: number; name: string; team: string | null; score: number; streak: number; you?: boolean }[]
+  aroundYou?: { rank: number; name: string; team: string | null; score: number; streak: number; you?: boolean }[]
   teams?: { team: string; average: number; players: number }[]
   roomMissed?: { text: string; correctAnswer: string; section: string | null; explanation: string | null; percentCorrect: number }[]
   /** Big screen only, once the game is over: music for the room while the results are up. */

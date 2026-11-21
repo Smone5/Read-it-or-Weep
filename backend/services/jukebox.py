@@ -127,11 +127,13 @@ async def jargon_item(tracks: list[dict], avoid: set) -> dict | None:
     return None
 
 
-def song_or_jargon_item(tracks: list[dict], avoid: set, phrases_used: set[str]) -> dict | None:
+def song_or_jargon_item(tracks: list[dict], avoid: set, phrases_used: set[str],
+                        prefer_song: bool | None = None) -> dict | None:
     """A Song or Synergy? question: a phrase that is either a hit's title or a piece of office jargon."""
     fresh = [t for t in tracks if t["id"] not in avoid and len(clean_title(t["title"]).split()) <= 6]
     phrases = [p for p in OFFICE_JARGON if p not in phrases_used]
-    if fresh and (not phrases or random.random() < 0.5):
+    pick_song = (random.random() < 0.5) if prefer_song is None else prefer_song
+    if fresh and (not phrases or pick_song):
         track = random.choice(fresh)
         title = clean_title(track["title"])
         return {"track": track, "correct_index": 0,

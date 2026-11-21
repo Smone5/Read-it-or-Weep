@@ -6,12 +6,14 @@
 // has finished, this screen tells the server to open the question, and the clock (and a music
 // clip) start together a beat later. Moving on while he is talking cuts him off cleanly.
 
+import confetti from 'canvas-confetti'
 import QRCode from 'qrcode'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { FullScreenMessage, SoundToggle, Spinner, Stage } from '../components/ui'
+import { IconBolt, IconCheck, IconCrown, IconPlay, IconStar } from '../components/Icons'
 import { NowPlaying } from '../components/NowPlaying'
-import { HostBox, LETTERS, TONES } from '../game/parts'
+import { FullScreenMessage, SoundToggle, Spinner, Stage } from '../components/ui'
+import { formatScore, HostBox, LETTERS, TONE_INKS, TONES } from '../game/parts'
 import { startParty, stopJukebox } from '../lib/jukebox'
 import { api } from '../lib/api'
 import { HostVoice } from '../lib/hostVoice'
@@ -150,7 +152,9 @@ export default function HostScreen() {
       host?.cue('live_scoreboard')
     } else if (state.status === 'finished') {
       fadeOutMusic()
-      play('cheer')
+      window.setTimeout(() => {
+        if (seen.current === marker) play('cheer')
+      }, 1050)
       host?.cue('live_final')
       // Once the winner has been crowned, music for the room: hits from the game's decade.
       const party = state.afterParty
@@ -192,33 +196,33 @@ export default function HostScreen() {
   }
 
   const nextLabel: Record<string, string> = {
-    lobby: busy ? 'Here we go…' : state.players ? 'Start the game ▶' : 'Waiting for players…',
-    question: locked ? 'Start the clock ▶' : 'Reveal now ▶',
-    reveal: 'Scoreboard ▶',
-    scoreboard: state.index + 1 >= state.total ? 'Final results ▶' : 'Next question ▶',
+    lobby: busy ? 'Here we go…' : state.players ? 'Start the game' : 'Waiting for players…',
+    question: locked ? 'Start the clock' : 'Reveal now',
+    reveal: 'Scoreboard',
+    scoreboard: state.index + 1 >= state.total ? 'Final results' : 'Next question',
   }
 
   return (
     <Stage>
-      <div className="mx-auto flex min-h-[calc(100dvh-28px)] w-full max-w-[1500px] flex-col gap-3 lg:gap-4">
-        <header className="flex items-center gap-4">
+      <div className="mx-auto flex w-full max-w-[1500px] flex-1 flex-col gap-3 lg:h-[calc(100dvh-26px)] lg:gap-4 lg:overflow-hidden">
+        <header className="flex flex-none items-center gap-4">
           <div className="min-w-0 flex-1">
             <p className="pixel truncate text-[10px] text-muted lg:text-xs">{branding?.companyName} · {state.quizTitle}</p>
             <p className="pixel neon truncate text-sm lg:text-xl">{branding?.gameTitle ?? 'Live game'}</p>
           </div>
-          <div className="hud text-right">Join at {window.location.host}/live<b className="neon-accent !text-xl lg:!text-3xl">{state.code}</b></div>
+          <div className="hud text-right">Code<b className="neon-accent !text-xl lg:!text-3xl">{state.code}</b></div>
           <div className="hud text-right">Players<b className="!text-xl lg:!text-3xl">{state.players}</b></div>
           <SoundToggle />
         </header>
 
-        <main className="flex flex-1 flex-col">
+        <main className="flex min-h-0 flex-1 flex-col">
           {state.status === 'lobby' && <LobbyView state={state} qr={qr} joinUrl={joinUrl} />}
           {(state.status === 'question' || state.status === 'reveal') && state.question && <QuestionView state={state} until={until} />}
           {state.status === 'scoreboard' && <Scoreboard state={state} />}
           {state.status === 'finished' && <Finale state={state} />}
         </main>
 
-        <footer className="flex items-end gap-4">
+        <footer className="flex flex-none items-end gap-4">
           <div className="min-w-0 flex-1">
             <HostBox name={branding?.host.name ?? 'Host'} line={hostLine} speaking={hostSpeaking} />
           </div>
@@ -231,7 +235,9 @@ export default function HostScreen() {
             <>
               <button className="btn btn-ghost" disabled={busy} onClick={() => window.confirm('End the live game now?') && void control('end')}>End</button>
               <button className="btn btn-primary btn-lg" disabled={busy || (state.status === 'lobby' && !state.players)} onClick={() => void control('next')}>
-                {nextLabel[state.status]}
+                <span>{nextLabel[state.status]}</span>
+                {!(state.status === 'lobby' && (!state.players || busy)) && <IconPlay size={14} />}
+                <span className="kbd">SPACE</span>
               </button>
             </>
           )}
@@ -244,27 +250,29 @@ export default function HostScreen() {
 function LobbyView({ state, qr, joinUrl }: { state: LiveState; qr: string; joinUrl: string }) {
   const roster = state.roster ?? []
   return (
-    <div className="grid flex-1 items-center gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:gap-10">
+    <div className="grid min-h-0 flex-1 items-center gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:gap-10">
       {/* Sized from the screen's height so the whole lobby fits a 720p projector without scrolling. */}
       <section className="card flex flex-col items-center gap-3 p-5 text-center lg:p-7">
         <p className="pixel text-xs text-muted lg:text-sm">Grab your phone and go to</p>
         <p className="pixel neon break-all text-sm lg:text-xl">{joinUrl.replace(/^https?:\/\//, '')}</p>
         {qr && <img src={qr} alt="QR code to join the game" className="rounded border-4 border-white" style={{ width: 'min(17rem, 30dvh)' }} />}
         <p className="pixel text-xs text-muted">or enter the code</p>
-        <p className="pixel neon-accent tracking-[0.2em]" style={{ fontSize: 'clamp(2rem, 9dvh, 4.5rem)', lineHeight: 1.2 }}>{state.code}</p>
+        <p className="pixel neon-accent tracking-[0.2em]" style={{ fontSize: 'clamp(2rem, 8.5dvh, 4.5rem)', lineHeight: 1.2 }}>{state.code}</p>
       </section>
-      <section className="card flex min-h-[36dvh] flex-col p-5 lg:p-7">
-        <div className="flex items-baseline justify-between gap-3">
+      <section className="card flex max-h-full min-h-[36dvh] flex-col overflow-y-auto p-5 lg:p-7">
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
           <h2 className="text-sm lg:text-xl">In the room</h2>
-          <p className="pixel text-[10px] text-muted lg:text-xs"><span className="glyph" style={{ color: 'var(--accent)' }}>★</span> = did the pre-read{state.headStart ? ` (+${state.headStart} head start)` : ''}</p>
+          <p className="pixel inline-flex items-center gap-1.5 text-[10px] text-muted lg:text-xs">
+            <IconStar size={12} style={{ color: 'var(--accent)' }} /> = did the pre-read{state.headStart ? ` (+${state.headStart} head start)` : ''}
+          </p>
         </div>
         {roster.length === 0 ? (
           <p className="pixel blink m-auto text-xs text-muted lg:text-base">Waiting for the first player</p>
         ) : (
           <ul className="mt-5 flex flex-wrap content-start gap-2.5 lg:gap-3">
             {roster.map((person, index) => (
-              <li key={`${person.name}-${index}`} className="zoom-in rounded-sm border-2 px-3 py-1.5 text-base lg:text-2xl" style={{ borderColor: person.prepared ? 'var(--accent)' : 'var(--line)', background: 'color-mix(in oklab, var(--page) 60%, transparent)' }}>
-                {person.prepared && <span className="glyph" style={{ color: 'var(--accent)' }}>★ </span>}
+              <li key={`${person.name}-${index}`} className="zoom-in inline-flex items-center gap-1.5 rounded-sm border-2 px-3 py-1.5 text-base lg:text-2xl" style={{ borderColor: person.prepared ? 'var(--accent)' : 'var(--line)', background: 'color-mix(in oklab, var(--page) 60%, transparent)' }}>
+                {person.prepared && <IconStar size={16} style={{ color: 'var(--accent)' }} />}
                 {person.name}
               </li>
             ))}
@@ -285,55 +293,75 @@ function QuestionView({ state, until }: { state: LiveState; until: (iso: string 
   const most = reveal ? Math.max(1, ...reveal.counts) : 1
   const hasPicture = Boolean(question.imageUrl)
   return (
-    <div className="flex flex-1 flex-col gap-4 lg:gap-6">
-      <div className="flex items-center justify-between gap-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 lg:gap-5">
+      <div className="flex flex-none items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="chip lg:!text-xs">Question {question.number} of {state.total}</span>
-          {question.section && <span className="chip chip-accent lg:!text-xs">{question.section}</span>}
+          <span className="chip lg:text-xs">Question {question.number} of {state.total}</span>
+          {question.section && <span className="chip chip-accent lg:text-xs">{question.section}</span>}
         </div>
         {!reveal && (
           <div className="flex items-center gap-5">
             <div className="hud text-right">Answers in<b className="!text-xl lg:!text-3xl">{answered}/{state.players}</b></div>
-            <div className="pixel grid h-16 w-16 place-items-center rounded border-4 text-xl lg:h-24 lg:w-24 lg:text-3xl" style={{ borderColor: seconds <= 5 && opensIn <= 0 ? 'var(--bad)' : 'var(--accent)', color: seconds <= 5 && opensIn <= 0 ? 'var(--bad)' : 'var(--accent)' }}>
+            <div className="pixel grid h-16 w-16 place-items-center rounded border-4 text-xl tabular-nums lg:h-20 lg:w-20 lg:text-3xl" style={{ borderColor: seconds <= 5 && opensIn <= 0 ? 'var(--bad)' : 'var(--accent)', color: seconds <= 5 && opensIn <= 0 ? 'var(--bad)' : 'var(--accent-text)' }}>
               {opensIn > 0 ? '…' : seconds}
             </div>
           </div>
         )}
       </div>
 
-      <div className={`grid flex-1 items-center gap-5 ${hasPicture ? 'lg:grid-cols-2' : ''}`}>
-        <div>
-          {question.title && question.kind !== 'music' && <p className="pixel neon-accent mb-3 text-xs lg:text-base">“{question.title}”</p>}
-          <h1 className="!normal-case text-2xl sm:text-3xl lg:text-[clamp(1.8rem,5.6dvh,3rem)]" style={{ fontFamily: 'var(--font-sans)', lineHeight: 1.25 }}>{question.text}</h1>
+      <div className={`grid min-h-0 flex-1 items-center gap-5 ${hasPicture ? 'lg:grid-cols-2' : ''}`}>
+        <div className="min-h-0">
+          {question.title && question.kind !== 'music' && <p className="pixel neon-accent mb-2 text-xs lg:text-base">“{question.title}”</p>}
+          <h1 className="!normal-case text-2xl sm:text-3xl lg:text-[clamp(1.6rem,4.8dvh,2.8rem)]" style={{ fontFamily: 'var(--font-sans)', lineHeight: 1.25 }}>{question.text}</h1>
           {question.kind === 'music' && !reveal && (
-            <div className="mt-6 flex items-center gap-5">
+            <div className="mt-5 flex items-center gap-5">
               <div className="eq !h-20" data-on={opensIn <= 0}><i /><i /><i /><i /><i /></div>
               <p className="pixel neon-accent text-sm lg:text-xl">Listen up</p>
             </div>
           )}
           {reveal?.music && (
-            <div className="zoom-in mt-6 flex items-center gap-5">
-              {reveal.music.artworkUrl && <img src={reveal.music.artworkUrl} alt="" className="h-28 w-28 rounded-sm border-4 border-black lg:h-44 lg:w-44" />}
-              <div>
-                <p className="text-2xl lg:text-4xl">{reveal.music.title}</p>
-                <p className="text-xl text-muted lg:text-3xl">{reveal.music.artist}</p>
+            <div className="zoom-in mt-5 flex items-center gap-5">
+              {reveal.music.artworkUrl && <img src={reveal.music.artworkUrl} alt="" width={160} height={160} decoding="async" className="h-24 w-24 rounded-sm border-4 border-black object-cover lg:h-36 lg:w-36" />}
+              <div className="min-w-0">
+                <p className="truncate text-2xl lg:text-4xl">{reveal.music.title}</p>
+                <p className="truncate text-xl text-muted lg:text-3xl">{reveal.music.artist}</p>
               </div>
             </div>
           )}
-          {reveal?.explanation && <p className="rise mt-5 text-lg text-muted lg:text-2xl">{reveal.explanation}</p>}
+          {reveal?.explanation && <p className="rise mt-4 text-lg text-muted lg:text-2xl">{reveal.explanation}</p>}
         </div>
-        {hasPicture && <img src={question.imageUrl} alt="" className="picture-frame relative max-h-[46dvh] w-full rounded border-4 bg-white object-contain" style={{ borderColor: 'var(--accent)' }} />}
+        {hasPicture && (
+          <div className="picture-frame overflow-hidden rounded-[6px] border-4 bg-white" style={{ borderColor: 'var(--accent)', boxShadow: '0 0 0 2px #000, 5px 5px 0 2px #000' }}>
+            <img src={question.imageUrl} alt="" className="max-h-[42dvh] w-full object-contain" />
+          </div>
+        )}
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:gap-4">
+      <div className="grid flex-none gap-3 sm:grid-cols-2 lg:gap-4">
         {question.options.map((option, index) => {
           const right = reveal && index === reveal.correctIndex
           return (
-            <div key={index} className="tile relative min-h-[64px] overflow-hidden px-4 py-2.5 text-lg lg:min-h-[10dvh] lg:px-6 lg:text-[clamp(1.25rem,3.4dvh,1.9rem)]" data-dim={Boolean(reveal) && !right} style={{ ['--tone' as string]: TONES[index % 4] }}>
-              {reveal && <span className="absolute inset-y-0 left-0 bg-black/25 transition-[width] duration-700" style={{ width: `${(reveal.counts[index] / most) * 100}%` }} aria-hidden />}
-              <span className="pixel relative grid h-10 w-10 flex-none place-items-center rounded-sm bg-black/30 text-base lg:h-14 lg:w-14 lg:text-xl">{LETTERS[index]}</span>
+            <div
+              key={index}
+              className="tile relative min-h-[64px] overflow-hidden px-4 py-2.5 text-lg lg:min-h-[9dvh] lg:px-6 lg:text-[clamp(1.15rem,3.1dvh,1.75rem)]"
+              data-dim={Boolean(reveal) && !right}
+              style={{ ['--tone' as string]: TONES[index % 4], ['--tone-ink' as string]: TONE_INKS[index % 4] }}
+            >
+              {reveal && (
+                <span
+                  className="absolute inset-0 origin-left bg-black/22 transition-transform duration-700"
+                  style={{ transform: `scaleX(${reveal.counts[index] / most})` }}
+                  aria-hidden
+                />
+              )}
+              <span className="pixel relative grid h-10 w-10 flex-none place-items-center rounded-sm bg-black/25 text-base lg:h-12 lg:w-12 lg:text-xl">{LETTERS[index]}</span>
               <span className="relative min-w-0 flex-1 break-words">{option}</span>
-              {reveal && <span className="pixel relative text-sm lg:text-xl">{right ? '✔ ' : ''}{reveal.counts[index]}</span>}
+              {reveal && (
+                <span className="pixel relative inline-flex items-center gap-1.5 text-sm tabular-nums lg:text-xl">
+                  {right && <IconCheck size={18} />}
+                  {reveal.counts[index]}
+                </span>
+              )}
             </div>
           )
         })}
@@ -342,24 +370,99 @@ function QuestionView({ state, until }: { state: LiveState; until: (iso: string 
   )
 }
 
+function BigScreenRow({
+  row,
+  top,
+  dense,
+}: {
+  row: NonNullable<LiveState['standings']>[number]
+  top: number
+  dense: boolean
+}) {
+  const rankColor = row.rank === 1 ? '#ffd60a' : row.rank === 2 ? '#e2e8f0' : row.rank === 3 ? '#f59e0b' : 'var(--muted)'
+  const share = top > 0 ? Math.max(0.04, row.score / top) : 0
+  return (
+    <li
+      className={`rise sb-row ${dense ? 'px-3.5 py-2.5 lg:px-4 lg:py-3' : 'px-4 py-3 lg:px-5 lg:py-3.5'}`}
+      style={{
+        borderColor: row.rank === 1 ? 'var(--accent)' : row.rank <= 3 ? 'color-mix(in oklab, var(--brand) 55%, var(--line))' : 'var(--line)',
+      }}
+    >
+      <span
+        className="sb-bar !h-1"
+        style={{
+          transform: `scaleX(${share})`,
+          background: row.rank === 1 ? 'var(--accent)' : 'var(--brand)',
+        }}
+        aria-hidden
+      />
+      <span
+        className={`sb-rank ${dense ? 'min-w-[44px] h-8 text-xs lg:min-w-[54px] lg:h-10 lg:text-sm' : 'min-w-[52px] h-10 text-sm lg:min-w-[64px] lg:h-12 lg:text-base'}`}
+        style={{ color: rankColor, borderColor: row.rank <= 3 ? rankColor : undefined }}
+      >
+        {row.rank === 1 && <IconCrown size={dense ? 13 : 16} />}
+        {String(row.rank).padStart(2, '0')}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className={`truncate font-bold text-ink ${dense ? 'text-lg lg:text-2xl' : 'text-xl lg:text-3xl'}`}>
+            {row.name}
+          </span>
+          {row.streak >= 3 && (
+            <span
+              className="inline-flex flex-none items-center gap-0.5 rounded-sm bg-black/45 px-1.5 py-0.5 text-xs font-bold lg:text-sm"
+              style={{ color: 'var(--accent)' }}
+            >
+              <IconBolt size={12} />x{row.streak}
+            </span>
+          )}
+        </div>
+        {row.team && <p className="truncate text-sm text-muted lg:text-base">{row.team}</p>}
+      </div>
+      <span
+        className={`sb-score ${dense ? '!text-xl lg:!text-2xl' : '!text-2xl lg:!text-3xl'}`}
+        style={{ color: row.rank === 1 ? '#ffd60a' : 'var(--ink)' }}
+      >
+        {formatScore(row.score)}
+      </span>
+    </li>
+  )
+}
+
 function Scoreboard({ state }: { state: LiveState }) {
   const standings = state.standings ?? []
   const top = Math.max(1, ...standings.map((s) => s.score))
+  const twoCol = standings.length > 6
+  const split = Math.ceil(standings.length / 2)
+  const leftCol = twoCol ? standings.slice(0, split) : standings
+  const rightCol = twoCol ? standings.slice(split) : []
+
   return (
-    <div className="flex flex-1 flex-col justify-center gap-5">
-      <h1 className="neon text-center text-xl lg:text-4xl">Scoreboard</h1>
-      <ol className="mx-auto grid w-full max-w-4xl gap-3">
-        {standings.map((row) => (
-          <li key={row.rank} className="rise flex items-center gap-4">
-            <span className="pixel w-12 text-base lg:text-2xl" style={{ color: 'var(--accent)' }}>{String(row.rank).padStart(2, '0')}</span>
-            <div className="relative flex-1 overflow-hidden rounded-sm border-2 px-4 py-3 text-xl lg:text-3xl" style={{ borderColor: 'var(--line)' }}>
-              <span className="absolute inset-y-0 left-0 transition-[width] duration-1000" style={{ width: `${(row.score / top) * 100}%`, background: 'color-mix(in oklab, var(--brand) 55%, transparent)' }} aria-hidden />
-              <span className="relative">{row.name}{row.team ? <span className="text-muted"> · {row.team}</span> : null}{row.streak >= 3 ? <span style={{ color: 'var(--accent)' }}> x{row.streak}</span> : null}</span>
-            </div>
-            <span className="pixel w-28 text-right text-base lg:text-2xl">{row.score}</span>
-          </li>
-        ))}
-      </ol>
+    <div className="flex min-h-0 flex-1 flex-col justify-center gap-4 overflow-y-auto">
+      <div className="text-center">
+        <h1 className="neon text-xl lg:text-4xl">Scoreboard</h1>
+        {state.players > standings.length && (
+          <p className="mt-1.5 text-sm text-muted lg:text-base">
+            Top {standings.length} of {state.players} players · check your phone for your exact rank
+          </p>
+        )}
+      </div>
+
+      {twoCol ? (
+        <div className="mx-auto grid w-full max-w-6xl gap-2.5 lg:grid-cols-2 lg:gap-x-6">
+          <ol className="grid content-start gap-2.5">
+            {leftCol.map((row) => <BigScreenRow key={row.rank} row={row} top={top} dense />)}
+          </ol>
+          <ol className="grid content-start gap-2.5">
+            {rightCol.map((row) => <BigScreenRow key={row.rank} row={row} top={top} dense />)}
+          </ol>
+        </div>
+      ) : (
+        <ol className="mx-auto grid w-full max-w-4xl gap-3">
+          {leftCol.map((row) => <BigScreenRow key={row.rank} row={row} top={top} dense={false} />)}
+        </ol>
+      )}
+
       <Teams state={state} />
     </div>
   )
@@ -370,39 +473,74 @@ function Teams({ state }: { state: LiveState }) {
   return (
     <div className="mx-auto flex flex-wrap justify-center gap-3">
       {state.teams.map((team, index) => (
-        <span key={team.team} className="chip chip-accent lg:!text-sm">{index + 1}. {team.team} · avg {team.average}</span>
+        <span key={team.team} className="chip chip-accent lg:text-sm">{index + 1}. {team.team} · avg {formatScore(team.average)}</span>
       ))}
     </div>
   )
 }
 
 function Finale({ state }: { state: LiveState }) {
-  const [first, second, third] = state.standings ?? []
+  const standings = state.standings ?? []
+  const [first, second, third] = standings
+  const runnersUp = standings.slice(3, 10)
   const podium = [second, first, third]
-  const heights = ['h-28 lg:h-40', 'h-40 lg:h-56', 'h-20 lg:h-28']
+  const heights = ['h-24 lg:h-36', 'h-36 lg:h-48', 'h-16 lg:h-24']
   const missed = state.roomMissed ?? []
+
+  useEffect(() => {
+    if (!first || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    const timer = window.setTimeout(() => {
+      const colors = [getComputedStyle(document.documentElement).getPropertyValue('--brand').trim() || '#6d5ef8', '#ffb020', '#ffffff', '#2fbf71']
+      void confetti({ particleCount: 130, spread: 85, origin: { x: 0.3, y: 0.45 }, colors, shapes: ['square'], scalar: 1.05 })
+    }, 1150)
+    return () => window.clearTimeout(timer)
+  }, [first])
+
   return (
-    <div className="grid flex-1 items-center gap-8 lg:grid-cols-2">
-      <section className="text-center">
+    <div className="grid min-h-0 flex-1 items-center gap-6 lg:grid-cols-2 lg:gap-8">
+      <section className="flex min-h-0 flex-col items-center text-center">
         <h1 className="neon text-xl lg:text-4xl">Final results</h1>
-        <div className="mt-8 flex items-end justify-center gap-3 lg:gap-5">
+        <div className="mt-6 flex items-end justify-center gap-3 lg:gap-5">
           {podium.map((person, index) =>
             person ? (
-              <div key={index} className="zoom-in flex w-28 flex-col items-center lg:w-48" style={{ animationDelay: `${[0.5, 1.1, 0][index]}s` }}>
-                <p className="truncate text-lg lg:text-2xl">{person.name}</p>
-                <p className="pixel mb-2 text-xs lg:text-base" style={{ color: 'var(--accent)' }}>{person.score}</p>
-                <div className={`pixel grid w-full place-items-start justify-center rounded-t-sm pt-3 text-2xl lg:text-4xl ${heights[index]}`} style={{ background: index === 1 ? 'var(--accent)' : 'var(--brand)', color: index === 1 ? '#1c1300' : 'var(--brand-ink)', boxShadow: '5px 0 0 #000' }}>
+              <div key={index} className="flex w-28 flex-col items-center lg:w-44">
+                <div className="zoom-in flex w-full flex-col items-center" style={{ animationDelay: `${[0.5, 1.1, 0][index]}s` }}>
+                  {index === 1 && <IconCrown size={28} className="mb-1" style={{ color: '#ffd60a' }} />}
+                  <p className="w-full max-w-full truncate text-lg font-bold lg:text-2xl">{person.name}</p>
+                  <p className="mb-2 font-bold tabular-nums lg:text-xl" style={{ color: 'var(--accent-text)' }}>{formatScore(person.score)}</p>
+                </div>
+                <div
+                  className={`podium-rise pixel grid w-full place-items-start justify-center rounded-t-[4px] border-2 pt-3 text-2xl lg:text-4xl ${heights[index]}`}
+                  style={{
+                    animationDelay: `${[0.4, 0.95, 0][index]}s`,
+                    background: index === 1 ? 'var(--accent)' : 'var(--brand)',
+                    color: index === 1 ? 'var(--accent-ink)' : 'var(--brand-ink)',
+                    borderColor: index === 1 ? 'color-mix(in oklab, var(--accent) 55%, white)' : 'color-mix(in oklab, var(--brand) 55%, white)',
+                    boxShadow: '5px 5px 0 #000',
+                  }}
+                >
                   {person.rank}
                 </div>
               </div>
             ) : (
-              <div key={index} className="w-28 lg:w-48" />
+              <div key={index} className="w-28 lg:w-44" />
             ),
           )}
         </div>
-        <div className="mt-6"><Teams state={state} /></div>
+        {runnersUp.length > 0 && (
+          <ol className="mt-5 grid w-full max-w-xl grid-cols-2 gap-1.5 text-left">
+            {runnersUp.map((row) => (
+              <li key={row.rank} className="sb-row !py-1.5 !px-2.5">
+                <span className="sb-rank !h-6 !min-w-[32px] !text-[9px]">#{row.rank}</span>
+                <span className="min-w-0 flex-1 truncate text-sm font-bold lg:text-base">{row.name}</span>
+                <span className="sb-score !text-sm lg:!text-base">{formatScore(row.score)}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+        <div className="mt-4"><Teams state={state} /></div>
       </section>
-      <section className="card card-accent p-6 lg:p-8">
+      <section className="card card-accent max-h-full overflow-y-auto p-6 lg:p-8">
         <h2 className="neon-accent text-sm lg:text-xl">What the room got wrong</h2>
         {missed.length === 0 ? (
           <p className="mt-4 text-lg text-muted">Nothing stood out. Suspiciously well read, all of you.</p>
@@ -412,7 +550,9 @@ function Finale({ state }: { state: LiveState }) {
               <li key={index}>
                 <p className="pixel text-[10px] lg:text-xs" style={{ color: 'var(--bad)' }}>{item.percentCorrect}% got it{item.section ? ` · ${item.section}` : ''}</p>
                 <p className="mt-1 text-lg lg:text-2xl">{item.text}</p>
-                <p className="mt-1 text-lg lg:text-2xl" style={{ color: 'var(--good)' }}>✔ {item.correctAnswer}</p>
+                <p className="mt-1 inline-flex items-center gap-2 text-lg lg:text-2xl" style={{ color: 'var(--good)' }}>
+                  <IconCheck size={18} /> {item.correctAnswer}
+                </p>
                 {item.explanation && <p className="mt-1 text-muted lg:text-xl">{item.explanation}</p>}
               </li>
             ))}

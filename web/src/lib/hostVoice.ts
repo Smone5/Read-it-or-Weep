@@ -417,8 +417,8 @@ export class HostVoice {
       const line = this.arriving
       if (line && !line.dropped && line.id === id) {
         line.text += message.delta ?? ''
-        // A held line shows its words when he starts saying them (at once if nothing will be heard).
-        if (line.live || !line.notBefore || !this.audible()) this.setLine(line.text)
+        // Hold captions until audio starts playing so punchlines are never spoiled before the host speaks.
+        if (line.live || !this.audible()) this.setLine(line.text)
       }
     } else if (message.type === 'line.end') {
       const line = this.arriving
@@ -428,8 +428,11 @@ export class HostVoice {
       line.complete = true
       if (line.sources.size === 0) {
         if (line.heard) this.finish(line)
-        // Nothing audible (sound off, or subtitles only): give the words a moment to be read.
-        else line.readTimer = window.setTimeout(() => this.finish(line), Math.min(2400, 600 + line.text.length * 22))
+        else {
+          // Text-only fallback (sound off, subtitles only, or empty-mic notice): reveal text and let it be read.
+          if (line.text) this.setLine(line.text)
+          line.readTimer = window.setTimeout(() => this.finish(line), Math.min(2400, 600 + line.text.length * 22))
+        }
       }
     } else if (message.type === 'line.skip') {
       this.noLongerAwaited(id)

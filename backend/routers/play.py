@@ -219,6 +219,7 @@ async def join(slug: str, body: JoinRequest, request: Request, x_admin_token: st
 
 @router.get("/quiz/{slug}/leaderboard")
 async def quiz_leaderboard(slug: str, mode: str | None = None, team: str | None = None,
+                           limit: int = 100, offset: int = 0, q: str | None = None,
                            player: dict = Depends(current_player),      # names and scores are for people who joined
                            x_admin_token: str | None = Header(default=None)) -> dict:
     quiz = await find_quiz(slug, x_admin_token)
@@ -226,7 +227,7 @@ async def quiz_leaderboard(slug: str, mode: str | None = None, team: str | None 
     if not rules["leaderboard"]:
         raise HTTPException(403, "The leaderboard is switched off for this quiz.")
     mode = mode if mode in rules["modes"] else rules["default_mode"]
-    return await stats.leaderboard(quiz["id"], mode, team or None, player_id=player["id"])
+    return await stats.leaderboard(quiz["id"], mode, team or None, limit=limit, offset=offset, query=q, player_id=player["id"])
 
 
 # --------------------------------------------------------------------------- playing

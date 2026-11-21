@@ -9,6 +9,11 @@ function luminance(hex: string): number {
   return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4)
 }
 
+/** Pick dark or white text on a dynamic fill color near the WCAG AA crossover (~0.20). */
+export function contrastInk(hex: string, darkInk = '#14112b'): string {
+  return luminance(hex) > 0.2 ? darkInk : '#ffffff'
+}
+
 /** Apply the company's colours, theme and title to the page. Safe to call repeatedly. */
 export function applyBranding(branding: Branding | null | undefined) {
   const root = document.documentElement
@@ -19,8 +24,8 @@ export function applyBranding(branding: Branding | null | undefined) {
   root.dataset.theme = branding.theme
   root.style.setProperty('--brand', branding.primaryColor)
   root.style.setProperty('--accent', branding.accentColor)
-  // Pick black or white text on brand-coloured buttons, whichever is readable.
-  root.style.setProperty('--brand-ink', luminance(branding.primaryColor) > 0.55 ? '#14112b' : '#ffffff')
+  root.style.setProperty('--brand-ink', contrastInk(branding.primaryColor, '#14112b'))
+  root.style.setProperty('--accent-ink', contrastInk(branding.accentColor, '#1c1300'))
   document.title = branding.gameTitle
   const meta = document.querySelector('meta[name="theme-color"]')
   if (meta) meta.setAttribute('content', branding.theme === 'dark' ? '#0d0b1f' : '#f4f2fb')
@@ -53,4 +58,15 @@ export const DECADE_FLAVOUR: Record<string, string> = {
   '00s': 'Ringtones & iPods',
   '10s': 'Streaming era',
   '20s': 'Right about now',
+}
+
+export const DECADE_SWATCH: Record<string, [string, string]> = {
+  '50s': ['#e63946', '#7fd6c2'],
+  '60s': ['#ff6b35', '#9d4edd'],
+  '70s': ['#e9843c', '#c9a227'],
+  '80s': ['#ff2e93', '#00e5ff'],
+  '90s': ['#00b4d8', '#ffd60a'],
+  '00s': ['#4cc9f0', '#c77dff'],
+  '10s': ['#2ec4b6', '#ff9f1c'],
+  '20s': ['#a3e635', '#c084fc'],
 }

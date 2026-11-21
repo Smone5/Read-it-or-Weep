@@ -22,7 +22,9 @@
 // To make that possible the server deals the first item of a round *sealed*: we learn which round
 // is coming, show its card, and only then ask for the question to be opened.
 
+import confetti from 'canvas-confetti'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { IconBolt, IconBook, IconBulb, IconChart, IconChip, IconClose, IconDisc, IconFlag, IconHeart, IconPlay, IconSparkle, IconSplit } from '../components/Icons'
 import { MusicToggle } from '../components/NowPlaying'
 import { ErrorNote, Modal, SoundToggle } from '../components/ui'
 import { api, ApiError, onConnectionTrouble } from '../lib/api'
@@ -41,6 +43,7 @@ type Props = {
   hostName: string
   hostLine: string
   hostSpeaking: boolean
+  hostTone?: 'accent' | 'brand' | 'cyan' | 'rose'
   host: HostVoice | null
   talk?: TalkControl | null
   onDone: (summary: Summary) => void
@@ -128,6 +131,20 @@ function roundCard(next: Item, mode: ModeId): Card {
   return { kicker, title: next.round.name, blurb: ROUND_BLURB[next.round.name] ?? '' }
 }
 
+function RoundEmblem({ title }: { title: string }) {
+  const lower = title.toLowerCase()
+  const props = { size: 36, style: { color: 'var(--accent)' } }
+  if (lower.includes('music') || lower.includes('jukebox') || lower.includes('song') || lower.includes('bell') || lower.includes('stand-up')) {
+    return <IconDisc {...props} />
+  }
+  if (lower.includes('picture')) return <IconChart {...props} />
+  if (lower.includes('lightning') || lower.includes('speed')) return <IconBolt {...props} />
+  if (lower.includes('wager')) return <IconChip {...props} />
+  if (lower.includes('sudden') || lower.includes('second chance')) return <IconHeart {...props} style={{ color: 'var(--bad)' }} />
+  if (lower.includes('quiz') || lower.includes('deep end')) return <IconBook {...props} />
+  return <IconSparkle {...props} />
+}
+
 const LIFELINES: { kind: 'fifty' | 'peek' | 'hint'; label: string; help: string }[] = [
   { kind: 'fifty', label: '50/50', help: 'Remove two wrong answers' },
   { kind: 'peek', label: 'Peek', help: 'See the passage (half points)' },
@@ -136,7 +153,7 @@ const LIFELINES: { kind: 'fifty' | 'peek' | 'hint'; label: string; help: string 
 
 const FLAG_REASONS = ['The marked answer is wrong', 'More than one answer fits', 'The question is unclear', 'Something else']
 
-export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeaking, host, talk, onDone }: Props) {
+export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeaking, hostTone = 'accent', host, talk, onDone }: Props) {
   const [state, setState] = useState<RunState>(firstTurn.state)
   const [item, setItem] = useState<Item | null>(null)
   const [phase, setPhase] = useState<Phase>('card')
@@ -155,6 +172,8 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   const [flagging, setFlagging] = useState(false)
   const [flagged, setFlagged] = useState(false)
   const [banner, setBanner] = useState('')
+  const [scorePop, setScorePop] = useState<{ id: number; text: string; tone: 'good' | 'bad' } | null>(null)
+  const [flash, setFlash] = useState<{ id: number; tone: 'good' | 'bad' } | null>(null)
   const roundRef = useRef('')
   const doneRef = useRef(false)
   const aliveRef = useRef(true)
@@ -256,12 +275,16 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
     else setJukeboxLevel('gap')
   }, [phase, item?.needsWager, quick, bigMoment, opening, titleUp, handover, afterHost, lingering, leaving, clipHasFloor, hasClip, decidedInSilence])
 
-  // On a phone the explanation lands below the answers: bring it into view, and return to the
-  // top for each new question.
+  // On a phone the explanation lands below the answers: wait for the 350ms pop/shake animation
+  // before scrolling it into view (skip in quick auto-advancing rounds), and return to top on new questions.
   useEffect(() => {
-    if (phase === 'reveal') revealRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    else window.scrollTo({ top: 0, behavior: 'smooth' })
-  }, [phase, item?.id])
+    if (phase === 'reveal') {
+      if (quick) return
+      const timer = window.setTimeout(() => revealRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 360)
+      return () => window.clearTimeout(timer)
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }, [phase, item?.id, quick])
 
   const finish = useCallback(async () => {
     if (doneRef.current) return
@@ -504,6 +527,10 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   const submit = useCallback(
     async (choice: number | null) => {
       if (!item || busy || phase !== 'question') return
+      if (choice !== null) {
+        play('click')
+        buzz(18)
+      }
       setBusy(true)
       setPicked(choice)
       try {
@@ -517,6 +544,14 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         trace('reveal', { correct: result.correct, timedOut: result.timedOut })
         play(result.correct ? 'correct' : 'wrong')
         buzz(result.correct ? 30 : [60, 40, 60])
+        const burstId = Date.now()
+        setFlash({ id: burstId, tone: result.correct ? 'good' : 'bad' })
+        window.setTimeout(() => setFlash((now) => (now?.id === burstId ? null : now)), 600)
+        if (result.points !== 0) {
+          const text = result.points > 0 ? `+${result.points}` : String(result.points)
+          setScorePop({ id: burstId, text, tone: result.points > 0 ? 'good' : 'bad' })
+          window.setTimeout(() => setScorePop((now) => (now?.id === burstId ? null : now)), 1350)
+        }
         if (result.strikeRestored) play('cheer')
         if (result.correct && STREAKS_WORTH_SHOUTING.includes(result.state.streak)) {
           const streak = result.state.streak
@@ -525,6 +560,10 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
           window.setTimeout(() => setBigMoment(false), 2600)
           window.setTimeout(() => blip(streak >= 5 ? 'bigstreak' : 'streak'), 300) // just after the "correct" sound
           window.setTimeout(() => setBanner((current) => (current === `${streak} in a row!` ? '' : current)), 2400)
+          if (streak >= 5 && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            const colors = [getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#ffb020', '#ffffff', '#2fbf71']
+            void confetti({ particleCount: 55, spread: 62, origin: { y: 0.25 }, colors, shapes: ['square'], scalar: 0.8 })
+          }
         }
         if (hostReacts && item.slot !== 'fact_fake' && item.slot !== 'song_or_jargon') host?.cue('result', item.id)
       } catch (caught) {
@@ -708,35 +747,67 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   // Until a Speed Run's first question opens, its clock stands at the full time.
   const speedClock = mode === 'speed' ? (state.deadlineAt ? clockMs : (state.clockSec ?? 0) * 1000) : undefined
   const last = Boolean(reveal?.finished) || (showsCounter && state.remaining === 0)
+  const shownImage = (phase === 'question' || phase === 'reveal') && item ? (reveal?.image ?? item.image) : undefined
+  const hasPicture = Boolean(shownImage)
+  const hostMood = phase === 'reveal' && reveal ? (reveal.correct ? 'happy' : 'wince') : 'idle'
 
   return (
-    <div className="mx-auto flex min-h-[calc(100dvh-28px)] w-full max-w-2xl flex-col gap-3">
-      <header className="flex items-start gap-3">
-        <div className="flex-1">
+    <div className={`relative mx-auto flex w-full flex-1 flex-col gap-3 ${hasPicture ? 'max-w-2xl lg:max-w-5xl' : 'max-w-2xl lg:max-w-3xl'}`}>
+      {flash && <div key={flash.id} className="screen-flash" data-tone={flash.tone} aria-hidden />}
+      {scorePop && (
+        <div
+          key={scorePop.id}
+          className="score-pop pixel pointer-events-none fixed left-1/2 top-16 z-[48] rounded-[4px] border-2 bg-black/90 px-3 py-1.5 text-sm sm:top-20 sm:text-base"
+          style={{
+            borderColor: scorePop.tone === 'good' ? 'var(--good)' : 'var(--bad)',
+            color: scorePop.tone === 'good' ? 'var(--good)' : 'var(--bad)',
+            boxShadow: '3px 3px 0 #000',
+          }}
+          aria-hidden
+        >
+          {scorePop.text}
+        </div>
+      )}
+
+      {/* Mobile-safe header: utility bar sits cleanly above the HUD on narrow phones so scores/lives/streak never overflow. */}
+      <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+        <div className="flex items-center justify-between gap-2 sm:order-2 sm:justify-end">
+          <span className="pixel truncate text-[10px] text-muted sm:hidden">{state.modeName}</span>
+          <div className="flex items-center gap-1.5 sm:gap-2">
+            <MusicToggle />
+            <SoundToggle />
+            <button className="btn btn-ghost btn-sm" onClick={() => setQuitting(true)} aria-label="Quit this game" title="Quit">
+              <IconClose size={14} />
+            </button>
+          </div>
+        </div>
+        <div className="min-w-0 flex-1 sm:order-1">
           <Hud state={state} clockMs={speedClock} position={position} />
         </div>
-        <MusicToggle />
-        <SoundToggle />
-        <button className="btn btn-ghost btn-sm" onClick={() => setQuitting(true)} aria-label="Quit this game">✕</button>
       </header>
 
-      <HostBox name={hostName} line={hostLine} speaking={hostSpeaking} talk={talk} />
+      <HostBox name={hostName} line={hostLine} speaking={hostSpeaking} talk={talk} tone={hostTone} mood={hostMood} />
 
       {banner && <p className="pixel neon-accent flicker-in text-center text-xs">{banner}</p>}
-      {reconnecting && <p className="pixel blink text-center text-[10px]" style={{ color: 'var(--accent)' }} role="status">Reconnecting…</p>}
+      {reconnecting && <p className="pixel blink text-center text-[10px]" style={{ color: 'var(--accent-text)' }} role="status">Reconnecting…</p>}
 
       <main className="flex flex-1 flex-col gap-3">
         {phase === 'card' && (
-          <div className="grid flex-1 place-items-center py-10 text-center">
-            <div className="flicker-in" key={card.title}>
+          <div className="grid flex-1 place-items-center py-6 text-center sm:py-10">
+            <div className="title-marquee flicker-in w-full max-w-lg px-6 py-8 sm:px-10 sm:py-10" key={card.title}>
+              <div className="mb-4 flex justify-center">
+                <RoundEmblem title={card.title} />
+              </div>
               <p className="pixel blink text-[10px] text-muted">{card.kicker}</p>
               <h1 className="neon mt-4 text-xl sm:text-3xl">{card.title}</h1>
               <p className="mt-4 min-h-7 text-lg text-muted">{card.blurb}</p>
               {error ? (
-                <button className="btn btn-primary mt-8" onClick={() => void pull()}>Try again ▶</button>
+                <button className="btn btn-primary mt-7" onClick={() => void pull()}>
+                  Try again <IconPlay size={13} />
+                </button>
               ) : (
-                <button className="btn btn-ghost btn-sm mt-8" style={{ visibility: canSkip ? 'visible' : 'hidden' }} onClick={() => skipRef.current?.()}>
-                  Skip ▶
+                <button className="btn btn-ghost btn-sm mt-7" style={{ visibility: canSkip ? 'visible' : 'hidden' }} onClick={() => skipRef.current?.()}>
+                  Skip <IconPlay size={11} /> <span className="kbd">SPACE</span>
                 </button>
               )}
             </div>
@@ -745,16 +816,16 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
 
         {phase === 'wager' && item && (
           <div className="card rise flex flex-1 flex-col items-center justify-center gap-5 p-6 text-center">
-            <p className="chip chip-accent">Final wager</p>
+            <p className="chip chip-accent"><IconChip size={13} /> Final wager</p>
             <h2 className="neon text-base sm:text-xl">How sure are you?</h2>
-            <p className="text-muted">
+            <p className="max-w-md text-muted">
               One last question{item.section ? <> from <b className="text-ink">{item.section.heading}</b></> : null}. Bet before you see it: right wins the bet, wrong loses it.
             </p>
             <div className="grid w-full max-w-sm gap-3">
               {(item.wagerOptions ?? []).map((amount, index, all) => (
                 <button key={amount} className={`btn ${index === all.length - 1 ? 'btn-accent' : 'btn-ghost'} btn-lg justify-between`} disabled={busy} onClick={() => void placeWager(amount)}>
                   <span>{all.length === 3 ? ['Safe', 'Bold', 'Go big'][index] : 'Bet'}</span>
-                  <span>{amount}</span>
+                  <span className="tabular-nums">{amount}</span>
                 </button>
               ))}
             </div>
@@ -762,131 +833,145 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         )}
 
         {(phase === 'question' || phase === 'reveal') && item && (item.options || reading) && (
-          <>
-            <section className="card rise p-4 sm:p-5" key={item.id}>
-              <div className="mb-3 flex flex-wrap items-center gap-2">
-                <span className="chip">{item.slot === 'music' && mode !== 'jukebox' ? 'Music Break' : item.round.name}</span>
-                {item.section && item.slot !== 'music' && <span className="chip chip-accent">{item.section.heading}</span>}
-                {item.wager ? <span className="chip chip-accent">Bet {item.wager}</span> : null}
-                {item.multiplier !== 1 && !item.wager && <span className="chip">x{item.multiplier} points</span>}
+          <div className={hasPicture ? 'grid items-start gap-4 lg:grid-cols-12 lg:gap-5' : 'flex flex-col gap-3'}>
+            {shownImage && (
+              <div className="lg:col-span-6 lg:sticky lg:top-4">
+                <PictureView
+                  key={`${item.id}:${phase}`}
+                  image={shownImage}
+                  secondsLeft={phase === 'question' && item.timeLimitSec > 0 ? secondsLeft : null}
+                  caption={phase === 'question' ? item.text : null}
+                  wide
+                />
               </div>
-              {item.title && item.slot !== 'fact_fake' && item.slot !== 'music' && item.slot !== 'song_or_jargon' && (
-                <p className="pixel neon-accent mb-2 text-[10px] sm:text-xs">“{item.title}”</p>
-              )}
-              <h2 className={`!normal-case ${item.slot === 'fact_fake' || item.slot === 'song_or_jargon' || item.slot === 'jargon' ? 'text-[22px] sm:text-2xl' : 'text-[19px] sm:text-[22px]'}`} style={{ fontFamily: 'var(--font-sans)', lineHeight: 1.35, letterSpacing: 0 }}>
-                {item.text}
-              </h2>
-              {item.peek && phase === 'question' && (
-                <blockquote className="mt-3 border-l-4 pl-3 text-[15px] text-muted" style={{ borderColor: 'var(--accent)' }}>
-                  <span className="pixel mb-1 block text-[8px]" style={{ color: 'var(--accent)' }}>From the report</span>
-                  {item.peek}
-                </blockquote>
-              )}
-              {item.hint && phase === 'question' && (
-                <p className="mt-3 text-[15px]" style={{ color: 'var(--accent)' }}><span className="pixel text-[8px]">Hint · </span>{item.hint}</p>
-              )}
-              {reading && (
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                  <p className="pixel blink text-[10px] text-muted" role="status">{hostName} reads the question…</p>
-                  <button className="btn btn-ghost btn-sm" onClick={skipReading}>Skip ▶</button>
+            )}
+
+            <div className={`flex flex-col gap-3 ${hasPicture ? 'lg:col-span-6' : ''}`}>
+              <section className="card rise p-4 sm:p-5" key={item.id}>
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <span className="chip">{item.slot === 'music' && mode !== 'jukebox' ? 'Music Break' : item.round.name}</span>
+                  {item.section && item.slot !== 'music' && <span className="chip chip-accent">{item.section.heading}</span>}
+                  {item.wager ? <span className="chip chip-accent">Bet {item.wager}</span> : null}
+                  {item.multiplier !== 1 && !item.wager && <span className="chip">x{item.multiplier} points</span>}
                 </div>
-              )}
-            </section>
-
-            {(reveal?.image ?? item.image) && (
-              <PictureView
-                key={`${item.id}:${phase}`}
-                image={(reveal?.image ?? item.image)!}
-                secondsLeft={phase === 'question' && item.timeLimitSec > 0 ? secondsLeft : null}
-                caption={phase === 'question' ? item.text : null}
-              />
-            )}
-
-            {/* The clip keeps playing through the reveal (dipping under the host) and fades out on Next. */}
-            {item.music && (
-              <MusicPlayer key={`clip:${item.id}`} src={item.music.previewUrl} active={phase === 'question'} onBroken={() => void musicBroken()} onPlaying={() => setClipStarted(true)} onClipOver={setClipOver} />
-            )}
-            {!item.music && rewardClip && (
-              <MusicPlayer key={`reward:${item.id}`} src={rewardClip} active={false} onBroken={() => undefined} onClipOver={setClipOver} />
-            )}
-
-            {phase === 'question' && item.timeLimitSec > 0 && item.options && (
-              <TimerBar
-                // Re-read the clock from the server after a wager or a lifeline (writing a hint stops it).
-                timerKey={`${item.id}:${item.wager ?? ''}:${item.lifelinesUsed.length}`}
-                totalMs={item.timeLimitSec * 1000}
-                remainingMs={item.remainingMs ?? item.timeLimitSec * 1000}
-                running={!busy}
-                hold={hasClip && !clipStarted}
-                onExpire={() => void submit(null)}
-                onSecond={setSecondsLeft}
-                quiet={hasClip}
-              />
-            )}
-
-            {!item.options ? null : item.slot === 'fact_fake' || item.slot === 'song_or_jargon' ? (
-              <FactFakeButtons labels={item.slot === 'song_or_jargon' ? item.options : undefined} picked={picked} correctIndex={reveal ? reveal.correctIndex : null} disabled={busy || phase !== 'question'} onPick={(i) => void submit(i)} />
-            ) : (
-              <AnswerList
-                options={item.options}
-                removed={item.removed}
-                picked={picked}
-                correctIndex={reveal ? reveal.correctIndex : null}
-                disabled={busy || phase !== 'question'}
-                onPick={(i) => void submit(i)}
-              />
-            )}
-
-            {canUseLifelines && (
-              <div className="flex flex-wrap gap-2" aria-label="Lifelines">
-                {LIFELINES.filter((l) => l.kind in state.lifelines).map((lifeline) => {
-                  const left = state.lifelines[lifeline.kind] ?? 0
-                  const used = item.lifelinesUsed.includes(lifeline.kind)
-                  return (
-                    <button key={lifeline.kind} className="btn btn-ghost btn-sm" disabled={busy || left <= 0 || used} onClick={() => void useLifeline(lifeline.kind)} title={lifeline.help}>
-                      {lifeline.label} <span className="text-muted">×{left}</span>
+                {item.title && item.slot !== 'fact_fake' && item.slot !== 'music' && item.slot !== 'song_or_jargon' && (
+                  <p className="pixel neon-accent mb-2 text-[10px] sm:text-xs">“{item.title}”</p>
+                )}
+                <h2 className={`!normal-case ${item.slot === 'fact_fake' || item.slot === 'song_or_jargon' || item.slot === 'jargon' ? 'text-[22px] sm:text-2xl' : 'text-[19px] sm:text-[22px]'}`} style={{ fontFamily: 'var(--font-sans)', lineHeight: 1.35, letterSpacing: 0 }}>
+                  {item.text}
+                </h2>
+                {item.peek && phase === 'question' && (
+                  <blockquote className="mt-3 border-l-4 pl-3 text-[15px] text-muted" style={{ borderColor: 'var(--accent)' }}>
+                    <span className="mb-1 block text-xs font-bold tracking-wider uppercase" style={{ color: 'var(--accent-text)' }}>From the report</span>
+                    {item.peek}
+                  </blockquote>
+                )}
+                {item.hint && phase === 'question' && (
+                  <p className="mt-3 text-[15px]" style={{ color: 'var(--accent-text)' }}>
+                    <span className="text-xs font-bold tracking-wider uppercase">Hint · </span>{item.hint}
+                  </p>
+                )}
+                {reading && (
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                    <p className="pixel blink text-[10px] text-muted" role="status">{hostName} reads the question…</p>
+                    <button className="btn btn-ghost btn-sm" onClick={skipReading}>
+                      Skip <IconPlay size={11} />
                     </button>
-                  )
-                })}
-              </div>
-            )}
-
-            {phase === 'reveal' && reveal && (
-              <section ref={revealRef} className="card rise scroll-mb-28 p-4 sm:p-5" aria-live="polite">
-                <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-sm sm:text-base" style={{ color: reveal.correct ? 'var(--good)' : 'var(--bad)' }}>
-                    {reveal.correct ? 'Correct!' : reveal.timedOut ? 'Out of time' : 'Wrong'}
-                  </h3>
-                  <span className="pixel text-xs" style={{ color: reveal.points > 0 ? 'var(--good)' : reveal.points < 0 ? 'var(--bad)' : 'var(--muted)' }}>
-                    {reveal.points > 0 ? '+' : ''}{reveal.points}
-                  </span>
-                </div>
-                {reveal.strikeRestored && <p className="pixel mt-2 text-[10px]" style={{ color: 'var(--good)' }}>Extra life!</p>}
-                {!quick && (
-                  <>
-                    {!reveal.correct && <p className="mt-2">The answer: <b>{reveal.correctAnswer}</b></p>}
-                    {reveal.music && (
-                      <div className="mt-3 flex items-center gap-3">
-                        {reveal.music.artworkUrl && <img src={reveal.music.artworkUrl} alt="" className="h-16 w-16 rounded-sm border-2 border-black" />}
-                        <div className="min-w-0">
-                          <p className="truncate font-bold">{reveal.music.title}</p>
-                          <p className="truncate text-muted">{reveal.music.artist}</p>
-                          {reveal.music.trackUrl && <a className="text-sm underline" href={reveal.music.trackUrl} target="_blank" rel="noreferrer">Listen on Apple Music</a>}
-                        </div>
-                      </div>
-                    )}
-                    {reveal.explanation && <p className="mt-2 text-[16px]">{reveal.explanation}</p>}
-                    {reveal.sourceQuote && (
-                      <blockquote className="mt-3 border-l-4 pl-3 text-[15px] text-muted" style={{ borderColor: 'var(--brand)' }}>
-                        <span className="pixel mb-1 block text-[8px]">From the report{reveal.section ? ` · ${reveal.section.heading}` : ''}</span>
-                        {reveal.sourceQuote}
-                      </blockquote>
-                    )}
-                  </>
+                  </div>
                 )}
               </section>
-            )}
-          </>
+
+              {/* The clip keeps playing through the reveal (dipping under the host) and fades out on Next. */}
+              {item.music && (
+                <MusicPlayer key={`clip:${item.id}`} src={item.music.previewUrl} active={phase === 'question'} onBroken={() => void musicBroken()} onPlaying={() => setClipStarted(true)} onClipOver={setClipOver} />
+              )}
+              {!item.music && rewardClip && (
+                <MusicPlayer key={`reward:${item.id}`} src={rewardClip} active={false} onBroken={() => undefined} onClipOver={setClipOver} />
+              )}
+
+              {phase === 'question' && item.timeLimitSec > 0 && item.options && (
+                <TimerBar
+                  // Re-read the clock from the server after a wager or a lifeline (writing a hint stops it).
+                  timerKey={`${item.id}:${item.wager ?? ''}:${item.lifelinesUsed.length}`}
+                  totalMs={item.timeLimitSec * 1000}
+                  remainingMs={item.remainingMs ?? item.timeLimitSec * 1000}
+                  running={!busy}
+                  hold={hasClip && !clipStarted}
+                  onExpire={() => void submit(null)}
+                  onSecond={setSecondsLeft}
+                  quiet={hasClip}
+                />
+              )}
+
+              {!item.options ? null : item.slot === 'fact_fake' || item.slot === 'song_or_jargon' ? (
+                <FactFakeButtons labels={item.slot === 'song_or_jargon' ? item.options : undefined} picked={picked} correctIndex={reveal ? reveal.correctIndex : null} disabled={busy || phase !== 'question'} onPick={(i) => void submit(i)} />
+              ) : (
+                <AnswerList
+                  options={item.options}
+                  removed={item.removed}
+                  picked={picked}
+                  correctIndex={reveal ? reveal.correctIndex : null}
+                  disabled={busy || phase !== 'question'}
+                  onPick={(i) => void submit(i)}
+                />
+              )}
+
+              {canUseLifelines && (
+                <div className="flex flex-wrap gap-2" aria-label="Lifelines">
+                  {LIFELINES.filter((l) => l.kind in state.lifelines).map((lifeline) => {
+                    const left = state.lifelines[lifeline.kind] ?? 0
+                    const used = item.lifelinesUsed.includes(lifeline.kind)
+                    return (
+                      <button key={lifeline.kind} className="btn btn-ghost btn-sm" disabled={busy || left <= 0 || used} onClick={() => void useLifeline(lifeline.kind)} title={lifeline.help}>
+                        {lifeline.kind === 'fifty' ? <IconSplit size={13} /> : lifeline.kind === 'peek' ? <IconBook size={13} /> : <IconBulb size={13} />}
+                        <span>{lifeline.label}</span>
+                        <span className="text-muted">×{left}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+
+              {phase === 'reveal' && reveal && (
+                <section ref={revealRef} className="card rise scroll-mb-28 p-4 sm:p-5" aria-live="polite">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-sm sm:text-base" style={{ color: reveal.correct ? 'var(--good)' : 'var(--bad)' }}>
+                      {reveal.correct ? 'Correct!' : reveal.timedOut ? 'Out of time' : 'Wrong'}
+                    </h3>
+                    <span className="pixel text-xs tabular-nums" style={{ color: reveal.points > 0 ? 'var(--good)' : reveal.points < 0 ? 'var(--bad)' : 'var(--muted)' }}>
+                      {reveal.points > 0 ? '+' : ''}{reveal.points}
+                    </span>
+                  </div>
+                  {reveal.strikeRestored && <p className="pixel mt-2 text-[10px]" style={{ color: 'var(--good)' }}>Extra life!</p>}
+                  {!quick && (
+                    <>
+                      {!reveal.correct && <p className="mt-2">The answer: <b>{reveal.correctAnswer}</b></p>}
+                      {reveal.music && (
+                        <div className="mt-3 flex items-center gap-3">
+                          {reveal.music.artworkUrl && <img src={reveal.music.artworkUrl} alt="" width={64} height={64} decoding="async" className="h-16 w-16 rounded-sm border-2 border-black object-cover" />}
+                          <div className="min-w-0">
+                            <p className="truncate font-bold">{reveal.music.title}</p>
+                            <p className="truncate text-muted">{reveal.music.artist}</p>
+                            {reveal.music.trackUrl && <a className="text-sm underline" href={reveal.music.trackUrl} target="_blank" rel="noreferrer">Listen on Apple Music</a>}
+                          </div>
+                        </div>
+                      )}
+                      {reveal.explanation && <p className="mt-2 text-[16px]">{reveal.explanation}</p>}
+                      {reveal.sourceQuote && (
+                        <blockquote className="mt-3 border-l-4 pl-3 text-[15px] text-muted" style={{ borderColor: 'var(--brand)' }}>
+                          <span className="mb-1 block text-xs font-bold tracking-wider uppercase">
+                            {item.slot === 'image' ? 'Where to look' : 'From the report'}
+                            {reveal.section ? ` · ${reveal.section.heading}` : ''}
+                          </span>
+                          {reveal.sourceQuote}
+                        </blockquote>
+                      )}
+                    </>
+                  )}
+                </section>
+              )}
+            </div>
+          </div>
         )}
 
         <ErrorNote>{error}</ErrorNote>
@@ -894,21 +979,28 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
 
       {/* Lightning statements and speed runs move on by themselves – unless that failed, when the button is the way out. */}
       {phase === 'reveal' && reveal && (!quick || Boolean(error)) && (
-        <footer className="sticky bottom-0 z-[45] -mx-1 flex items-center gap-2 px-1 pb-1 pt-2" style={{ background: 'linear-gradient(transparent, var(--page) 38%)' }}>
+        <footer
+          className="sticky bottom-0 z-[45] -mx-1 flex items-center gap-2 px-1 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-3"
+          style={{ background: 'linear-gradient(transparent, var(--page) 36%)' }}
+        >
           {/* Only the report's questions can be flagged (the music ones are not written from it). */}
           {item && item.slot !== 'music' && item.slot !== 'jargon' && item.slot !== 'song_or_jargon' && (
             <button className="btn btn-ghost btn-sm" disabled={flagged} onClick={() => setFlagging(true)} title="Tell the organiser this question is not right">
-              {flagged ? 'Flagged' : '⚑ Flag'}
+              <IconFlag size={13} /> {flagged ? 'Flagged' : 'Flag'}
             </button>
           )}
           <button className="btn btn-primary btn-lg flex-1" disabled={moving} onClick={advance} autoFocus>
-            {error ? 'Try again ▶' : last ? 'See results ▶' : 'Next ▶'}
+            <span>{error ? 'Try again' : last ? 'See results' : 'Next'}</span>
+            <IconPlay size={14} />
+            <span className="kbd">SPACE</span>
           </button>
         </footer>
       )}
       {stranded && phase !== 'reveal' && (
-        <footer className="sticky bottom-0 z-[45] pb-1 pt-2">
-          <button className="btn btn-primary btn-lg w-full" onClick={() => { setStranded(false); setError(''); void finish() }}>See results ▶</button>
+        <footer className="sticky bottom-0 z-[45] pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2">
+          <button className="btn btn-primary btn-lg w-full" onClick={() => { setStranded(false); setError(''); void finish() }}>
+            See results <IconPlay size={14} />
+          </button>
         </footer>
       )}
 

@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { onSoundChange, setSoundOn, soundOn } from '../lib/sound'
 import type { Branding } from '../lib/types'
+import { IconClose, IconSoundOff, IconSoundOn } from './Icons'
 
 export function Logo({ branding, size = 40 }: { branding: Branding | null; size?: number }) {
   if (branding?.logoUrl) {
@@ -9,8 +10,17 @@ export function Logo({ branding, size = 40 }: { branding: Branding | null; size?
   return (
     <span
       aria-hidden
-      className="display grid place-items-center rounded-xl font-extrabold text-white"
-      style={{ width: size, height: size, background: 'var(--brand)', fontSize: size * 0.5 }}
+      className="display grid place-items-center rounded-[5px] border-2 font-extrabold"
+      style={{
+        width: size,
+        height: size,
+        background: 'var(--brand)',
+        color: 'var(--brand-ink)',
+        borderColor: 'color-mix(in oklab, var(--brand) 55%, white)',
+        boxShadow: '3px 3px 0 #000, 0 0 14px -2px var(--brand)',
+        fontSize: Math.round(size * 0.44),
+        lineHeight: 1,
+      }}
     >
       {(branding?.companyName ?? 'Q').trim().charAt(0).toUpperCase()}
     </span>
@@ -52,8 +62,13 @@ export function FullScreenMessage({ title, children, action }: { title: string; 
 export function ErrorNote({ children }: { children: ReactNode }) {
   if (!children) return null
   return (
-    <p role="alert" className="rounded-xl border px-3.5 py-2.5 text-sm font-semibold" style={{ borderColor: 'var(--bad)', background: 'color-mix(in oklab, var(--bad) 16%, transparent)' }}>
-      {children}
+    <p
+      role="alert"
+      className="flex items-start gap-2.5 rounded-[4px] border-2 px-3.5 py-2.5 text-sm font-semibold"
+      style={{ borderColor: 'var(--bad)', background: 'color-mix(in oklab, var(--bad) 16%, transparent)' }}
+    >
+      <IconClose className="mt-0.5 text-base" style={{ color: 'var(--bad)' }} />
+      <span className="min-w-0 flex-1">{children}</span>
     </p>
   )
 }
@@ -63,13 +78,20 @@ export function Modal({ open, onClose, children, wide }: { open: boolean; onClos
     if (!open) return
     const onKey = (event: KeyboardEvent) => event.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    const previousOverflow = document.documentElement.style.overflow
+    document.documentElement.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.documentElement.style.overflow = previousOverflow
+    }
   }, [open, onClose])
   if (!open) return null
   return (
     <div className="fixed inset-0 z-50 grid place-items-end sm:place-items-center" role="dialog" aria-modal="true">
-      <button aria-label="Close" className="absolute inset-0 cursor-default bg-black/60" onClick={onClose} />
-      <div className={`card rise relative max-h-[92dvh] w-full overflow-y-auto rounded-b-none p-5 sm:rounded-b-[18px] ${wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'}`}>
+      <button aria-label="Close" className="absolute inset-0 cursor-default bg-black/65" onClick={onClose} />
+      <div
+        className={`card rise relative max-h-[92dvh] w-full overflow-y-auto rounded-b-none p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:rounded-b-[var(--radius)] sm:pb-5 ${wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'}`}
+      >
         {children}
       </div>
     </div>
@@ -85,17 +107,34 @@ export function useSoundSetting(): [boolean, (on: boolean) => void] {
 export function SoundToggle() {
   const [on, setOn] = useSoundSetting()
   return (
-    <button className="btn btn-ghost btn-sm" aria-pressed={on} aria-label={on ? 'Turn sound off' : 'Turn sound on'} onClick={() => setOn(!on)} title={on ? 'Sound on' : 'Sound off'}>
-      <span aria-hidden>{on ? '🔊' : '🔇'}</span>
+    <button
+      className="btn btn-ghost btn-sm"
+      aria-pressed={on}
+      aria-label={on ? 'Turn sound off' : 'Turn sound on'}
+      onClick={() => setOn(!on)}
+      title={on ? 'Sound on' : 'Sound off'}
+    >
+      {on ? <IconSoundOn size={16} /> : <IconSoundOff size={16} className="opacity-60" />}
     </button>
   )
 }
 
 export function Meter({ value, max, tone = 'var(--brand)' }: { value: number; max: number; tone?: string }) {
-  const percent = max > 0 ? Math.min(100, Math.round((value / max) * 100)) : 0
+  const fraction = max > 0 ? Math.min(1, Math.max(0, value / max)) : 0
+  const percent = Math.round(fraction * 100)
   return (
-    <div className="h-2.5 w-full overflow-hidden rounded-full" style={{ background: 'color-mix(in oklab, var(--ink) 12%, transparent)' }} role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
-      <div className="h-full rounded-full transition-[width] duration-700" style={{ width: `${percent}%`, background: tone }} />
+    <div
+      className="h-2.5 w-full overflow-hidden rounded-[3px] border"
+      style={{ background: 'color-mix(in oklab, var(--ink) 10%, transparent)', borderColor: 'var(--line)' }}
+      role="progressbar"
+      aria-valuenow={percent}
+      aria-valuemin={0}
+      aria-valuemax={100}
+    >
+      <div
+        className="h-full w-full origin-left transition-transform duration-700"
+        style={{ transform: `scaleX(${fraction})`, background: tone }}
+      />
     </div>
   )
 }

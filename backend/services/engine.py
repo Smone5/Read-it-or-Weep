@@ -176,17 +176,22 @@ async def start_run(quiz: dict, rules: dict, player: dict, mode: str, decade: st
 
 # --------------------------------------------------------------------------- serving items
 
-def _image_view(image_id: str, variant: str, description: str | None) -> dict:
+def _image_view(image_id: str, variant: str, description: str | None, width: int | None = None,
+                height: int | None = None) -> dict:
     expires, signature = sign_media(f"{image_id}:{variant}")
-    return {"url": f"/api/media/image/{image_id}?v={variant}&exp={expires}&sig={signature}",
+    view = {"url": f"/api/media/image/{image_id}?v={variant}&exp={expires}&sig={signature}",
             "alt": description or "A picture from the report", "mode": "memory" if variant == "blur" else "show"}
+    if width and height:
+        view["width"] = width
+        view["height"] = height
+    return view
 
 
 def _picture_mode(rules: dict, question: dict) -> str:
-    setting = rules.get("picture_mode", "auto")
-    if setting in ("show", "memory"):
-        return setting
-    return "memory" if question["skill"] == "recall" else "show"
+    setting = rules.get("picture_mode", "show")
+    if setting == "memory":
+        return "memory"
+    return "show"
 
 
 def _wager_options(score: int) -> list[int]:
@@ -232,7 +237,11 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
             built = await jukebox.jargon_item(tracks, avoid)
         else:
             used = {i["payload"].get("phrase") for i in items if i["slot"] == "song_or_jargon"}
-            built = jukebox.song_or_jargon_item(tracks, avoid, used)
+            prior = [i for i in items if i["slot"] == "song_or_jargon"]
+            songs_so_far = sum(1 for i in prior if i["correct_index"] == 0)
+            jargon_so_far = len(prior) - songs_so_far
+            prefer_song = True if songs_so_far < jargon_so_far else (False if jargon_so_far < songs_so_far else None)
+            built = jukebox.song_or_jargon_item(tracks, avoid, used, prefer_song=prefer_song)
         if built is None:
             return None
         payload = {**built["payload"], "attempt": int(slot.get("attempt", 1))}
@@ -436,9 +445,13 @@ async def public_item(item: dict, run: dict) -> dict:
                         if item["time_limit_sec"] else None),
     })
     if payload.get("image_id"):
-        description = await db.fetchval("select description from doc_images where id = $1", payload["image_id"])
+        row = await db.fetchrow("select description, width, height from doc_images where id = $1", payload["image_id"])
         variant = "sharp" if payload.get("picture_mode") == "show" or "peek" in item["lifelines_used"] else "blur"
-        view["image"] = _image_view(payload["image_id"], variant, description if variant == "sharp" else None)
+        view["image"] = _image_view(
+            payload["image_id"], variant,
+            row["description"] if row and variant == "sharp" else None,
+            row["width"] if row else None, row["height"] if row else None,
+        )
     if clip := _clip(item):
         view["music"] = clip
     return view
@@ -529,7 +542,13 @@ async def use_lifeline(run: dict, item_id: str, kind: str, hint_writer=None) -> 
             chunk = await db.fetchval("select chunk_text from doc_chunks where id = $1", question["chunk_id"])
             excerpt = _excerpt(chunk or "", question["source_quote"] or "")
         if payload.get("image_id"):
-            excerpt = "Take a proper look at the picture."
+            if payload.get("picture_mode") == "memory":
+                excerpt = "Take a proper look at the picture."
+            else:
+                img_ctx = await db.fetchval("select context_text from doc_images where id = $1", payload["image_id"])
+                excerpt = _excerpt(img_ctx or "", question["source_quote"] or "") if img_ctx else ""
+                if not excerpt.strip():
+                    raise GameError("The full picture is already on screen. Try 50/50 or Hint.")
         if not excerpt.strip():                   # a hand-written question with no passage behind it
             raise GameError("There is no passage to peek at for this one. Try another lifeline.")
         payload["peek"] = excerpt[:700]
@@ -577,12 +596,11 @@ def _points(run: dict, rules: dict, item: dict, correct: bool, timed_out: bool, 
         if slot == "music":
             return 75
         return round((50 + 50 * time_fraction) * (1 + 0.1 * (item["round_no"] - 1)) * multiplier)
-    # Game Show
+    # Game Show — wrong guesses and timeouts are symmetric (0 pts) so stalling never beats guessing.
     if slot == "fact_fake":
-        return round(30 + 20 * time_fraction) if correct else (0 if timed_out else -10)
+        return round(30 + 20 * time_fraction) if correct else 0
     if not correct:
-        # Music breaks and second chances are upside only; elsewhere a wrong guess costs a little.
-        return 0 if (timed_out or slot in ("music", "second_chance")) else -25
+        return 0
     streak_bonus = 10 * min(run["streak"], 5)               # run["streak"] is the streak *before* this answer
     return round((50 + 50 * time_fraction) * multiplier) + streak_bonus
 
@@ -672,12 +690,16 @@ async def _reveal(item: dict, run: dict, rules: dict) -> dict:
             " left join doc_sections s on s.id = q.section_id where q.id = $1", item["question_id"])
         if question:
             result["explanation"] = question["explanation"]
-            result["sourceQuote"] = question["source_quote"] if question["source_type"] != "image" else None
+            result["sourceQuote"] = question["source_quote"]
             if question["section_id"]:
                 result["section"] = {"id": question["section_id"], "heading": question["heading"]}
     if payload.get("image_id"):
-        description = await db.fetchval("select description from doc_images where id = $1", payload["image_id"])
-        result["image"] = _image_view(payload["image_id"], "sharp", description)
+        row = await db.fetchrow("select description, width, height from doc_images where id = $1", payload["image_id"])
+        result["image"] = _image_view(
+            payload["image_id"], "sharp",
+            row["description"] if row else None,
+            row["width"] if row else None, row["height"] if row else None,
+        )
     if item["music_track_id"]:
         track = await db.fetchrow("select artist, title, artwork_url, track_url from music_tracks where id = $1",
                                   item["music_track_id"])

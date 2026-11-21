@@ -69,8 +69,10 @@ async def readiness(quiz_id: str, player_id: str, threshold: int) -> dict:
             "threshold": threshold, "sections": detail}
 
 
-async def leaderboard(quiz_id: str, mode: str, team: str | None = None, limit: int = 20,
-                      player_id: str | None = None) -> dict:
+async def leaderboard(quiz_id: str, mode: str, team: str | None = None, limit: int = 100,
+                      offset: int = 0, query: str | None = None, player_id: str | None = None) -> dict:
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
     rows = await db.fetch(
         "select b.player_id, b.score, b.badge, b.decade, b.passed, p.name, p.team from quiz_best_runs b"
         " join players p on p.id = b.player_id where b.quiz_id = $1 and b.mode = $2"
@@ -78,13 +80,63 @@ async def leaderboard(quiz_id: str, mode: str, team: str | None = None, limit: i
     entries = [{"rank": i, "name": display_name(r["name"]), "team": r["team"], "score": r["score"], "badge": r["badge"],
                 "decade": r["decade"], "passed": r["passed"], "you": r["player_id"] == player_id}
                for i, r in enumerate(rows, start=1)]
-    mine = next((e for e in entries if e["you"]), None)
+    my_index = next((idx for idx, e in enumerate(entries) if e["you"]), None)
+    mine = dict(entries[my_index]) if my_index is not None else None
+    if mine is not None and my_index is not None and my_index > 0:
+        ahead = entries[my_index - 1]
+        mine["gapToNext"] = max(0, ahead["score"] - mine["score"])
+        mine["aheadName"] = ahead["name"]
+
+    needle = (query or "").strip().lower()
+    matched = (
+        [e for e in entries if needle in e["name"].lower() or (e["team"] and needle in e["team"].lower())
+         or (e["badge"] and needle in e["badge"].lower())]
+        if needle else entries
+    )
+    page = matched[offset:offset + limit]
+
+    around_you: list[dict] = []
+    if not needle and my_index is not None and (my_index < offset or my_index >= offset + limit):
+        start = max(0, my_index - 1)
+        around_you = entries[start:my_index + 2]
+
+    your_runs: list[dict] = []
+    if player_id:
+        recent = await db.fetch(
+            "select id, score, badge, passed, streak_max, correct_answers, questions_answered, finished_at from runs"
+            " where quiz_id = $1 and player_id = $2 and mode = $3 and status = 'completed'"
+            " order by finished_at desc limit 8", quiz_id, player_id, mode)
+        best_score = max((r["score"] for r in recent), default=None)
+        if mine and best_score is not None:
+            best_score = max(best_score, mine["score"])
+        your_runs = [{
+            "id": str(r["id"]),
+            "score": r["score"],
+            "badge": r["badge"],
+            "passed": r["passed"],
+            "streakMax": r["streak_max"],
+            "correct": r["correct_answers"],
+            "answered": r["questions_answered"],
+            "finishedAt": r["finished_at"].isoformat() if r["finished_at"] else None,
+            "isBest": best_score is not None and r["score"] == best_score,
+        } for r in recent]
     teams = await db.fetch(
         "select p.team, round(avg(b.score))::int as average, count(*) as players from quiz_best_runs b"
         " join players p on p.id = b.player_id where b.quiz_id = $1 and b.mode = $2 and p.team is not null"
         " and p.team <> '' group by p.team order by average desc", quiz_id, mode)
-    return {"mode": mode, "modeName": MODES[mode]["name"], "entries": entries[:limit], "you": mine,
-            "players": len(entries), "teams": teams}
+    return {
+        "mode": mode,
+        "modeName": MODES[mode]["name"],
+        "team": team,
+        "entries": page,
+        "aroundYou": around_you,
+        "yourRuns": your_runs,
+        "you": mine,
+        "players": len(entries),
+        "matched": len(matched),
+        "hasMore": offset + limit < len(matched),
+        "teams": teams,
+    }
 
 
 async def _after_party(run: dict, rules: dict, items: list[dict]) -> dict | None:

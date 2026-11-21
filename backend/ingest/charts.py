@@ -14,7 +14,7 @@ from lxml import etree
 C = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
 A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 
-_PALETTE = ["#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD", "#8C564B", "#17BECF", "#7F7F7F"]
+_PALETTE = ["#2563EB", "#0D9488", "#D97706", "#DC2626", "#7C3AED", "#4F46E5", "#0891B2", "#475569"]
 
 
 @dataclass
@@ -50,11 +50,10 @@ class ChartData:
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        # Drawn to be read on a phone: a squarer shape than a page chart, and lettering about half as big
-        # again, so the labels survive being shown a few centimetres wide.
+        # Drawn to stay razor-sharp under mobile pinch-zoom and on 1080p/4K projectors (1452x1012 at 220 dpi).
         plt.rcParams.update({"font.size": 13, "axes.titlesize": 15, "axes.labelsize": 13,
                              "xtick.labelsize": 12, "ytick.labelsize": 12})
-        fig, ax = plt.subplots(figsize=(6.6, 4.6), dpi=150)
+        fig, ax = plt.subplots(figsize=(6.6, 4.6), dpi=220)
         try:
             categories = self.series[0].categories if self.series else []
             if self.kind in ("pie", "doughnut"):
@@ -100,6 +99,8 @@ class ChartData:
                                   ha="center" if len(categories) <= 7 else "right")
             if self.kind not in ("pie", "doughnut"):
                 ax.spines[["top", "right"]].set_visible(False)
+                ax.set_axisbelow(True)
+                ax.grid(axis="x" if self.horizontal else "y", linestyle="--", alpha=0.22, color="#64748B")
                 if self.value_axis:
                     (ax.set_xlabel if self.horizontal else ax.set_ylabel)(self.value_axis)
                 if self.category_axis:
@@ -107,7 +108,7 @@ class ChartData:
                 if len(self.series) > 1:
                     ax.legend(frameon=False, fontsize=12)
             if self.title:
-                ax.set_title(self.title, fontweight="bold")
+                ax.set_title(self.title, fontweight="bold", pad=12)
             buf = io.BytesIO()
             fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
             return buf.getvalue()

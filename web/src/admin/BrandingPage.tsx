@@ -421,7 +421,8 @@ function GamePreview({ form, fallback, logoUrl }: { form: Form; fallback: Brandi
   const style = {
     '--brand': primary,
     '--accent': accent,
-    '--brand-ink': luminance(primary) > 0.55 ? '#14112b' : '#ffffff',
+    '--brand-ink': luminance(primary) > 0.2 ? '#14112b' : '#ffffff',
+    '--accent-ink': luminance(accent) > 0.2 ? '#1c1300' : '#ffffff',
     '--page': palette.page,
     '--surface': palette.surface,
     '--surface-2': palette.surface2,

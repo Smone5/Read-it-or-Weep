@@ -102,14 +102,14 @@ def item(slot="report", multiplier=1.0, wager=None, round_no=1):
     return {"slot": slot, "points_multiplier": multiplier, "wager": wager, "round_no": round_no}
 
 
-def test_show_scoring_rewards_speed_and_streaks_and_forgives_timeouts():
+def test_show_scoring_rewards_speed_and_streaks_without_timeout_exploit():
     run = {"mode": "show", "streak": 0}
     fast = engine._points(run, RULES, item(), True, False, 1.0)
     slow = engine._points(run, RULES, item(), True, False, 0.0)
     assert fast == 100 and slow == 50
     assert engine._points({"mode": "show", "streak": 3}, RULES, item(), True, False, 1.0) == 130
-    assert engine._points(run, RULES, item(), False, False, 0.5) == -25
-    assert engine._points(run, RULES, item(), False, True, 0.0) == 0          # running out of time costs nothing
+    assert engine._points(run, RULES, item(), False, False, 0.5) == 0          # wrong guess == timeout (no stalling exploit)
+    assert engine._points(run, RULES, item(), False, True, 0.0) == 0
 
 
 def test_music_and_second_chances_can_only_help():

@@ -1,15 +1,18 @@
 // Building blocks shared by the solo game, the summary and the live screens.
 
 import { useEffect, useRef, useState } from 'react'
+import { HostCrt, type HostCrtState } from '../components/HostCrt'
+import { IconBolt, IconCheck, IconClose, IconCrown, IconExpand, IconHeart, IconMic, IconPause, IconPlay, IconStar, IconTrophy } from '../components/Icons'
 import { Meter } from '../components/ui'
 import { PictureViewer, ZoomImage } from '../components/ZoomImage'
 import type { TalkState } from '../lib/hostVoice'
 import { musicElement, musicFading, playClip, resumeClip, stopMusic } from '../lib/music'
 import { play } from '../lib/sound'
 import { trace } from '../lib/trace'
-import type { ItemImage, Leaderboard, Readiness, RunState } from '../lib/types'
+import type { ItemImage, Leaderboard, LeaderboardEntry, Readiness, RunState } from '../lib/types'
 
 export const TONES = ['var(--a0)', 'var(--a1)', 'var(--a2)', 'var(--a3)']
+export const TONE_INKS = ['var(--a0-ink)', 'var(--a1-ink)', 'var(--a2-ink)', 'var(--a3-ink)']
 export const LETTERS = ['A', 'B', 'C', 'D']
 
 // --------------------------------------------------------------------------- host
@@ -25,13 +28,23 @@ const TAP_MS = 400 // a press shorter than this is a tap: the microphone stays o
 const LONGEST_TURN_MS = 15000 // ...or until this long has passed
 
 /**
- * The host's dialogue box, with a microphone button when the player may answer back.
- *
- * The button works both ways people expect: tap it, talk, tap again to send – or hold it while
- * talking and let go. (The first press may bring up the browser's permission question, which is
- * why a tap must not need to be held.)
+ * The host's dialogue box with an animated retro CRT monitor and hold/tap microphone control.
  */
-export function HostBox({ name, line, speaking, talk }: { name: string; line: string; speaking: boolean; talk?: TalkControl | null }) {
+export function HostBox({
+  name,
+  line,
+  speaking,
+  talk,
+  mood = 'idle',
+  tone = 'accent',
+}: {
+  name: string
+  line: string
+  speaking: boolean
+  talk?: TalkControl | null
+  mood?: 'idle' | 'happy' | 'wince'
+  tone?: 'accent' | 'brand' | 'cyan' | 'rose'
+}) {
   const pressedAt = useRef(0)
   const pressing = useRef(false)
   const limit = useRef<number | undefined>(undefined)
@@ -73,21 +86,29 @@ export function HostBox({ name, line, speaking, talk }: { name: string; line: st
   if (!line && !speaking && !talk) return <div className="h-0" aria-hidden />
   const listening = state === 'listening'
   const thinking = state === 'thinking'
+  const crtState: HostCrtState = listening
+    ? 'listening'
+    : mood !== 'idle' && !speaking
+      ? mood
+      : speaking
+        ? 'speaking'
+        : thinking
+          ? 'thinking'
+          : mood !== 'idle'
+            ? mood
+            : 'idle'
+
   let words: React.ReactNode = line || '…'
   if (listening) words = <span style={{ color: 'var(--accent)' }}>{tapped ? 'Listening… tap the mic again to send.' : 'Listening… let go when you are done.'}</span>
   else if (!line && thinking) words = <span className="text-white/60">…</span>
   else if (!line && !speaking) {
-    words = <span className="text-white/55">{talk?.problem ?? `Tap the mic to talk to ${name}: heckle, ask your score, or have the question read out.`}</span>
+    words = <span className="text-white/60">{talk?.problem ?? `Tap the mic to talk to ${name}: heckle, ask your score, or have the question read out.`}</span>
   }
   return (
-    <div className="dialogue rise flex items-center gap-3 px-3 pb-2.5 pt-3.5 text-[15px] leading-snug sm:text-base">
+    <div className="dialogue rise flex items-center gap-3 px-3 pb-2.5 pt-3.5 text-[15px] leading-snug sm:gap-3.5 sm:px-3.5 sm:text-base">
       <span className="who">{name}</span>
+      <HostCrt state={crtState} tone={tone} />
       <p className="min-w-0 flex-1" aria-live="polite">
-        <span className="mr-2 inline-flex align-middle">
-          <span className="host-wave" data-on={speaking || listening}>
-            <i /><i /><i /><i />
-          </span>
-        </span>
         <span className={speaking && !listening ? 'caret' : ''}>{words}</span>
       </p>
       {talk && (
@@ -119,9 +140,7 @@ export function HostBox({ name, line, speaking, talk }: { name: string; line: st
           }}
           onKeyUp={(event) => (event.key === ' ' || event.key === 'Enter') && release()}
         >
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden fill="currentColor">
-            <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 0 0-7 0v5A3.5 3.5 0 0 0 12 15Zm6-3.5a1 1 0 1 0-2 0 4 4 0 0 1-8 0 1 1 0 1 0-2 0 6 6 0 0 0 5 5.900V20H9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2h-2v-2.600a6 6 0 0 0 5-5.900Z" />
-          </svg>
+          <IconMic size={22} />
         </button>
       )}
     </div>
@@ -180,7 +199,10 @@ export function TimerBar({ timerKey, totalMs, remainingMs, running, hold = false
       const seconds = Math.ceil(left / 1000)
       if (seconds !== lastSecond) {
         lastSecond = seconds
-        if (label.current) label.current.textContent = String(seconds)
+        if (label.current) {
+          label.current.textContent = String(seconds)
+          label.current.style.color = left <= 5000 ? 'var(--bad)' : ''
+        }
         second.current?.(seconds)
         if (!quiet && seconds <= 5 && seconds > 0) play('tick')
       }
@@ -202,7 +224,7 @@ export function TimerBar({ timerKey, totalMs, remainingMs, running, hold = false
       <div className="timer-track flex-1">
         <div ref={fill} className="timer-fill" style={{ transform: `scaleX(${totalMs ? remainingMs / totalMs : 0})` }} />
       </div>
-      <span ref={label} className="pixel w-8 text-right text-[11px]">{Math.ceil(remainingMs / 1000)}</span>
+      <span ref={label} className="pixel w-9 text-right text-[11px] tabular-nums">{Math.ceil(remainingMs / 1000)}</span>
     </div>
   )
 }
@@ -256,15 +278,15 @@ export function AnswerList({ options, removed = [], picked, correctIndex, disabl
             key={index}
             className="answer"
             data-state={state}
-            style={{ ['--tone' as string]: TONES[index % 4] }}
+            style={{ ['--tone' as string]: TONES[index % 4], ['--tone-ink' as string]: TONE_INKS[index % 4] }}
             disabled={disabled || gone}
             onClick={() => onPick(index)}
             aria-label={`Answer ${LETTERS[index]}: ${option}`}
           >
             <span className="badge pixel" aria-hidden>{LETTERS[index]}</span>
             <span className="min-w-0 flex-1 break-words">{option}</span>
-            {revealed && index === correctIndex && <span aria-hidden>✔</span>}
-            {revealed && index === picked && index !== correctIndex && <span aria-hidden>✘</span>}
+            {revealed && index === correctIndex && <IconCheck size={18} style={{ color: 'var(--good)' }} />}
+            {revealed && index === picked && index !== correctIndex && <IconClose size={16} style={{ color: 'var(--bad)' }} />}
           </button>
         )
       })}
@@ -283,13 +305,13 @@ export function FactFakeButtons({ picked, correctIndex, disabled, onPick, labels
       {labels.map((label, index) => (
         <button
           key={label}
-          className="answer justify-center !min-h-[84px]"
+          className="answer min-h-[84px] justify-center"
           data-state={look(index)}
           style={{ ['--tone' as string]: index === 0 ? 'var(--good)' : 'var(--bad)' }}
           disabled={disabled}
           onClick={() => onPick(index)}
         >
-          <span className="pixel text-base sm:text-lg" style={{ color: index === 0 ? 'var(--good)' : 'var(--bad)' }}>{label}</span>
+          <span className="pixel text-sm sm:text-lg" style={{ color: index === 0 ? 'var(--good)' : 'var(--bad)' }}>{label}</span>
         </button>
       ))}
     </div>
@@ -304,18 +326,21 @@ type PictureProps = {
   secondsLeft?: number | null
   /** The question, shown under the full-screen picture so it stays in mind. */
   caption?: string | null
+  /** True when mounted in the side-by-side desktop stage. */
+  wide?: boolean
 }
 
 /**
- * A picture from the report. It can be pinched larger right where it is, and a tap opens it
- * full screen, where a wide chart is turned on its side to use the whole phone.
+ * A picture from the report, framed as an exhibit monitor above the scanlines.
+ * It can be pinched larger right where it is, and a tap opens it full screen.
  */
-export function PictureView({ image, secondsLeft, caption }: PictureProps) {
+export function PictureView({ image, secondsLeft, caption, wide = false }: PictureProps) {
   const [open, setOpen] = useState(false)
-  const [size, setSize] = useState<{ w: number; h: number } | null>(null)
+  const initialSize = image.width && image.height ? { w: image.width, h: image.height } : null
+  const [size, setSize] = useState<{ w: number; h: number } | null>(initialSize)
   const holder = useRef<HTMLDivElement>(null)
   const [room, setRoom] = useState({ w: 0, h: 0 })
-  const frame = { borderColor: 'var(--accent)', boxShadow: '4px 4px 0 #000' }
+  const frame = { borderColor: 'var(--accent)', boxShadow: '0 0 0 2px #000, 4px 4px 0 2px #000' }
 
   useEffect(() => {
     const measure = () => setRoom({ w: holder.current?.clientWidth ?? 0, h: window.innerHeight })
@@ -329,18 +354,46 @@ export function PictureView({ image, secondsLeft, caption }: PictureProps) {
   // with a sideways swipe for the rest (and full screen one tap away for the whole thing at once).
   const fitted = size && room.w ? (room.w * size.h) / size.w : 0
   const wanted = Math.min(room.h * 0.36, size?.h ?? 0)
-  const strip = fitted > 0 && fitted < wanted * 0.8
+  const strip = !wide && fitted > 0 && fitted < wanted * 0.8
+
   if (image.mode === 'memory') {
     return (
-      <div className="relative overflow-hidden rounded border-2 bg-white" style={frame}>
-        <img src={image.url} alt="" className="mx-auto max-h-[38dvh] w-full object-contain" />
-        <span className="pixel absolute inset-x-0 bottom-0 bg-black/75 px-2 py-2 text-center text-[9px] text-white">From memory – no peeking</span>
+      <div className="picture-frame overflow-hidden rounded-[5px] border-2 bg-white" style={frame}>
+        <div className="exhibit-bar">
+          <span className="pixel text-[10px]" style={{ color: 'var(--accent)' }}>Exhibit · Memory</span>
+        </div>
+        <div className="relative">
+          <img
+            src={image.url}
+            alt=""
+            width={image.width ?? undefined}
+            height={image.height ?? undefined}
+            className={`mx-auto w-full object-contain ${wide ? 'max-h-[56dvh]' : 'max-h-[38dvh]'}`}
+          />
+          <span className="pixel absolute inset-x-0 bottom-0 bg-black/80 px-2.5 py-2 text-center text-[10px] text-white">From memory – no peeking</span>
+        </div>
       </div>
     )
   }
+
   return (
     <>
-      <div ref={holder} className="picture-frame relative overflow-hidden rounded border-2 bg-white" style={frame}>
+      <div ref={holder} className="picture-frame overflow-hidden rounded-[5px] border-2 bg-white" style={frame}>
+        <div className="exhibit-bar">
+          <span className="text-xs font-bold tracking-widest uppercase" style={{ color: 'var(--accent)' }}>
+            Report Exhibit
+          </span>
+          <button
+            type="button"
+            className="inline-flex min-h-[34px] items-center gap-1.5 rounded-[3px] border border-white/25 bg-white/10 px-2.5 text-xs font-bold tracking-wider text-white uppercase hover:bg-white/20"
+            onClick={() => setOpen(true)}
+            aria-label="Open the picture full screen"
+            title="Full screen"
+          >
+            <IconExpand size={13} />
+            <span>Zoom</span>
+          </button>
+        </div>
         <ZoomImage
           src={image.url}
           alt={image.alt}
@@ -348,17 +401,15 @@ export function PictureView({ image, secondsLeft, caption }: PictureProps) {
           onTap={() => setOpen(true)}
           onSize={setSize}
           className="w-full"
-          style={strip ? { height: wanted } : { aspectRatio: size ? `${size.w} / ${size.h}` : '16 / 9', maxHeight: '46dvh' }}
+          style={
+            strip
+              ? { height: wanted }
+              : {
+                  aspectRatio: size ? `${size.w} / ${size.h}` : '16 / 9',
+                  maxHeight: wide ? '62dvh' : '46dvh',
+                }
+          }
         />
-        <button
-          className="absolute bottom-1.5 right-1.5 grid h-9 w-9 place-items-center rounded-sm bg-black/80 text-lg leading-none text-white"
-          style={{ fontFamily: 'system-ui, sans-serif' }}
-          onClick={() => setOpen(true)}
-          aria-label="Open the picture full screen"
-          title="Full screen"
-        >
-          ⤢
-        </button>
       </div>
       {open && <PictureViewer src={image.url} alt={image.alt} secondsLeft={secondsLeft} caption={caption} onClose={() => setOpen(false)} />}
     </>
@@ -408,8 +459,6 @@ export function MusicPlayer({ src, active, onBroken, onPlaying, onClipOver }: Mu
     const refused = (error: unknown) => (error as Error)?.name === 'NotAllowedError' && setBlocked(true)
     const onPause = () => setPlaying(false)
     let live = true
-    // Report a clip as broken only for a genuine media failure on *this* clip while it is on screen
-    // (tearing the player down also fires events, which must never count).
     const onError = () => {
       const failure = audio.error?.code
       const genuine = failure === MediaError.MEDIA_ERR_NETWORK || failure === MediaError.MEDIA_ERR_DECODE || failure === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
@@ -420,12 +469,8 @@ export function MusicPlayer({ src, active, onBroken, onPlaying, onClipOver }: Mu
     audio.addEventListener('pause', onPause)
     audio.addEventListener('ended', onEnd)
     audio.addEventListener('error', onError)
-    // The clip was loading while the round was being introduced; if it already failed, say so now.
     if (audio.dataset.clip === src && audio.error) onError()
-    else playClip(src).catch(refused) // already buffered, so it swells in at once
-    // A clip that has not produced a sound after a good while is as broken as one that errors
-    // (a stalled download, a network that blocks the music host). The server double-checks before
-    // it blames the clip, so reporting it costs nothing if the trouble is on this side.
+    else playClip(src).catch(refused)
     const watchdog = window.setTimeout(() => {
       const waitingForTap = audio.paused && audio.dataset.clip === src && !audio.error
       if (live && !heard && !waitingForTap) {
@@ -447,7 +492,7 @@ export function MusicPlayer({ src, active, onBroken, onPlaying, onClipOver }: Mu
       audio.removeEventListener('pause', onPause)
       audio.removeEventListener('ended', onEnd)
       audio.removeEventListener('error', onError)
-      if (!musicFading()) stopMusic() // a fade already in progress finishes by itself
+      if (!musicFading()) stopMusic()
     }
   }, [src])
 
@@ -469,7 +514,7 @@ export function MusicPlayer({ src, active, onBroken, onPlaying, onClipOver }: Mu
         <p className="mt-1 text-muted">{blocked ? 'Tap play to hear the clip.' : !playing ? 'Paused.' : active ? 'Listen closely…' : 'Turn it up.'}</p>
       </div>
       <button className={`btn btn-accent ${blocked ? 'animate-pulse' : ''}`} onClick={toggle} aria-label={playing ? 'Pause the clip' : 'Play the clip'}>
-        {playing ? '❚❚' : '▶'}
+        {playing ? <IconPause size={16} /> : <IconPlay size={16} />}
       </button>
     </div>
   )
@@ -479,7 +524,7 @@ export function MusicPlayer({ src, active, onBroken, onPlaying, onClipOver }: Mu
 
 export function Hud({ state, clockMs, position }: { state: RunState; clockMs?: number; position?: string }) {
   return (
-    <div className="flex items-end justify-between gap-3">
+    <div className="flex min-w-0 flex-wrap items-end justify-between gap-x-3 gap-y-1.5">
       <div className="hud">
         Score<b className="neon-accent">{String(state.score).padStart(6, '0')}</b>
       </div>
@@ -487,9 +532,14 @@ export function Hud({ state, clockMs, position }: { state: RunState; clockMs?: n
         <div className="hud text-center">
           Lives
           <b className="flex justify-center gap-1 pt-0.5">
-            {Array.from({ length: state.maxStrikes ?? 3 }, (_, i) => (
-              <span key={i} className="heart" data-lost={i >= (state.maxStrikes ?? 3) - (state.strikes ?? 0)} />
-            ))}
+            {Array.from({ length: state.maxStrikes ?? 3 }, (_, i) => {
+              const lost = i >= (state.maxStrikes ?? 3) - (state.strikes ?? 0)
+              return (
+                <span key={i} className="heart" data-lost={lost} aria-hidden>
+                  <IconHeart size={16} />
+                </span>
+              )
+            })}
           </b>
         </div>
       )}
@@ -500,7 +550,10 @@ export function Hud({ state, clockMs, position }: { state: RunState; clockMs?: n
       )}
       {state.streak >= 2 && (
         <div className="hud text-center">
-          Streak<b style={{ color: 'var(--accent)' }}>x{state.streak}</b>
+          Streak
+          <b className="inline-flex items-center gap-1" style={{ color: 'var(--accent-text)' }}>
+            <IconBolt size={12} />x{state.streak}
+          </b>
         </div>
       )}
       {position && (
@@ -519,8 +572,8 @@ export function ReadinessMap({ readiness, compact }: { readiness: Readiness; com
   return (
     <div>
       <div className="mb-2 flex items-center justify-between gap-3">
-        <p className="pixel text-[9px] text-muted">Readiness</p>
-        <p className="pixel text-[10px]" style={{ color: readiness.ready ? 'var(--good)' : 'var(--accent)' }}>
+        <p className="pixel text-[10px] text-muted">Readiness</p>
+        <p className="pixel text-[10px]" style={{ color: readiness.ready ? 'var(--good)' : 'var(--accent-text)' }}>
           {readiness.cleared}/{readiness.total} sections {readiness.ready ? '· ready!' : ''}
         </p>
       </div>
@@ -537,7 +590,7 @@ export function ReadinessMap({ readiness, compact }: { readiness: Readiness; com
                   color: section.state === 'new' ? 'var(--muted)' : '#111',
                 }}
               >
-                {section.state === 'cleared' ? '✔' : section.state === 'tried' ? '!' : '·'}
+                {section.state === 'cleared' ? <IconCheck size={12} /> : section.state === 'tried' ? '!' : '·'}
               </span>
               <span className={section.state === 'new' ? 'text-muted' : ''}>{section.heading}</span>
               <span className="sr-only">
@@ -551,43 +604,286 @@ export function ReadinessMap({ readiness, compact }: { readiness: Readiness; com
   )
 }
 
-export function HighScores({ board }: { board: Leaderboard }) {
-  if (!board.entries.length) {
-    return <p className="py-6 text-center text-muted">No scores yet. Be the first on the board.</p>
-  }
+export function formatScore(value: number): string {
+  return value.toLocaleString()
+}
+
+function rankTone(rank: number): { color: string; border: string } {
+  if (rank === 1) return { color: '#ffd60a', border: 'color-mix(in oklab, #ffd60a 60%, transparent)' }
+  if (rank === 2) return { color: '#e2e8f0', border: 'color-mix(in oklab, #cbd5e1 50%, transparent)' }
+  if (rank === 3) return { color: '#f59e0b', border: 'color-mix(in oklab, #f59e0b 55%, transparent)' }
+  return { color: 'var(--muted)', border: 'color-mix(in oklab, var(--ink) 16%, transparent)' }
+}
+
+function ScoreRow({
+  entry,
+  topScore,
+  rowRef,
+}: {
+  entry: LeaderboardEntry
+  topScore: number
+  rowRef?: React.Ref<HTMLLIElement>
+}) {
+  const medal = rankTone(entry.rank)
+  const share = topScore > 0 ? Math.max(0.03, Math.min(1, entry.score / topScore)) : 0
   return (
-    <div>
-      <ol className="grid gap-1">
-        {board.entries.map((entry) => (
-          <li
-            key={`${entry.rank}-${entry.name}`}
-            className="flex items-center gap-3 rounded-sm px-2 py-1.5"
-            style={entry.you ? { background: 'color-mix(in oklab, var(--accent) 22%, transparent)', outline: '2px solid var(--accent)' } : undefined}
-          >
-            <span className="pixel w-9 text-[10px]" style={{ color: entry.rank <= 3 ? 'var(--accent)' : 'var(--muted)' }}>{String(entry.rank).padStart(2, '0')}</span>
-            <span className="min-w-0 flex-1 truncate">
-              {entry.name}
-              {entry.you && <span className="pixel ml-2 text-[8px]" style={{ color: 'var(--accent)' }}>you</span>}
-              {entry.team && <span className="ml-2 text-sm text-muted">{entry.team}</span>}
+    <li ref={rowRef} className="sb-row" data-you={entry.you}>
+      <span className="sb-bar" style={{ transform: `scaleX(${share})` }} aria-hidden />
+      <span className="sb-rank" style={{ color: medal.color, borderColor: medal.border }}>
+        {entry.rank === 1 && <IconCrown size={11} />}
+        {String(entry.rank).padStart(2, '0')}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate font-bold text-ink">{entry.name}</span>
+          {entry.you && <span className="sb-you-pill">You</span>}
+        </div>
+        {(entry.team || entry.badge || entry.passed !== null) && (
+          <p className="mt-0.5 truncate text-xs text-muted">
+            {[
+              entry.team,
+              entry.passed === true ? 'Passed' : entry.passed === false ? 'In progress' : entry.badge,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </p>
+        )}
+      </div>
+      <span
+        className="sb-score"
+        style={{ color: entry.you ? 'var(--accent)' : entry.rank === 1 ? '#ffd60a' : 'var(--ink)' }}
+      >
+        {formatScore(entry.score)}
+      </span>
+    </li>
+  )
+}
+
+type HighScoresProps = {
+  board: Leaderboard
+  /** Inline summary mode: caps visible rows at 8 (+ your row if ranked lower) and offers a button to expand. */
+  compact?: boolean
+  onOpenFull?: () => void
+  onLoadMore?: () => void
+  loadingMore?: boolean
+}
+
+export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loadingMore = false }: HighScoresProps) {
+  const yourRowRef = useRef<HTMLLIElement | null>(null)
+  const [runsOpen, setRunsOpen] = useState(false)
+
+  const totalPlayers = board.players
+  const topScore = Math.max(1, board.entries[0]?.score ?? 0, board.you?.score ?? 0)
+  const visibleLimit = compact ? 8 : board.entries.length
+  const visibleEntries = board.entries.slice(0, visibleLimit)
+  const youInVisible = visibleEntries.some((entry) => entry.you)
+
+  // If the player is outside the currently displayed slice, build their local neighborhood (rank - 1, you, rank + 1).
+  let neighborhood: LeaderboardEntry[] = []
+  if (board.you && !youInVisible) {
+    const idxInLoaded = board.entries.findIndex((entry) => entry.you)
+    if (idxInLoaded >= 0) {
+      const start = Math.max(visibleLimit, idxInLoaded - 1)
+      neighborhood = board.entries.slice(start, idxInLoaded + 2)
+    } else if (board.aroundYou && board.aroundYou.length > 0) {
+      neighborhood = board.aroundYou
+    } else {
+      neighborhood = [board.you]
+    }
+  }
+
+  const hiddenCount = Math.max(0, totalPlayers - visibleEntries.length)
+  const jumpToMe = () => {
+    yourRowRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {/* Pinned personal standing card: impossible to miss your own rank & score. */}
+      {board.you ? (
+        <div className="sb-you-card flex flex-wrap items-center justify-between gap-3 px-3.5 py-3">
+          <div className="flex items-center gap-3">
+            <span
+              className="pixel grid h-11 min-w-[48px] place-items-center rounded-[4px] border-2 px-2 text-sm tabular-nums"
+              style={{
+                borderColor: 'var(--accent)',
+                background: 'rgb(0 0 0 / 0.5)',
+                color: board.you.rank === 1 ? '#ffd60a' : 'var(--accent)',
+              }}
+            >
+              #{board.you.rank}
             </span>
-            <span className="pixel text-[11px]">{String(entry.score).padStart(6, '0')}</span>
-          </li>
-        ))}
-      </ol>
-      {board.you && board.you.rank > board.entries.length && (
-        <p className="mt-3 text-center text-muted">You are #{board.you.rank} with {board.you.score}.</p>
+            <div className="min-w-0">
+              <p className="pixel text-[9px] text-muted">
+                Your standing · of {totalPlayers}
+              </p>
+              <p className="mt-0.5 text-sm text-ink">
+                {board.you.rank === 1 ? (
+                  <span className="inline-flex items-center gap-1.5" style={{ color: '#ffd60a' }}>
+                    <IconCrown size={13} /> Leading the board!
+                  </span>
+                ) : board.you.gapToNext !== undefined ? (
+                  <>
+                    <b style={{ color: 'var(--accent)' }}>{formatScore(board.you.gapToNext)}</b> pts behind{' '}
+                    {board.you.aheadName ?? `#${board.you.rank - 1}`} (#{board.you.rank - 1})
+                  </>
+                ) : (
+                  `Rank #${board.you.rank} of ${totalPlayers}`
+                )}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2.5">
+            <div className="text-right">
+              <p className="pixel text-[9px] text-muted">Best</p>
+              <p className="sb-score !text-xl" style={{ color: 'var(--accent)' }}>
+                {formatScore(board.you.score)}
+              </p>
+            </div>
+            {!compact && visibleEntries.length > 8 && (
+              <button type="button" className="btn btn-ghost btn-sm" onClick={jumpToMe} title="Scroll to your row">
+                Find me
+              </button>
+            )}
+          </div>
+        </div>
+      ) : (
+        <p className="rounded-[4px] border border-line bg-black/25 px-3 py-2 text-sm text-muted">
+          Finish a {board.modeName} game to put your score on this board.
+        </p>
       )}
-      {board.teams.length >= 2 && (
-        <div className="mt-5">
-          <p className="pixel mb-2 text-[9px] text-muted">Teams · average score</p>
-          <ol className="grid gap-1.5">
-            {board.teams.map((team, index) => (
-              <li key={team.team} className="flex items-center gap-3">
-                <span className="pixel w-9 text-[10px]" style={{ color: 'var(--accent)' }}>{String(index + 1).padStart(2, '0')}</span>
-                <span className="flex-1 truncate">{team.team} <span className="text-sm text-muted">({team.players})</span></span>
-                <span className="pixel text-[11px]">{String(team.average).padStart(6, '0')}</span>
-              </li>
+
+      {/* Player's own recent completed games in this mode (shows ALL of your recent scores, not just 1). */}
+      {board.yourRuns && board.yourRuns.length > 0 && (
+        <div className="rounded-[4px] border border-line bg-black/25 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <p className="pixel text-[9px] text-muted">Your scores ({board.yourRuns.length})</p>
+            {board.yourRuns.length > 4 && (
+              <button
+                type="button"
+                className="text-xs font-bold underline text-muted hover:text-ink"
+                onClick={() => setRunsOpen((open) => !open)}
+              >
+                {runsOpen ? 'Show fewer' : `Show all ${board.yourRuns.length}`}
+              </button>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {(runsOpen ? board.yourRuns : board.yourRuns.slice(0, 4)).map((run, index) => (
+              <span
+                key={run.id}
+                className="inline-flex items-center gap-1.5 rounded-[3px] border px-2.5 py-1 text-sm tabular-nums"
+                style={{
+                  borderColor: run.isBest ? 'var(--accent)' : 'var(--line)',
+                  background: run.isBest ? 'color-mix(in oklab, var(--accent) 16%, transparent)' : 'rgb(0 0 0 / 0.35)',
+                  color: run.isBest ? 'var(--accent)' : 'var(--ink)',
+                }}
+                title={run.answered ? `${run.correct}/${run.answered} correct · Best streak x${run.streakMax}` : undefined}
+              >
+                {run.isBest && <IconStar size={11} />}
+                <b>{formatScore(run.score)}</b>
+                {run.answered > 0 && (
+                  <span className="text-xs text-muted">
+                    {Math.round((100 * run.correct) / run.answered)}%
+                  </span>
+                )}
+                {index === 0 && <span className="text-[11px] text-muted">latest</span>}
+              </span>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Ranked list */}
+      {board.entries.length === 0 ? (
+        <p className="py-6 text-center text-muted">No scores yet. Be the first on the board.</p>
+      ) : (
+        <div
+          className={!compact ? 'scroll-thin max-h-[46dvh] overflow-y-auto pr-1' : undefined}
+          role={!compact ? 'region' : undefined}
+          aria-label={!compact ? `${board.modeName} rankings` : undefined}
+          tabIndex={!compact ? 0 : undefined}
+        >
+          <ol className="grid gap-1.5">
+            {visibleEntries.map((entry) => (
+              <ScoreRow
+                key={`${entry.rank}-${entry.name}`}
+                entry={entry}
+                topScore={topScore}
+                rowRef={entry.you ? yourRowRef : undefined}
+              />
+            ))}
+          </ol>
+
+          {neighborhood.length > 0 && (
+            <div className="mt-2">
+              <div className="my-1.5 flex items-center gap-2 text-xs text-muted" aria-hidden>
+                <span className="h-px flex-1 bg-line" />
+                <span className="pixel text-[9px]">Around you</span>
+                <span className="h-px flex-1 bg-line" />
+              </div>
+              <ol className="grid gap-1.5">
+                {neighborhood.map((entry) => (
+                  <ScoreRow
+                    key={`near-${entry.rank}-${entry.name}`}
+                    entry={entry}
+                    topScore={topScore}
+                    rowRef={entry.you ? yourRowRef : undefined}
+                  />
+                ))}
+              </ol>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Show more / open full-page high scores button */}
+      {compact && onOpenFull && (totalPlayers > 0) && (
+        <button type="button" className="btn btn-ghost btn-sm w-full" onClick={onOpenFull}>
+          <IconTrophy size={13} />
+          <span>
+            {hiddenCount > 0 ? `View full high scores (${totalPlayers} players)` : 'Full high scores & search'}
+          </span>
+        </button>
+      )}
+
+      {!compact && totalPlayers > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+          <span>
+            Showing {visibleEntries.length} of {totalPlayers} player{totalPlayers === 1 ? '' : 's'}
+            {board.team ? ` in ${board.team}` : ''}
+          </span>
+          {board.hasMore && onLoadMore && (
+            <button type="button" className="btn btn-ghost btn-sm" disabled={loadingMore} onClick={onLoadMore}>
+              {loadingMore ? 'Loading…' : `Show all ${Math.min(totalPlayers, 500)} scores`}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Team averages */}
+      {board.teams.length >= 2 && (
+        <div className="mt-2 border-t border-line pt-3">
+          <p className="pixel mb-2 text-[10px] text-muted">Teams · average score</p>
+          <ol className="grid gap-1.5">
+            {board.teams.map((team, index) => {
+              const topAvg = Math.max(1, board.teams[0]?.average ?? 1)
+              const medal = rankTone(index + 1)
+              return (
+                <li key={team.team} className="sb-row">
+                  <span className="sb-bar" style={{ transform: `scaleX(${team.average / topAvg})` }} aria-hidden />
+                  <span className="sb-rank" style={{ color: medal.color, borderColor: medal.border }}>
+                    {String(index + 1).padStart(2, '0')}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-bold">
+                    {team.team} <span className="font-normal text-sm text-muted">({team.players})</span>
+                  </span>
+                  <span className="sb-score" style={{ color: index === 0 ? '#ffd60a' : 'var(--ink)' }}>
+                    {formatScore(team.average)}
+                  </span>
+                </li>
+              )
+            })}
           </ol>
         </div>
       )}
