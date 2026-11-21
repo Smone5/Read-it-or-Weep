@@ -73,10 +73,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # organiser (2026-11-20). Without an ElevenLabs key each one is played by the OpenAI voice closest to it.
         "hosts": [
             {"id": "max", "name": "Max", "voice": "eleven:classic", "manner": "wiseguy",
-             "style": "Polished prime-time game-show anchor: treats quarterly metrics like championship boxing, quick "
+             "style": "Polished prime-time game-show anchor: treats every trivia question like championship boxing, quick "
                       "with a raised-eyebrow aside and old-school broadcast swagger."},
             {"id": "roxy", "name": "Roxy", "voice": "eleven:british", "manner": "deadpan",
-             "style": "Razor-sharp and bone-dry, mildly exasperated: the funniest person in any meeting, finally "
+             "style": "Razor-sharp and bone-dry, mildly exasperated: the funniest person in the room, finally "
                       "handed a microphone. Understated British wit where a flat pause does the heavy lifting."},
             {"id": "june", "name": "June", "voice": "eleven:southern", "manner": "wiseguy",
              "style": "Unmistakably Southern through and through — write EVERY line in warm, sassy Southern American "

@@ -186,3 +186,29 @@ def test_fact_fake_is_unpredictable_yet_balanced():
             assert not (seq[i] == seq[i + 1] == seq[i + 2] == seq[i + 3])
     finally:
         random.setstate(rng_state)
+
+
+def test_every_mode_starts_easy_and_ramps_harder():
+    # Show: first 2 Warm-Up slots are easy, Picture Round starts easy, Deep End finishes hard, Final is hard.
+    show = engine.build_plan("show", RULES, PLENTY, ["s1", "s2", "s3"], music=True)
+    warmup = [s for s in show if s["name"] == "Warm-Up"]
+    assert warmup[0]["difficulty"] == "easy" and warmup[1]["difficulty"] == "easy"
+    pictures = [s for s in show if s["name"] == "Picture Round"]
+    assert pictures[0]["difficulty"] == "easy"
+    assert [s for s in show if s["slot"] == "final"][0]["difficulty"] == "hard"
+
+    # Straight & Speed Run also start easy and ramp to hard.
+    straight = engine.build_plan("straight", RULES, PLENTY, ["s1", "s2", "s3"], music=False)
+    assert straight[0]["difficulty"] == "easy" and straight[-1]["difficulty"] == "hard"
+    speed = engine.build_plan("speed", RULES, PLENTY, ["s1", "s2"], music=False)
+    assert speed[0]["difficulty"] == "easy" and speed[10]["difficulty"] == "medium" and speed[20]["difficulty"] == "hard"
+
+    # bank.choose honors difficulty='easy' even when a hard question sits in an untouched section.
+    from services import bank
+    easy_q = {"id": "e1", "section_id": "s1", "difficulty": "easy", "pinned": False, "kind": "mcq",
+              "question_text": "Easy", "options": ["A", "B", "C", "D"], "correct_index": 0}
+    hard_q = {"id": "h1", "section_id": "s2", "difficulty": "hard", "pinned": False, "kind": "mcq",
+              "question_text": "Hard", "options": ["A", "B", "C", "D"], "correct_index": 0}
+    picked = bank.choose([hard_q, easy_q], seen={}, used=set(), difficulty="easy",
+                         section_states={"s1": "cleared", "s2": "new"})
+    assert picked is not None and picked["id"] == "e1"

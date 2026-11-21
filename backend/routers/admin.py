@@ -287,8 +287,14 @@ async def quiz_detail(quiz_id: str, admin: dict = Depends(current_admin)) -> dic
     return {"quiz": _quiz_view(quiz), "rules": await settings_store.quiz_rules(quiz),
             "overview": await stats.quiz_overview(quiz_id), "documents": await _documents(quiz_id),
             "sections": await db.fetch(
-                "select s.id, s.heading, s.ordinal, s.document_id, (select count(*) from questions q where"
-                " q.section_id = s.id and q.status = 'approved') as questions from doc_sections s"
+                "select s.id, s.heading, s.ordinal, s.document_id,"
+                " (select count(*) from questions q where q.section_id = s.id and q.status = 'approved') as questions,"
+                " (select count(*) from questions q where q.section_id = s.id and q.video_url is not null) as videos,"
+                " (select q.video_url from questions q where q.section_id = s.id and q.video_url is not null"
+                "  order by q.created_at asc limit 1) as video_url,"
+                " (select q.video_title from questions q where q.section_id = s.id and q.video_url is not null"
+                "  order by q.created_at asc limit 1) as video_title"
+                " from doc_sections s"
                 " join documents d on d.id = s.document_id where s.quiz_id = $1 order by d.created_at, s.ordinal", quiz_id)}
 
 
@@ -405,6 +411,60 @@ async def delete_document(document_id: str, admin: dict = Depends(current_admin)
     await db.execute("delete from documents where id = $1", document_id)
     bank.invalidate(document["quiz_id"])
     return {"ok": True}
+
+
+class VideoInspect(BaseModel):
+    url: str = Field(min_length=5, max_length=300)
+
+
+class SectionVideoWrite(BaseModel):
+    videoUrl: str | None = Field(default=None, max_length=300)
+    videoTitle: str | None = Field(default=None, max_length=120)
+    externalOnly: bool | None = None
+    maxQuestions: int = Field(default=3, ge=1, le=20)
+
+
+@router.post("/video/inspect")
+async def inspect_video(body: VideoInspect, admin: dict = Depends(current_admin)) -> dict:
+    try:
+        return await video.inspect_youtube(body.url)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/sections/{section_id}/video")
+async def set_section_video(section_id: str, body: SectionVideoWrite, admin: dict = Depends(current_admin)) -> dict:
+    section = await db.fetchrow("select id, quiz_id, heading from doc_sections where id = $1", section_id)
+    if section is None:
+        raise HTTPException(404, "Section not found.")
+    if not body.videoUrl or not body.videoUrl.strip():
+        await db.execute("update questions set video_url = null, video_title = null where section_id = $1", section_id)
+        bank.invalidate(section["quiz_id"])
+        return {"updated": 0, "videoUrl": None, "videoTitle": None}
+    try:
+        stored_url = video.normalize_url(body.videoUrl, external_only=body.externalOnly)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    title = (body.videoTitle or "").strip()[:120] or section["heading"][:120]
+    await db.execute("update questions set video_url = null, video_title = null where section_id = $1", section_id)
+    targets = await db.fetch(
+        "select id from questions where section_id = $1 and status <> 'rejected' and kind = 'mcq'"
+        " order by pinned desc, created_at asc limit $2",
+        section_id, body.maxQuestions,
+    )
+    if not targets:
+        targets = await db.fetch(
+            "select id from questions where section_id = $1 and status <> 'rejected'"
+            " order by pinned desc, created_at asc limit $2",
+            section_id, body.maxQuestions,
+        )
+    for row in targets:
+        await db.execute(
+            "update questions set video_url = $2, video_title = $3 where id = $1",
+            row["id"], stored_url, title,
+        )
+    bank.invalidate(section["quiz_id"])
+    return {"updated": len(targets), "videoUrl": stored_url, "videoTitle": title}
 
 
 # --------------------------------------------------------------------------- question bank

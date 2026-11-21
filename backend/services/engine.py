@@ -88,23 +88,28 @@ def build_plan(mode: str, rules: dict, stock: dict[str, int], section_ids: list[
     if mode == "show":
         cfg = rules["show"]
         total = max(3, int(cfg["questions"]))
-        pictures = min(2 if total >= 6 else 1, stock["picture"])
+        pictures = min(3 if total >= 8 else (2 if total >= 5 else 1), stock["picture"])
         texts = total - pictures - 1                       # one question is held back for the final
         first, second = math.ceil(texts / 2), texts // 2
         limit, picture_limit = int(cfg["timer_sec"]), int(cfg["picture_timer_sec"])
         breaks = int(cfg["music_rounds"]) if music else 0
         plan: list[dict] = []
         number = 1
-        plan += [_slot("report", number, "Warm-Up", limit, difficulty="easy" if i == 0 else "medium") for i in range(first)]
+        # Start approachable: most Warm-Up slots are easy so new/younger players build momentum before difficulty ramps.
+        easy_warmup = max(1, first - 1) if first >= 3 else first
+        plan += [_slot("report", number, "Warm-Up", limit, difficulty="easy" if i < easy_warmup else "medium")
+                 for i in range(first)]
         if breaks >= 1:
             number += 1
             plan.append(_slot("music", number, "Music Break", 25))
         if pictures:
             number += 1
-            plan += [_slot("image", number, "Picture Round", picture_limit) for _ in range(pictures)]
+            easy_pics = max(1, pictures - 1) if pictures >= 3 else 1
+            plan += [_slot("image", number, "Picture Round", picture_limit, difficulty="easy" if i < easy_pics else "medium")
+                     for i in range(pictures)]
         if second:
             number += 1
-            plan += [_slot("report", number, "The Deep End", limit, difficulty="medium" if i == 0 else "hard")
+            plan += [_slot("report", number, "The Deep End", limit, difficulty="medium" if i < second - 1 else "hard")
                      for i in range(second)]
         lightning = min(int(cfg["lightning_items"]), stock["fact_fake"])
         if lightning >= 4:
@@ -138,11 +143,20 @@ def build_plan(mode: str, rules: dict, stock: dict[str, int], section_ids: list[
         targets = [sid for _ in range(per_section) for sid in section_ids][: int(cfg["max_questions"])]
         if not targets:
             targets = [None] * min(10, stock["mcq"])
-        return [_slot("report", 1, "The Quiz", UNTIMED_SEC, section=sid, any_source=True) for sid in targets]
+        n = len(targets)
+        return [
+            _slot("report", 1, "The Quiz", UNTIMED_SEC, section=sid, any_source=True,
+                  difficulty="easy" if i < math.ceil(n / 3) else ("medium" if i < math.ceil(2 * n / 3) else "hard"))
+            for i, sid in enumerate(targets)
+        ]
 
     if mode == "speed":
         pattern = ["fact_fake", "fact_fake", "report"] if stock["fact_fake"] >= 6 else ["report"]
-        return [_slot(pattern[i % len(pattern)], 1, "Speed Run", UNTIMED_SEC) for i in range(80)]
+        return [
+            _slot(pattern[i % len(pattern)], 1, "Speed Run", UNTIMED_SEC,
+                  difficulty="easy" if i < 6 else ("medium" if i < 15 else "hard"))
+            for i in range(80)
+        ]
 
     return _sudden_death_block(rules, 0, stock, music)     # sudden_death grows as it is played
 
@@ -154,8 +168,8 @@ def _sudden_death_block(rules: dict, level: int, stock: dict[str, int], music: b
     size = max(3, int(cfg["music_every"]))
     block = [_slot("report", level + 1, f"Level {level + 1}", limit, difficulty=difficulty, level=level)
              for _ in range(size - 1)]
-    if stock["picture"] and level % 2 == 0:
-        block[1] = _slot("image", level + 1, f"Level {level + 1}", limit + 8, level=level)
+    if stock["picture"] and (stock["picture"] >= 4 or level % 2 == 0):
+        block[1] = _slot("image", level + 1, f"Level {level + 1}", limit + 8, difficulty=difficulty, level=level)
     if music:
         block.append(_slot("music", level + 1, f"Level {level + 1}", 20, level=level))
     else:
@@ -720,6 +734,7 @@ async def _reveal(item: dict, run: dict, rules: dict) -> dict:
         "correctAnswer": payload["options"][item["correct_index"]], "points": item["points"],
         "state": run_state(run, rules), "finished": run["status"] != "in_progress",
     }
+    section_id = None
     if item["question_id"]:
         question = await db.fetchrow(
             "select q.explanation, q.source_quote, q.source_type, q.video_url, q.video_title,"
@@ -729,6 +744,7 @@ async def _reveal(item: dict, run: dict, rules: dict) -> dict:
             result["explanation"] = question["explanation"]
             result["sourceQuote"] = question["source_quote"]
             if question["section_id"]:
+                section_id = question["section_id"]
                 result["section"] = {"id": question["section_id"], "heading": question["heading"]}
             clip = video.parse_youtube(question.get("video_url"), question.get("video_title"))
             if clip:
@@ -740,6 +756,19 @@ async def _reveal(item: dict, run: dict, rules: dict) -> dict:
             row["description"] if row else None,
             row["width"] if row else None, row["height"] if row else None,
         )
+    elif section_id and item["slot"] not in ("fact_fake", *MUSIC_SLOTS):
+        # Show the section's chart/map on Answer Reveal so players learn visually without spoiling the question!
+        ref_img = await db.fetchrow(
+            "select id, caption, description, width, height from doc_images"
+            " where section_id = $1 and usable is not false order by ordinal asc limit 1",
+            section_id,
+        )
+        if ref_img:
+            result["image"] = _image_view(
+                ref_img["id"], "sharp",
+                ref_img["caption"] or ref_img["description"],
+                ref_img["width"], ref_img["height"],
+            )
     if item["music_track_id"]:
         track = await db.fetchrow("select artist, title, artwork_url, track_url from music_tracks where id = $1",
                                   item["music_track_id"])

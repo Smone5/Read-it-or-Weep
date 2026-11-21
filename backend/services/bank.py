@@ -118,7 +118,8 @@ def choose(candidates: Iterable[dict], seen: dict[str, dict], used: set[str], *,
         if section_states and section_states.get(question["section_id"]) in ("new", "tried"):
             cost -= 4.5                             # prioritise blind spots and untouched sections
         if difficulty:
-            cost += abs(_DIFFICULTY_ORDER[question["difficulty"]] - _DIFFICULTY_ORDER[difficulty]) * 2.5
+            # Difficulty ramp (easy -> medium -> hard) outranks section nudges so Warm-Up stays genuinely easy.
+            cost += abs(_DIFFICULTY_ORDER[question["difficulty"]] - _DIFFICULTY_ORDER[difficulty]) * 7.0
         if asked and any(same_fact(key_terms(question), terms) for terms in asked):
             cost += 6.0                             # the same fact again: only if nothing else in this tier is left
         if best is None or cost < best[0]:

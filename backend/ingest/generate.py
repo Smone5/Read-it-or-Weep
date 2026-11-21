@@ -153,8 +153,11 @@ Copy, word for word, the sentence or table row from the passage that proves the 
 explanation
 One plain sentence the player sees after answering: state the correct fact, and the "so what" if the passage gives one. Do not write "according to".
 
-difficulty
-easy = a headline fact nobody who read it would miss; medium = a specific detail; hard = needs two facts combined or a careful reading.
+difficulty (IMPORTANT — write a true easy → medium → hard ladder!)
+Games start easy and ramp up so beginners and younger players build confidence while experts still get tested at the end. Across the questions you write for a passage, aim for roughly 35% easy, 45% medium, and 20% hard:
+- easy: a clear, memorable, fun headline fact, landmark, mascot, main rule, or big takeaway anyone who read the report (or is learning from it) can enjoy. Plain wording, distinct believable choices — NO trick-number traps (like 75,125 vs 76,125) on easy questions.
+- medium: a specific detail, section, comparison, or cause that rewards attentive reading.
+- hard: needs two facts combined, careful arithmetic, or a fine-grained operational number/section.
 
 Fact or Fake statements
 Also write short statements for a rapid-fire round where players call each FACT or FAKE.
@@ -179,7 +182,7 @@ For each multiple-choice question
   - not_answerable: the passages do not settle it
   - leaks_answer: the wording of the question or options gives the answer away
   - refers_to_passage: it says "the passage", "this section", "above" or similar instead of standing on its own
-  - guessable: someone who never read the report would very likely get it right from common sense alone
+  - guessable: someone who never read the report could easily deduce the answer from obvious wording clues, joke distractors, or universal common sense (do NOT flag a legitimate easy warm-up question about a real headline fact in the report as guessable just because it is approachable)
   Leave the list empty when the question is sound.
 
 For each statement

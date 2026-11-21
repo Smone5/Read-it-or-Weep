@@ -5,6 +5,7 @@ import { ChoiceGroup, Dialog, DialogActions, Field, Note, Segmented, Switch } fr
 import type { Difficulty, PictureMode, Question, QuestionKind, QuestionPatch, QuestionWrite, QuizImage, Suggestion } from '../types'
 import { useQuiz } from './context'
 import { LETTERS } from './questions'
+import { YouTubePicker } from './YouTubePicker'
 
 // Limits the server enforces (QuestionWrite and SuggestRequest in admin.py). Editing a question
 // with text outside these limits makes the server fail without a readable message, so they are
@@ -471,35 +472,12 @@ export default function QuestionEditor({
           </Field>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field
-            label="YouTube clip link (optional)"
-            hint="Shown on the answer reveal card. Add #external if the uploader disables embeds."
-          >
-            {(props) => (
-              <input
-                className="field"
-                type="url"
-                placeholder="https://www.youtube.com/watch?v=..."
-                {...props}
-                value={form.videoUrl}
-                onChange={(event) => set({ videoUrl: event.target.value })}
-                maxLength={300}
-              />
-            )}
-          </Field>
-          <Field label="Clip title (optional)" hint="Short label on the replay card, e.g. 'Elway Helicopter Dive (SB XXXII)'.">
-            {(props) => (
-              <input
-                className="field"
-                {...props}
-                value={form.videoTitle}
-                onChange={(event) => set({ videoTitle: event.target.value })}
-                maxLength={120}
-              />
-            )}
-          </Field>
-        </div>
+        <YouTubePicker
+          value={form.videoUrl}
+          title={form.videoTitle}
+          disabled={busy}
+          onChange={({ videoUrl, videoTitle }) => set({ videoUrl, videoTitle })}
+        />
 
         {adding && (
           <div className="grid gap-x-6 sm:grid-cols-2">

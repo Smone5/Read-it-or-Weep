@@ -17,7 +17,7 @@ import db
 import llm
 from ingest import UnreadableDocument, generate, parse_document
 from ingest.model import StructuredDocument
-from services import settings_store
+from services import settings_store, video
 from storage import storage
 
 log = logging.getLogger("pipeline")
@@ -109,6 +109,41 @@ async def _insert_questions(document: dict, report: generate.GenerationReport, s
     return len(rows)
 
 
+async def _attach_section_videos(structured: StructuredDocument, section_ids: list[str]) -> int:
+    """Attach YouTube links found inside uploaded document sections to up to 2 MCQ questions per clip."""
+    attached = 0
+    for section, section_id in zip(structured.sections, section_ids):
+        if not section.video_urls:
+            continue
+        mcqs = await db.fetch(
+            "select id from questions where section_id = $1 and kind = 'mcq' and video_url is null"
+            " order by pinned desc, created_at asc",
+            section_id,
+        )
+        if not mcqs:
+            continue
+        idx = 0
+        for raw_url in section.video_urls[:2]:
+            if idx >= len(mcqs):
+                break
+            try:
+                info = await video.inspect_youtube(raw_url, timeout=6.0)
+                stored_url = info["normalizedUrl"]
+                title = info["title"] or section.heading[:100]
+            except Exception as exc:
+                log.warning("skipping unverified YouTube URL %s: %s", raw_url, exc)
+                continue
+            targets = mcqs[idx:idx + 2]
+            idx += len(targets)
+            for row in targets:
+                await db.execute(
+                    "update questions set video_url = $2, video_title = $3 where id = $1",
+                    row["id"], stored_url, title[:120],
+                )
+                attached += 1
+    return attached
+
+
 async def process_document(document_id: str) -> None:
     document = await db.fetchrow("select * from documents where id = $1", document_id)
     if document is None:
@@ -157,6 +192,10 @@ async def process_document(document_id: str) -> None:
                              image_ids[ordinal], kind, description, usable)
         inserted = await _insert_questions(document, report, section_ids, chunk_ids, image_ids,
                                            "approved" if auto_approve else "pending")
+        if inserted and any(s.video_urls for s in structured.sections):
+            videos_attached = await _attach_section_videos(structured, section_ids)
+            if videos_attached:
+                log.info("auto-attached %d YouTube clip(s) extracted from %s", videos_attached, document["filename"])
 
         summary_text = None
         try:

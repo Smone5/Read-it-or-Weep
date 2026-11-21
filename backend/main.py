@@ -74,10 +74,12 @@ app = FastAPI(title="Read It or Weep", version="1.0.0", lifespan=lifespan,
               docs_url="/docs" if _docs else None, redoc_url=None, openapi_url="/openapi.json" if _docs else None)
 
 # What a page from this site may load, and from where. Scripts only from the site itself; pictures
-# and sound also from Apple (album covers and 30-second clips); nothing may put the site in a frame.
+# and sound also from Apple (album covers and 30-second clips) and YouTube (thumbnails + official embeds);
+# nothing may put the site itself in a frame.
 _CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: blob: https://*.mzstatic.com; "
+        "img-src 'self' data: blob: https://*.mzstatic.com https://i.ytimg.com https://img.youtube.com; "
         "media-src 'self' data: blob: https://*.itunes.apple.com https://*.mzstatic.com; "
+        "frame-src 'self' https://www.youtube-nocookie.com https://www.youtube.com; "
         "font-src 'self' data:; connect-src 'self' ws: wss: https://*.itunes.apple.com https://*.mzstatic.com; worker-src 'self' blob:; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'")
 _SECURITY_HEADERS = {

@@ -322,3 +322,24 @@ def test_the_organisers_music_levels_stay_within_their_ranges():
     # Under the host one step up at most (he must stay easy to follow); a question can be silent (-3).
     assert mix == {"opening": 2, "opening_sec": 10, "under_host": 1, "questions": -3, "between": 0, "ease_down": False}
     assert settings_store.clean_game({"mix": "nonsense"})["mix"] == as_tuned
+
+
+def test_host_persona_and_angles_follow_quiz_topic():
+    title = "Game-Day Staff Guide: Empower Field & Denver Football"
+    persona = host_service.build_persona(
+        name="June", game_title="Read It or Weep", company="Acme", sarcasm=6, quiz_title=title,
+    )
+    assert title in persona
+    assert "a quiz about a business report" not in persona
+    assert "jammed printer" not in persona
+
+    angles = host_service._opening_angles(
+        {"decade": "90s", "mode": "show"},
+        {"team": None},
+        {"title": title, "meeting_at": None},
+        returning=True,
+    )
+    joined = "\n".join(angles).lower()
+    assert title.lower() in joined
+    assert "business report" not in joined
+    assert "office life" not in joined

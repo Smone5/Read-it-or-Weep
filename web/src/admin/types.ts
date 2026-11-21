@@ -265,7 +265,29 @@ export type QuizDocument = {
 }
 
 /** `questions` counts the live (approved) questions filed under the section. */
-export type Section = { id: string; heading: string; ordinal: number; document_id: string; questions: number }
+export type Section = {
+  id: string
+  heading: string
+  ordinal: number
+  document_id: string
+  questions: number
+  videos?: number
+  video_url?: string | null
+  video_title?: string | null
+}
+
+export type VideoInspectResult = {
+  videoId: string
+  watchUrl: string
+  thumbnailUrl: string
+  startSec: number
+  title: string | null
+  author: string | null
+  embeddable: boolean
+  suggestedExternal: boolean
+  note: string | null
+  normalizedUrl: string
+}
 
 export type QuizDetailData = {
   quiz: Quiz

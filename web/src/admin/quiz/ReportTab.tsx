@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type DragEvent } from 'react'
 import { ErrorNote } from '../../components/ui'
 import { call, errorText } from '../api'
-import { Badge, Bar, ConfirmDialog, EmptyState, Note, Panel } from '../components'
+import { Badge, Bar, ConfirmDialog, Dialog, DialogActions, EmptyState, Field, Note, Panel } from '../components'
 import { useNotify } from '../context'
 import { describeRejections, formatBytes, formatDateTime, isWorking, plural, splitSummary, type Tone } from '../format'
 import type { QuizDocument, Section } from '../types'
 import { useDocumentWatch, useQuiz } from './context'
+import { YouTubePicker } from './YouTubePicker'
 
 const MAX_UPLOAD_BYTES = 60 * 1024 * 1024 // the server's limit (MAX_UPLOAD_BYTES in admin.py)
 
@@ -16,6 +17,7 @@ export default function ReportTab() {
   const notify = useNotify()
   const { quiz, documents, sections } = detail
   const [pending, setPending] = useState<Pending | null>(null)
+  const [videoSection, setVideoSection] = useState<Section | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // "Process again" is accepted before the server marks the document as busy, so keep checking for a moment.
@@ -77,7 +79,7 @@ export default function ReportTab() {
 
       <Panel
         title={documents.length ? 'Add another document' : 'Upload the report'}
-        description="The report is read, split into sections, and questions are written and checked for each part. It usually takes a minute or two."
+        description="The report is read, split into sections, and questions are written and checked for each part. Any YouTube links inside your Word, PDF, or PowerPoint file are automatically detected and paired with questions from that section."
       >
         <Uploader />
       </Panel>
@@ -105,11 +107,22 @@ export default function ReportTab() {
                 sections={sections.filter((section) => section.document_id === doc.id)}
                 onReprocess={() => setPending({ action: 'reprocess', doc })}
                 onDelete={() => setPending({ action: 'delete', doc })}
+                onEditVideo={setVideoSection}
               />
             </li>
           ))}
         </ul>
       )}
+
+      <SectionVideoDialog
+        section={videoSection}
+        onClose={() => setVideoSection(null)}
+        onSaved={(message) => {
+          setVideoSection(null)
+          notify(message)
+          refresh().catch(() => {})
+        }}
+      />
 
       <ConfirmDialog
         open={pending?.action === 'reprocess'}
@@ -274,6 +287,7 @@ function DocumentCard({
   sections,
   onReprocess,
   onDelete,
+  onEditVideo,
 }: {
   doc: QuizDocument
   /** Nothing has moved for a while: the job has probably died, so let the person start it again. */
@@ -281,6 +295,7 @@ function DocumentCard({
   sections: Section[]
   onReprocess: () => void
   onDelete: () => void
+  onEditVideo: (section: Section) => void
 }) {
   const status = statusOf(doc, stalled)
   const working = isWorking(doc)
@@ -389,17 +404,38 @@ function DocumentCard({
           )}
 
           {sections.length > 0 && (
-            <details>
-              <summary className="cursor-pointer py-1 text-sm font-bold">Sections and their live questions ({sections.length})</summary>
-              <ul className="mt-2 grid gap-1 text-sm sm:grid-cols-2">
-                {sections.map((section) => (
-                  <li key={section.id} className="flex items-baseline justify-between gap-3 rounded-md bg-surface-2 px-2.5 py-1.5">
-                    <span className="min-w-0 [overflow-wrap:anywhere]">{section.heading}</span>
-                    <span className="flex-none tabular-nums" style={section.questions === 0 ? { color: 'var(--warn)', fontWeight: 600 } : undefined}>
-                      {section.questions === 0 ? 'no questions' : section.questions}
-                    </span>
-                  </li>
-                ))}
+            <details open={sections.length <= 10}>
+              <summary className="cursor-pointer py-1 text-sm font-bold">Sections, questions &amp; YouTube clips ({sections.length})</summary>
+              <ul className="mt-2 grid gap-1.5 text-sm">
+                {sections.map((section) => {
+                  const vids = section.videos ?? 0
+                  return (
+                    <li key={section.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-surface-2 px-3 py-2">
+                      <div className="min-w-0 flex-1">
+                        <span className="font-medium [overflow-wrap:anywhere]">{section.heading}</span>
+                        {vids > 0 && (
+                          <span className="ml-2 inline-flex items-center rounded bg-accent/15 px-1.5 py-0.5 text-xs font-semibold text-accent">
+                            {plural(vids, 'video clip')}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-none items-center gap-3">
+                        <span className="tabular-nums text-muted" style={section.questions === 0 ? { color: 'var(--warn)', fontWeight: 600 } : undefined}>
+                          {section.questions === 0 ? 'no questions' : plural(section.questions, 'question')}
+                        </span>
+                        {section.questions > 0 && (
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => onEditVideo(section)}
+                          >
+                            {vids > 0 ? 'Edit video' : 'Add video'}
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  )
+                })}
               </ul>
             </details>
           )}
@@ -428,5 +464,107 @@ function DocumentCard({
         </button>
       </div>
     </article>
+  )
+}
+
+function SectionVideoDialog({
+  section,
+  onClose,
+  onSaved,
+}: {
+  section: Section | null
+  onClose: () => void
+  onSaved: (message: string) => void
+}) {
+  const [videoUrl, setVideoUrl] = useState('')
+  const [videoTitle, setVideoTitle] = useState('')
+  const [maxQuestions, setMaxQuestions] = useState(2)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!section) return
+    setVideoUrl(section.video_url ?? '')
+    setVideoTitle(section.video_title ?? '')
+    setMaxQuestions(Math.min(3, Math.max(1, section.videos || 2)))
+    setError(null)
+    setSaving(false)
+  }, [section])
+
+  const save = async () => {
+    if (!section) return
+    setSaving(true)
+    setError(null)
+    try {
+      const result = await call<{ updated: number }>(`/sections/${section.id}/video`, {
+        method: 'POST',
+        body: {
+          videoUrl: videoUrl.trim() || null,
+          videoTitle: videoTitle.trim() || null,
+          maxQuestions,
+        },
+      })
+      onSaved(
+        result.updated > 0
+          ? `Attached YouTube clip to ${plural(result.updated, 'question')} in “${section.heading}”.`
+          : `Removed YouTube clip from “${section.heading}”.`,
+      )
+    } catch (reason) {
+      setError(errorText(reason))
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Dialog open={section !== null} title={section ? `YouTube clip · ${section.heading}` : ''} onClose={saving ? () => {} : onClose} wide>
+      <div className="grid gap-4">
+        <p className="text-sm text-muted">
+          Attach one YouTube clip to this section — players will see the replay card right after answering questions from this part of the report.
+        </p>
+
+        <YouTubePicker
+          value={videoUrl}
+          title={videoTitle}
+          disabled={saving}
+          onChange={({ videoUrl: nextUrl, videoTitle: nextTitle }) => {
+            setVideoUrl(nextUrl)
+            setVideoTitle(nextTitle)
+          }}
+        />
+
+        {videoUrl.trim() && (
+          <Field
+            label="Attach to how many questions in this section?"
+            hint="Attaching to 2–3 multiple-choice questions keeps the replay feeling fresh instead of repeating on every turn."
+          >
+            {(props) => (
+              <select
+                className="field max-w-xs"
+                {...props}
+                value={maxQuestions}
+                disabled={saving}
+                onChange={(e) => setMaxQuestions(Number(e.target.value))}
+              >
+                <option value={1}>Top 1 question</option>
+                <option value={2}>Top 2 questions (recommended)</option>
+                <option value={3}>Top 3 questions</option>
+                <option value={10}>Up to 10 questions in section</option>
+              </select>
+            )}
+          </Field>
+        )}
+
+        {error && <ErrorNote>{error}</ErrorNote>}
+
+        <DialogActions>
+          <button type="button" className="btn btn-ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={saving}>
+            {saving ? 'Saving…' : videoUrl.trim() ? 'Save clip to section' : 'Remove clip from section'}
+          </button>
+        </DialogActions>
+      </div>
+    </Dialog>
   )
 }

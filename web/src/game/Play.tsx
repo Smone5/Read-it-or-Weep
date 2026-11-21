@@ -777,7 +777,9 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   // Until a Speed Run's first question opens, its clock stands at the full time.
   const speedClock = mode === 'speed' ? (state.deadlineAt ? clockMs : (state.clockSec ?? 0) * 1000) : undefined
   const last = Boolean(reveal?.finished) || (showsCounter && state.remaining === 0)
-  const shownImage = (phase === 'question' || phase === 'reveal') && item ? (reveal?.image ?? item.image) : undefined
+  const shownImage = (phase === 'question' || phase === 'reveal') && item
+    ? ((!quick ? reveal?.image : undefined) ?? item.image)
+    : undefined
   const hasPicture = Boolean(shownImage)
   const hostMood = phase === 'reveal' && reveal ? (reveal.correct ? 'happy' : 'wince') : 'idle'
 

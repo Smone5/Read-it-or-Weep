@@ -73,7 +73,7 @@ export default function HomePage() {
   if (!config) return <Stage className="grid place-items-center"><Spinner /></Stage>
 
   const { branding, quizzes, player } = config
-  const showFilters = quizzes.length > 4 || allTeams.length > 1
+  const showFilters = quizzes.length >= 6
   const upcoming = filtered.filter((q) => isUpcoming(q.meetingAt))
   const other = filtered.filter((q) => !isUpcoming(q.meetingAt))
   const splitGroups = upcoming.length > 0 && other.length > 0 && quizzes.length > 3
@@ -84,17 +84,19 @@ export default function HomePage() {
     return (
       <button
         key={quiz.slug}
-        className="answer items-center text-left"
+        className="answer w-full min-w-0 items-center overflow-hidden text-left"
         style={{ ['--tone' as string]: 'var(--brand)', ['--tone-ink' as string]: 'var(--brand-ink)' }}
         onClick={() => navigate(`/q/${quiz.slug}`)}
       >
         <span className="badge flex-none" aria-hidden><IconPlay size={14} /></span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-semibold">{quiz.title}</span>
-          <span className="mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-sm text-muted">
-            {meeting && <span style={{ color: 'var(--accent-text)' }}>Meeting {meeting}</span>}
-            {!meeting && quiz.description && <span className="truncate">{quiz.description}</span>}
-          </span>
+          <span className="block font-semibold leading-snug">{quiz.title}</span>
+          {(meeting || quiz.description) && (
+            <span className="mt-0.5 block text-sm leading-snug text-muted">
+              {meeting && <span style={{ color: 'var(--accent-text)' }}>Meeting {meeting}</span>}
+              {!meeting && quiz.description && <span className="line-clamp-2">{quiz.description}</span>}
+            </span>
+          )}
         </span>
         {r && r.total > 0 && (
           <span
@@ -134,37 +136,27 @@ export default function HomePage() {
           </div>
 
           {showFilters && (
-            <div className="mt-3 flex flex-col gap-2">
-              {quizzes.length > 4 && (
-                <input
-                  type="search"
-                  className="field text-sm"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search reports or topics…"
-                  aria-label="Search open reports"
-                />
-              )}
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+              <input
+                type="search"
+                className="field min-w-0 flex-1 text-sm"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search reports or topics…"
+                aria-label="Search open reports"
+              />
               {allTeams.length > 1 && (
-                <div className="flex flex-wrap gap-1.5" role="group" aria-label="Filter by team">
-                  <button
-                    type="button"
-                    className={`btn btn-sm ${team === 'all' ? 'btn-accent' : 'btn-ghost'}`}
-                    onClick={() => setTeam('all')}
-                  >
-                    All teams
-                  </button>
+                <select
+                  className="field text-sm sm:w-44"
+                  value={team}
+                  onChange={(e) => setTeam(e.target.value)}
+                  aria-label="Filter by team"
+                >
+                  <option value="all">All teams</option>
                   {allTeams.map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      className={`btn btn-sm ${team === t ? 'btn-accent' : 'btn-ghost'}`}
-                      onClick={() => setTeam(t)}
-                    >
-                      {t}
-                    </button>
+                    <option key={t} value={t}>{t}</option>
                   ))}
-                </div>
+                </select>
               )}
             </div>
           )}
@@ -177,15 +169,15 @@ export default function HomePage() {
             <div className="mt-4 flex flex-col gap-4">
               <div>
                 <p className="pixel mb-2 text-[9px]" style={{ color: 'var(--accent-text)' }}>Up next</p>
-                <div className="grid gap-2.5">{upcoming.map(renderQuizButton)}</div>
+                <div className="flex flex-col gap-2.5">{upcoming.map(renderQuizButton)}</div>
               </div>
               <div>
                 <p className="pixel mb-2 text-[9px] text-muted">All open reports</p>
-                <div className="scroll-thin grid max-h-[38dvh] gap-2.5 overflow-y-auto pr-0.5">{other.map(renderQuizButton)}</div>
+                <div className="scroll-thin flex max-h-[38dvh] flex-col gap-2.5 overflow-y-auto pr-0.5">{other.map(renderQuizButton)}</div>
               </div>
             </div>
           ) : (
-            <div className="scroll-thin mt-3 grid max-h-[48dvh] gap-2.5 overflow-y-auto pr-0.5">
+            <div className="scroll-thin mt-3 flex max-h-[52dvh] flex-col gap-2.5 overflow-y-auto pr-0.5">
               {filtered.map(renderQuizButton)}
             </div>
           )}

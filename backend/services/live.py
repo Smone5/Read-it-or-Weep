@@ -76,7 +76,7 @@ async def _line_up(quiz: dict, rules: dict, count: int, music_rounds: int, decad
         if not question["pinned"] and any(bank.same_fact(bank.key_terms(question), bank.key_terms(other)) for other in chosen):
             continue                                # the room has already been asked this, in other words
         if question["source_type"] == "image":
-            if pictures >= 2:
+            if pictures >= 4:
                 continue
             pictures += 1
         per_section[question["section_id"]] = per_section.get(question["section_id"], 0) + 1

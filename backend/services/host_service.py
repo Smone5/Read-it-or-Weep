@@ -230,14 +230,15 @@ def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, roo
     directs the delivery with tags in square brackets instead of performing it itself.
     """
     acting = MANNERS.get(manner or "", MANNERS[DEFAULT_MANNER])
+    subject = f"\"{quiz_title}\"" if quiz_title else "the reading material"
     if room:
         role = (f"You are {name}, host of \"{game_title}\", a comedy trivia game. You are running a LIVE game on the big "
-                f"screen in a meeting room: a crowd of {company} colleagues are answering on their phones to prove they "
-                "read a business report. Every line you say is heard by the whole room, right now.")
+                f"screen: a room of players are answering on their phones to prove they actually read {subject}. "
+                "Every line you say is heard by the whole room, right now.")
         who, across = "the room", "You talk TO the room, like the funniest person at the front of it."
     else:
-        role = (f"You are {name}, host of \"{game_title}\", a comedy trivia game. The contestant is a {company} employee "
-                "proving they read a business report before a meeting. You are live: every line is heard out loud, right "
+        role = (f"You are {name}, host of \"{game_title}\", a comedy trivia game. The contestant is "
+                f"proving they actually read {subject}. You are live: every line is heard out loud, right "
                 "now, in the middle of a game.")
         who, across = "the contestant", ("You talk TO the contestant, like someone across a desk from them. You are not "
                                          "addressing an audience.")
@@ -248,8 +249,9 @@ def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, roo
         "The host who is the best thing about the show: " + ("quick-witted, warm and wry" if warm else acting["who"])
         + ", someone who has heard every wrong answer there is and is still, somehow, delighted by each new one.\n"
         f"- Sharp, a little pleased with yourself, never cruel. You like {who}. You just cannot resist a joke.\n"
-        "- It is very funny to you that tonight's big show is a quiz about a business report, and you play that "
-        "completely straight.\n"
+        f"- It is very funny to you that tonight's big prime-time show is a quiz about {subject}, and you play that "
+        "completely straight. Match the actual subject of the quiz (never call a sports guide or history lesson a "
+        "\"business report\", and only make office/corporate jokes when the quiz is actually about business).\n"
         f"- {across}",
         _performance_notes(name, manner or DEFAULT_MANNER, warm, style) if tags else (
             "# How you sound - this matters more than the words\n"
@@ -261,9 +263,10 @@ def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, roo
         "# The jokes\n"
         "You are funny the way the host of an irreverent comedy quiz is funny. Your tools:\n"
         "- the absurd comparison (\"That is the confidence of a man who has never been right about anything.\");\n"
-        "- mock-serious overstatement: a small thing treated as a national emergency, or a triumph for the ages;\n"
+        "- mock-serious overstatement: a small detail treated as a national emergency, or a triumph for the ages;\n"
         "- the backhanded compliment (\"Correct. And they said you only skimmed it.\");\n"
-        "- corporate life: meetings that should have been emails, reply-all, slide 47, \"circling back\";\n"
+        f"- the world of {subject} itself (business/office banter ONLY if it's a business report; game-day stadium "
+        "jokes if it's sports; classroom/history banter if it's a lesson, etc.);\n"
         "- the show itself, and you: the budget, the prizes there are none of, your own career choices.\n"
         "Be SPECIFIC: the joke is about this answer, this number, this word - never a general remark that would fit "
         "any question. A joke is a comparison, an exaggeration or a jab. Describing what just happened, or explaining "
@@ -482,23 +485,23 @@ def _when(moment) -> str | None:
 
 
 def _opening_angles(run: dict, player: dict | None, quiz: dict, returning: bool) -> list[str]:
-    """What an opening can be about. (A returning player's rematch is a sporting one: framed as the contestant and
-    the report "meeting again", it drew a "someone should book a room" joke - wrong for a work quiz.)"""
+    """What an opening can be about. Grounded in the quiz's actual topic (never hardcoded to corporate life)."""
+    title = quiz["title"]
     angles = [
-        "a fake sponsor from office life (the jammed printer, the 4 pm meeting, reply-all...): one quick line",
-        "mock-epic stakes: treat this like a championship final, for a quiz about a business report",
+        f"a fake sponsor drawn from the world of \"{title}\" (a funny detail from its topic, NOT generic office clichés): one quick line",
+        f"mock-epic stakes: treat \"{title}\" like a prime-time championship final",
         "the show's production values: no budget, no prizes, all the glory",
-        f"the report itself, \"{quiz['title']}\", and how many people swear they read every page",
+        f"the topic itself, \"{title}\", and how many people swear they read every single page",
     ]
     meeting = _when(quiz["meeting_at"])
     if meeting:
-        angles.append(f"the meeting this report is for, {meeting}: this is their chance to walk in ready")
+        angles.append(f"the meeting or session this is for, {meeting}: this is their chance to walk in ready")
     if run["decade"]:
         angles.append(f"tonight's soundtrack: hits from the {run['decade']}")
     if player and player["team"]:
         angles.append(f"the contestant's team, {player['team']}, and its reputation riding on this")
     if returning:
-        angles += ["a rematch, sports-style: the contestant is back for another round against this report, like a title "
+        angles += [f"a rematch, sports-style: the contestant is back for another round against \"{title}\", like a title "
                    "fight or a replay",
                    "the contestant's record so far (see the facts), and whether tonight beats it"]
     return angles
@@ -526,8 +529,11 @@ async def _welcome(run: dict, player: dict | None, name: str) -> str:
     first = rounds[0] if rounds else "the first round"
     company = branding["company_name"]
     company = "" if company.strip().lower() in ("", settings_store.DEFAULTS["branding"]["company_name"].lower()) else company
-    facts = [f"The show: \"{branding['game_title']}\", where {company + ' ' if company else ''}colleagues prove they read the "
-             f"report \"{quiz['title']}\". The style of play tonight: {MODES.get(run['mode'], {}).get('name', run['mode'])}.",
+    desc = (quiz.get("description") or "").strip()
+    topic_fact = f"Tonight's topic: \"{quiz['title']}\"" + (f" — {desc}" if desc else ".")
+    facts = [f"The show: \"{branding['game_title']}\", where players prove they actually read tonight's material. "
+             f"The style of play tonight: {MODES.get(run['mode'], {}).get('name', run['mode'])}.",
+             topic_fact,
              f"The contestant: {name}" + (f", from {player['team']}" if player and player["team"] else "") + "."]
     if returning:
         best = await db.fetchval("select max(score) from runs where player_id = $1 and quiz_id = $2 and mode = $3"
