@@ -44,7 +44,7 @@ class _Draft:
 
     @property
     def has_media(self) -> bool:
-        return any(b.kind in ("table", "image", "chart") for b in self.blocks)
+        return any(b.kind in ("table", "image", "chart") or bool(b.links) for b in self.blocks)
 
 
 def _topic_level(blocks: list[Block]) -> int:
@@ -145,11 +145,11 @@ def _draft_sections(parsed: ParsedDocument, fallback_title: str) -> list[_Draft]
     if substantive:
         drafts = substantive
 
-    # Drop empty / cover-art-only leading scraps (0-19 words and no tables/charts).
+    # Drop empty / cover-art-only leading scraps (0-19 words and no media/tables/charts/links).
     if len(drafts) > 1:
         cleaned_drafts = [
             d for d in drafts
-            if d.words >= 20 or any(b.kind in ("table", "chart") for b in d.blocks)
+            if d.words >= 20 or d.has_media
         ]
         if cleaned_drafts:
             drafts = cleaned_drafts
@@ -212,6 +212,23 @@ def _split_long(text: str) -> list[str]:
     pieces: list[str] = []
     buffer = ""
     for sentence in _SENTENCE_SPLIT.split(text):
+        if approx_tokens(sentence) > MAX_TOKENS:
+            if buffer:
+                pieces.append(buffer)
+                buffer = ""
+            # Fallback for unpunctuated blocks: split cleanly on word boundaries.
+            words = sentence.split()
+            chunk_words: list[str] = []
+            for word in words:
+                candidate = " ".join([*chunk_words, word])
+                if chunk_words and approx_tokens(candidate) > TARGET_TOKENS:
+                    pieces.append(" ".join(chunk_words))
+                    chunk_words = [word]
+                else:
+                    chunk_words.append(word)
+            if chunk_words:
+                buffer = " ".join(chunk_words)
+            continue
         if buffer and approx_tokens(buffer + " " + sentence) > TARGET_TOKENS:
             pieces.append(buffer)
             buffer = sentence

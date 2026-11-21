@@ -40,7 +40,7 @@ _SECTION_ANSWERS = (
     "   where ri.quiz_id = $1 and ri.section_id is not null"
     "   and ri.slot not in ('music', 'jargon', 'song_or_jargon', 'second_chance')"
     "   and not ('peek' = any(ri.lifelines_used))"
-    "   and not (r.mode = 'speed' and not coalesce(ri.is_correct, false))"
+    "   and r.mode <> 'speed'"
     "   and ri.answered_at is not null"
     "   {player})"
     " select player_id, section_id, count(*) as answered, count(*) filter (where is_correct) as correct,"
@@ -52,6 +52,9 @@ _SECTION_ANSWERS = (
 
 def _cleared(row: dict | None) -> bool:
     if not row or not row["recent_answered"]:
+        return False
+    # Require at least one right multiple-choice answer so pure 50/50 Fact-or-Fake coin flips never clear a section.
+    if not row.get("recent_choice_correct"):
         return False
     if row["recent_answered"] == 1:
         return row["recent_choice_correct"] == 1
@@ -210,7 +213,8 @@ async def run_summary(run: dict, rules: dict) -> dict:
             seen_blind.add(s["id"])
     untouched = [{"id": s["id"], "heading": s["heading"]} for s in ready["sections"] if s["state"] == "new"]
 
-    board = await leaderboard(run["quiz_id"], run["mode"], player_id=run["player_id"])
+    show_board = bool(rules.get("leaderboard", True))
+    board = await leaderboard(run["quiz_id"], run["mode"], player_id=run["player_id"]) if show_board else None
     previous_best = await db.fetchval(
         "select max(score) from runs where player_id = $1 and quiz_id = $2 and mode = $3 and status = 'completed'"
         " and id <> $4", run["player_id"], run["quiz_id"], run["mode"], run["id"])
@@ -238,7 +242,8 @@ async def run_summary(run: dict, rules: dict) -> dict:
         "unusedLifelines": unused_lifelines, "lifelineBonus": lifeline_bonus,
         "sections": list(per_section.values()), "blindSpots": blind_spots, "untouched": untouched[:6],
         "review": review[:12], "resultsGrid": results_grid, "readiness": ready,
-        "rank": board["you"]["rank"] if board["you"] else None, "players": board["players"],
+        "rank": board["you"]["rank"] if (board and board["you"]) else None,
+        "players": board["players"] if board else 0,
         "personalBest": previous_best is None or run["score"] > previous_best, "previousBest": previous_best,
     }
 
@@ -256,6 +261,37 @@ async def quiz_overview(quiz_id: str) -> dict[str, Any]:
         " (select count(*) from runs where quiz_id = $1 and status = 'completed') as games,"
         " (select count(*) from documents where quiz_id = $1) as documents", quiz_id)
     return dict(row)
+
+
+async def quiz_overviews(quiz_ids: list[str]) -> dict[str, dict[str, int]]:
+    """Batch overview counts for every quiz in 3 queries instead of 7 × N."""
+    if not quiz_ids:
+        return {}
+    empty = {"approved": 0, "pending": 0, "manual": 0, "flagged": 0, "players": 0, "games": 0, "documents": 0}
+    out = {qid: dict(empty) for qid in quiz_ids}
+    q_rows = await db.fetch(
+        "select quiz_id,"
+        " count(*) filter (where status = 'approved') as approved,"
+        " count(*) filter (where status = 'pending') as pending,"
+        " count(*) filter (where origin = 'manual') as manual,"
+        " count(*) filter (where flag_count > 0 and status <> 'rejected') as flagged"
+        " from questions where quiz_id = any($1::uuid[]) group by quiz_id", quiz_ids)
+    for r in q_rows:
+        out[r["quiz_id"]].update({
+            "approved": r["approved"], "pending": r["pending"], "manual": r["manual"], "flagged": r["flagged"],
+        })
+    r_rows = await db.fetch(
+        "select quiz_id, count(distinct player_id) as players,"
+        " count(*) filter (where status = 'completed') as games"
+        " from runs where quiz_id = any($1::uuid[]) group by quiz_id", quiz_ids)
+    for r in r_rows:
+        out[r["quiz_id"]].update({"players": r["players"], "games": r["games"]})
+    d_rows = await db.fetch(
+        "select quiz_id, count(*) as documents from documents where quiz_id = any($1::uuid[]) group by quiz_id",
+        quiz_ids)
+    for r in d_rows:
+        out[r["quiz_id"]]["documents"] = r["documents"]
+    return out
 
 
 async def participants(quiz: dict, rules: dict) -> list[dict]:
@@ -289,6 +325,16 @@ async def participants(quiz: dict, rules: dict) -> list[dict]:
     return result
 
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value: Any) -> Any:
+    """Neutralise spreadsheet formula injection (CWE-1236) on user-supplied CSV cells."""
+    if isinstance(value, str) and value and value[0] in _FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
 async def participants_csv(quiz: dict, rules: dict) -> str:
     out = io.StringIO()
     writer = csv.writer(out)
@@ -296,10 +342,13 @@ async def participants_csv(quiz: dict, rules: dict) -> str:
                      "Report questions answered", "Correct", "Accuracy %", "Games", "Best score", "Peeks used",
                      "Last played (UTC)"])
     for p in await participants(quiz, rules):
-        writer.writerow([p["name"], p["email"], p["team"] or "", "yes" if p["ready"] else "no", p["readiness"],
-                         p["sectionsCleared"], p["sectionsTotal"], p["answered"], p["correct"], p["accuracy"],
-                         p["games"], p["bestScore"] if p["bestScore"] is not None else "", p["peeksUsed"],
-                         p["lastPlayedAt"].strftime("%Y-%m-%d %H:%M") if p["lastPlayedAt"] else ""])
+        writer.writerow([
+            _csv_cell(p["name"]), _csv_cell(p["email"]), _csv_cell(p["team"] or ""),
+            "yes" if p["ready"] else "no", p["readiness"],
+            p["sectionsCleared"], p["sectionsTotal"], p["answered"], p["correct"], p["accuracy"],
+            p["games"], p["bestScore"] if p["bestScore"] is not None else "", p["peeksUsed"],
+            p["lastPlayedAt"].strftime("%Y-%m-%d %H:%M") if p["lastPlayedAt"] else "",
+        ])
     return out.getvalue()
 
 

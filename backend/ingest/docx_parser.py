@@ -327,12 +327,15 @@ def parse_docx(data: bytes, filename: str = "") -> ParsedDocument:
                 continue
             for inner in text_box.iter(W + "p"):
                 inner_text = _text_of(inner)
+                inner_links = collect_links(inner)
                 if inner_text:
-                    items.append({"type": "p", "text": inner_text, "styled": 0, "pseudo": 0})
+                    items.append({"type": "p", "text": inner_text, "styled": 0, "pseudo": 0, "links": inner_links})
+                elif inner_links:
+                    items.append({"type": "p", "text": " ".join(inner_links), "styled": 0, "pseudo": 0, "links": inner_links})
 
     # Pass 2: decide which heading signal to trust, then attach captions.
     styled_headings = sum(1 for i in items if i["type"] == "p" and i.get("styled"))
-    use_pseudo = styled_headings < 2
+    use_pseudo = styled_headings < 3
     if use_pseudo and any(i["type"] == "p" and i.get("pseudo") for i in items):
         parsed.warnings.append("No heading styles found; section breaks were inferred from bold or numbered lines.")
 

@@ -20,10 +20,12 @@ from typing import Iterable
 
 import db
 
-_BANK_COLUMNS = ("id, quiz_id, section_id, chunk_id, image_id, kind, source_type, skill, title, question_text, options,"
+_BANK_COLUMNS = ("id, quiz_id, section_id, chunk_id, image_id, reveal_image_id, video_url, video_title,"
+                 " kind, source_type, skill, title, question_text, options,"
                  " correct_index, is_true, explanation, source_quote, difficulty, origin, pinned, times_served")
 _cache: dict[str, tuple[float, list[dict]]] = {}
 _TTL = 20.0
+_MAX_CACHE = 300
 
 
 def invalidate(quiz_id: str) -> None:
@@ -36,6 +38,8 @@ async def approved(quiz_id: str, sources: str = "all") -> list[dict]:
         rows = await db.fetch(
             f"select {_BANK_COLUMNS} from questions where quiz_id = $1 and status = 'approved'", quiz_id)
         _cache[quiz_id] = (time.monotonic(), rows)
+        while len(_cache) > _MAX_CACHE:
+            _cache.pop(next(iter(_cache)))
         cached = _cache[quiz_id]
     rows = cached[1]
     if sources == "manual":
@@ -118,8 +122,9 @@ def choose(candidates: Iterable[dict], seen: dict[str, dict], used: set[str], *,
         if section_states and section_states.get(question["section_id"]) in ("new", "tried"):
             cost -= 4.5                             # prioritise blind spots and untouched sections
         if difficulty:
-            # Difficulty ramp (easy -> medium -> hard) outranks section nudges so Warm-Up stays genuinely easy.
-            cost += abs(_DIFFICULTY_ORDER[question["difficulty"]] - _DIFFICULTY_ORDER[difficulty]) * 7.0
+            # Difficulty ramp (easy -> medium -> hard) outranks replay tier & section nudges so Warm-Up stays easy
+            # and Final Wager stays genuinely hard even after the first playthrough.
+            cost += abs(_DIFFICULTY_ORDER[question["difficulty"]] - _DIFFICULTY_ORDER[difficulty]) * 16.0
         if asked and any(same_fact(key_terms(question), terms) for terms in asked):
             cost += 6.0                             # the same fact again: only if nothing else in this tier is left
         if best is None or cost < best[0]:

@@ -55,14 +55,17 @@ export function YouTubePicker({ value, title, disabled = false, onChange }: Prop
   const [looking, setLooking] = useState(false)
   const [info, setInfo] = useState<VideoInspectResult | null>(null)
   const [lookupError, setLookupError] = useState<string | null>(null)
-  const lastLooked = useRef<string>('')
+  const lastLooked = useRef<string>(url.trim())
+  const lastAutoTitle = useRef<string>('')
+  const inspectSeq = useRef(0)
 
   const previewId = info?.videoId ?? extractVideoIdClient(url)
   const thumbUrl = info?.thumbnailUrl ?? (previewId ? `https://i.ytimg.com/vi/${previewId}/hqdefault.jpg` : null)
 
-  const inspect = async (rawUrl: string, currentTitle: string) => {
+  const inspect = async (rawUrl: string, currentTitle: string, preserveExternal = false) => {
     const clean = rawUrl.trim()
     if (!clean || !extractVideoIdClient(clean)) return
+    const seq = ++inspectSeq.current
     setLooking(true)
     setLookupError(null)
     lastLooked.current = clean
@@ -71,39 +74,47 @@ export function YouTubePicker({ value, title, disabled = false, onChange }: Prop
         method: 'POST',
         body: { url: clean },
       })
+      if (seq !== inspectSeq.current) return
       setInfo(result)
-      const nextExternal = result.suggestedExternal ? true : externalOnly
-      const nextTitle = currentTitle.trim() ? currentTitle : (result.title ?? '').slice(0, 120)
+      const nextExternal = result.suggestedExternal ? true : preserveExternal ? externalOnly : false
+      const fetchedTitle = (result.title ?? '').slice(0, 120)
+      const wasAuto = !currentTitle.trim() || currentTitle.trim() === lastAutoTitle.current
+      const nextTitle = wasAuto && fetchedTitle ? fetchedTitle : currentTitle
+      if (fetchedTitle) lastAutoTitle.current = fetchedTitle
+      lastLooked.current = result.watchUrl
       onChange({
         videoUrl: combineVideoUrl(result.watchUrl, nextExternal),
         videoTitle: nextTitle,
       })
     } catch (reason) {
+      if (seq !== inspectSeq.current) return
       setInfo(null)
       setLookupError(errorText(reason))
     } finally {
-      setLooking(false)
+      if (seq === inspectSeq.current) setLooking(false)
     }
   }
 
-  // Auto-lookup once when a valid YouTube link is pasted into the input.
+  // Re-inspect whenever the pasted YouTube URL changes (even if a title is already filled).
   useEffect(() => {
     const clean = url.trim()
     if (!clean) {
       setInfo(null)
       setLookupError(null)
       lastLooked.current = ''
+      lastAutoTitle.current = ''
       return
     }
-    if (extractVideoIdClient(clean) && clean !== lastLooked.current && !title.trim()) {
-      const timer = window.setTimeout(() => void inspect(clean, title), 350)
+    if (extractVideoIdClient(clean) && clean !== lastLooked.current) {
+      const timer = window.setTimeout(() => void inspect(clean, title, false), 350)
       return () => window.clearTimeout(timer)
     }
   }, [url]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateUrl = (nextRaw: string) => {
     const nextSplit = splitVideoUrl(nextRaw)
-    const keepExternal = nextSplit.externalOnly || externalOnly
+    const sameVideo = extractVideoIdClient(nextSplit.url) === extractVideoIdClient(url)
+    const keepExternal = nextSplit.externalOnly || (sameVideo && externalOnly)
     onChange({
       videoUrl: combineVideoUrl(nextSplit.url, keepExternal),
       videoTitle: title,

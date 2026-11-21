@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import time
 
@@ -11,11 +12,22 @@ from pydantic import BaseModel, EmailStr, Field
 
 import db
 from dependencies import current_player, optional_player
-from routers.play import _branding_view, find_quiz, throttle, upsert_player
+from routers.play import (
+    _branding_view,
+    _email_allowed,
+    _is_admin,
+    find_quiz,
+    has_quiz_access,
+    record_quiz_membership,
+    require_quiz_access,
+    throttle,
+    upsert_player,
+)
 from security import issue_player_token
 from services import live, settings_store
 
 router = APIRouter(prefix="/api/live", tags=["live"])
+_MAX_SSE_SECONDS = 45 * 60
 
 
 def _error(exc: live.LiveError) -> HTTPException:
@@ -30,34 +42,54 @@ async def _session(code: str) -> dict:
 
 
 @router.get("/{code}/info")
-async def info(code: str) -> dict:
+async def info(code: str, request: Request) -> dict:
+    throttle(request, "live-info", 90)
     session = await _session(code)
-    quiz = await db.fetchrow("select title, teams, allowed_email_domains from quizzes where id = $1", session["quiz_id"])
-    return {"code": session["code"], "status": session["status"], "quizTitle": quiz["title"], "teams": quiz["teams"],
-            "branding": await _branding_view()}
+    quiz = await db.fetchrow(
+        "select title, teams, access_code, allowed_email_domains from quizzes where id = $1",
+        session["quiz_id"],
+    )
+    return {
+        "code": session["code"], "status": session["status"], "quizTitle": quiz["title"],
+        "teams": quiz["teams"], "requiresCode": bool(quiz["access_code"]),
+        "branding": await _branding_view(),
+    }
 
 
 class LiveJoin(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=60)
     email: EmailStr | None = None
     team: str | None = Field(default=None, max_length=60)
+    accessCode: str | None = Field(default=None, max_length=40)
 
 
 @router.post("/{code}/join")
 async def join(code: str, body: LiveJoin, request: Request, player: dict | None = Depends(optional_player)) -> dict:
-    throttle(request, "live-join", 600)
+    throttle(request, "live-join", 120)
     session = await _session(code)
+    quiz = await db.fetchrow("select * from quizzes where id = $1", session["quiz_id"])
     token = None
     if player is None:
         if not body.name or not body.email:
             raise HTTPException(422, "Enter your name and work email to join.")
-        quiz = await db.fetchrow("select teams, allowed_email_domains from quizzes where id = $1", session["quiz_id"])
-        domains = [d.lower().lstrip("@") for d in quiz["allowed_email_domains"]]
-        if domains and body.email.lower().split("@")[-1] not in domains:
-            raise HTTPException(403, f"Please use your work email ({', '.join('@' + d for d in domains)}).")
+        if not _email_allowed(quiz, body.email):
+            raise HTTPException(403, "That email address is not eligible for this live game. Use your work email.")
+        if quiz["access_code"]:
+            throttle(request, f"live-code:{quiz['id']}", 20)
+            if not hmac.compare_digest((body.accessCode or "").strip().lower(), quiz["access_code"].strip().lower()):
+                raise HTTPException(403, "That access code is not right. Check the invitation.")
         team = body.team if body.team and (not quiz["teams"] or body.team in quiz["teams"]) else None
         player = await upsert_player(body.name, body.email, team)
         token = issue_player_token(player["id"])
+    else:
+        if not _email_allowed(quiz, player["email"]):
+            raise HTTPException(403, "That email address is not eligible for this live game. Use your work email.")
+        already_member = await has_quiz_access(quiz, player)
+        if quiz["access_code"] and not already_member:
+            throttle(request, f"live-code:{quiz['id']}", 20)
+            if not hmac.compare_digest((body.accessCode or "").strip().lower(), quiz["access_code"].strip().lower()):
+                raise HTTPException(403, "Enter the quiz access code to join this live room.")
+    await record_quiz_membership(quiz["id"], player["id"])
     try:
         await live.join(session, player)
         session = await live.load(code, fresh=True)
@@ -66,28 +98,45 @@ async def join(code: str, body: LiveJoin, request: Request, player: dict | None 
         raise _error(exc) from exc
 
 
+async def _require_live_viewer(session: dict, player: dict | None, x_host_key: str | None) -> bool:
+    if live.is_host(session, x_host_key):
+        return True
+    if player is not None and await live.is_participant(session["id"], player["id"]):
+        return False
+    raise HTTPException(403, "Join the live game first to view its questions.")
+
+
 @router.get("/{code}/state")
-async def get_state(code: str, player: dict | None = Depends(optional_player),
+async def get_state(code: str, request: Request, player: dict | None = Depends(optional_player),
                     x_host_key: str | None = Header(default=None)) -> dict:
+    throttle(request, "live-state", 180)
     session = await _session(code)
-    return await live.state(session, host=live.is_host(session, x_host_key), player=player)
+    host = await _require_live_viewer(session, player, x_host_key)
+    return await live.state(session, host=host, player=player)
 
 
 @router.get("/{code}/events")
 async def events(code: str, request: Request, player: dict | None = Depends(optional_player),
                  x_host_key: str | None = Header(default=None)) -> StreamingResponse:
+    throttle(request, "live-events", 60)
     session = await _session(code)
-    host = live.is_host(session, x_host_key)
+    host = await _require_live_viewer(session, player, x_host_key)
 
     async def stream():
         last_version, last_sent = None, 0.0
+        started = time.monotonic()
         yield "retry: 2000\n\n"
         while not await request.is_disconnected():
+            now = time.monotonic()
+            if now - started > _MAX_SSE_SECONDS:
+                break
             try:
                 current = await live.tick(await live.load(code))
             except live.LiveError:
                 break
-            now = time.monotonic()
+            # Re-check host key so rotating/reclaiming a session disconnects revoked hosts immediately.
+            if host and not live.is_host(current, x_host_key):
+                break
             live_count = host and current["status"] == "question" and now - last_sent >= 1.0
             if current["version"] != last_version or live_count:
                 view = await live.state(current, host=host, player=player)
@@ -109,7 +158,8 @@ class LiveAnswer(BaseModel):
 
 
 @router.post("/{code}/answer")
-async def answer(code: str, body: LiveAnswer, player: dict | None = Depends(optional_player)) -> dict:
+async def answer(code: str, body: LiveAnswer, request: Request, player: dict | None = Depends(optional_player)) -> dict:
+    throttle(request, "live-answer", 120)
     if player is None:
         raise HTTPException(401, "Join the game first.")
     try:
@@ -124,10 +174,13 @@ class HostLiveBody(BaseModel):
 
 @router.post("/quiz/{slug}/host")
 async def host_live(slug: str, body: HostLiveBody, request: Request,
-                    player: dict = Depends(current_player)) -> dict:
-    """Let a signed-in player host a live group room directly from an open quiz's lobby."""
+                    player: dict = Depends(current_player),
+                    x_admin_token: str | None = Header(default=None)) -> dict:
+    """Let an authorized player host a live group room directly from an open quiz's lobby."""
     throttle(request, "live-host", 20)
-    quiz = await find_quiz(slug)
+    admin = await _is_admin(x_admin_token)
+    quiz = await find_quiz(slug, x_admin_token)
+    await require_quiz_access(quiz, player, is_admin=admin)
     try:
         return await live.create_session(quiz, await settings_store.quiz_rules(quiz), body.decade)
     except live.LiveError as exc:
@@ -139,7 +192,8 @@ class Control(BaseModel):
 
 
 @router.post("/{code}/control")
-async def control(code: str, body: Control, x_host_key: str | None = Header(default=None)) -> dict:
+async def control(code: str, body: Control, request: Request, x_host_key: str | None = Header(default=None)) -> dict:
+    throttle(request, "live-control", 90)
     session = await _session(code)
     if not live.is_host(session, x_host_key):
         raise HTTPException(403, "Only the host screen can control the game.")

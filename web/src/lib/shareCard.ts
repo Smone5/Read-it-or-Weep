@@ -14,8 +14,8 @@ export type Challenge = {
 const VALID_MODES = new Set<ModeId>(['show', 'sudden_death', 'speed', 'straight', 'jukebox'])
 
 export function parseChallenge(params: URLSearchParams): Challenge | null {
-  const rawScore = params.get('beat')
-  if (!rawScore) return null
+  const rawScore = (params.get('beat') || '').trim()
+  if (!/^\d{1,7}$/.test(rawScore)) return null
   const score = Number.parseInt(rawScore, 10)
   if (!Number.isFinite(score) || score <= 0) return null
   const by = (params.get('by') || 'A challenger').trim().slice(0, 32) || 'A challenger'
@@ -70,8 +70,9 @@ export function buildShareText(opts: {
   gameTitle: string
   playerName?: string | null
   summary: Summary
+  includeLink?: boolean
 }): string {
-  const { slug, quizTitle, gameTitle, playerName, summary } = opts
+  const { slug, quizTitle, gameTitle, playerName, summary, includeLink = true } = opts
   const badge = summary.badgeInfo?.label ?? summary.badge
   const icon = summary.mode === 'straight'
     ? (summary.passed ? '✅' : '📘')
@@ -82,17 +83,19 @@ export function buildShareText(opts: {
     : `${icon} ${badge ?? summary.modeName} · ${summary.score.toLocaleString()} pts${rankStr}`
   const grid = emojiGrid(summary.resultsGrid)
   const statsLine = `${summary.accuracy}% accuracy${summary.streakMax > 1 ? ` · x${summary.streakMax} streak` : ''}`
-  const link = buildChallengeUrl(slug, {
-    score: summary.score,
-    playerName,
-    badge,
-    mode: summary.mode,
-  })
+  const link = includeLink
+    ? buildChallengeUrl(slug, {
+        score: summary.score,
+        playerName,
+        badge,
+        mode: summary.mode,
+      })
+    : null
   const lines = [
-    `${gameTitle} — ${quizTitle}`,
+    includeLink ? `${gameTitle} — ${quizTitle}` : gameTitle,
     headline,
     ...(grid ? [`${grid} (${statsLine})`] : [statsLine]),
-    `Think you can beat me? ${link}`,
+    ...(link ? [`Think you can beat me? ${link}`] : []),
   ]
   return lines.join('\n')
 }
@@ -207,56 +210,41 @@ export async function renderTrophyCardPng(opts: {
   ctx.strokeStyle = medalColor
   ctx.stroke()
 
-  // Top header bar
-  ctx.fillStyle = '#A9A4CC'
-  ctx.font = '700 18px ui-monospace, SFMono-Regular, Menlo, monospace'
-  ctx.fillText(branding.gameTitle.toUpperCase(), 64, 82)
-  if (branding.companyName) {
-    const company = branding.companyName.toUpperCase()
-    ctx.fillStyle = 'rgba(255,255,255,0.55)'
-    ctx.fillText(`·  ${company}`, 64 + ctx.measureText(branding.gameTitle.toUpperCase()).width + 14, 82)
-  }
-
-  // Mode pill on top right
+  // Mode pill on top right (measured first so header text never collides with it)
   const modeLabel = summary.modeName.toUpperCase()
   ctx.font = '700 16px ui-monospace, SFMono-Regular, Menlo, monospace'
-  const pillW = ctx.measureText(modeLabel).width + 32
-  roundRect(ctx, W - 64 - pillW, 56, pillW, 34, 6)
+  const pillW = Math.min(340, ctx.measureText(modeLabel).width + 32)
+  const pillX = W - 64 - pillW
+  roundRect(ctx, pillX, 56, pillW, 34, 6)
   ctx.fillStyle = 'rgba(255,255,255,0.08)'
   ctx.fill()
   ctx.lineWidth = 1.5
   ctx.strokeStyle = 'rgba(255,255,255,0.2)'
   ctx.stroke()
   ctx.fillStyle = '#F6F4FF'
-  ctx.fillText(modeLabel, W - 64 - pillW + 16, 79)
+  ctx.fillText(modeLabel, pillX + 16, 79, pillW - 32)
+
+  // Top header bar (bounded to stop cleanly before the mode pill)
+  const headerMaxW = Math.max(200, pillX - 64 - 24)
+  const headerTitle = branding.gameTitle.toUpperCase()
+  ctx.fillStyle = '#A9A4CC'
+  ctx.font = '700 18px ui-monospace, SFMono-Regular, Menlo, monospace'
+  const titleW = Math.min(headerMaxW, ctx.measureText(headerTitle).width)
+  ctx.fillText(headerTitle, 64, 82, headerMaxW)
+  if (branding.companyName && headerMaxW - titleW > 80) {
+    const company = `·  ${branding.companyName.toUpperCase()}`
+    ctx.fillStyle = 'rgba(255,255,255,0.55)'
+    ctx.fillText(company, 64 + titleW + 14, 82, headerMaxW - titleW - 14)
+  }
 
   // Report title
   ctx.fillStyle = '#F6F4FF'
   ctx.font = '800 32px system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
   const titleLines = wrapLines(ctx, quizTitle, W - 128, 2)
-  titleLines.forEach((line, i) => ctx.fillText(line, 64, 134 + i * 40))
+  titleLines.forEach((line, i) => ctx.fillText(line, 64, 134 + i * 40, W - 128))
   const afterTitleY = 134 + titleLines.length * 40 + 18
 
-  // Left hero: Score + Player
-  ctx.fillStyle = '#FFFFFF'
-  ctx.shadowColor = accent
-  ctx.shadowBlur = 24
-  ctx.font = '900 84px ui-monospace, SFMono-Regular, Menlo, monospace'
-  const scoreText = `${summary.score.toLocaleString()}`
-  ctx.fillText(scoreText, 64, afterTitleY + 64)
-  ctx.shadowBlur = 0
-  ctx.fillStyle = accent
-  ctx.font = '800 26px ui-monospace, SFMono-Regular, Menlo, monospace'
-  ctx.fillText('PTS', 64 + ctx.measureText(scoreText).width + 18, afterTitleY + 60)
-
-  // Player & rank line
-  const who = [playerName?.trim() || 'Player', team?.trim() || ''].filter(Boolean).join(' · ')
-  ctx.fillStyle = '#C9C4E8'
-  ctx.font = '600 22px system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
-  const rankPart = summary.rank ? `   ·   Rank #${summary.rank} of ${summary.players}` : ''
-  ctx.fillText(`${who}${rankPart}`, 64, afterTitleY + 106)
-
-  // Right hero: Glowing Badge Medal
+  // Right hero: Glowing Badge Medal (compute box first so left column has an exact non-overlapping width)
   const badgeText = summary.mode === 'straight'
     ? (summary.passed ? `PASSED · ${summary.accuracy}%` : `NOT YET · ${summary.accuracy}%`)
     : (summary.badgeInfo?.label ?? summary.badge ?? summary.modeName).toUpperCase()
@@ -272,7 +260,7 @@ export async function renderTrophyCardPng(opts: {
   ctx.stroke()
   ctx.fillStyle = '#FFFFFF'
   ctx.textAlign = 'center'
-  ctx.fillText(badgeText, badgeX + badgeW / 2, badgeY + 43)
+  ctx.fillText(badgeText, badgeX + badgeW / 2, badgeY + 43, badgeW - 28)
   ctx.textAlign = 'left'
 
   if (summary.badgeInfo?.description) {
@@ -281,10 +269,33 @@ export async function renderTrophyCardPng(opts: {
     const descLines = wrapLines(ctx, summary.badgeInfo.description, badgeW, 2)
     descLines.forEach((l, i) => {
       ctx.textAlign = 'right'
-      ctx.fillText(l, W - 64, badgeY + 98 + i * 22)
+      ctx.fillText(l, W - 64, badgeY + 98 + i * 22, badgeW)
     })
     ctx.textAlign = 'left'
   }
+
+  // Left hero: Score + Player (measure score BEFORE switching font so "PTS" never overlaps the digits!)
+  const leftMaxW = Math.max(300, badgeX - 64 - 28)
+  ctx.fillStyle = '#FFFFFF'
+  ctx.shadowColor = accent
+  ctx.shadowBlur = 24
+  ctx.font = '900 84px ui-monospace, SFMono-Regular, Menlo, monospace'
+  const scoreText = `${summary.score.toLocaleString()}`
+  const scoreMaxW = leftMaxW - 76
+  const measuredScoreW = Math.min(scoreMaxW, ctx.measureText(scoreText).width)
+  ctx.fillText(scoreText, 64, afterTitleY + 64, scoreMaxW)
+  ctx.shadowBlur = 0
+  ctx.fillStyle = accent
+  ctx.font = '800 26px ui-monospace, SFMono-Regular, Menlo, monospace'
+  ctx.fillText('PTS', 64 + measuredScoreW + 18, afterTitleY + 60)
+
+  // Player & rank line (constrained to left column so it never collides with badge description)
+  const who = [playerName?.trim() || 'Player', team?.trim() || ''].filter(Boolean).join(' · ')
+  ctx.fillStyle = '#C9C4E8'
+  ctx.font = '600 21px system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
+  const rankPart = summary.rank ? ` · #${summary.rank} of ${summary.players}` : ''
+  const whoLines = wrapLines(ctx, `${who}${rankPart}`, leftMaxW, 1)
+  ctx.fillText(whoLines[0] ?? who, 64, afterTitleY + 112, leftMaxW)
 
   // Wordle-style arcade answer blocks
   const grid = summary.resultsGrid ?? []
@@ -381,14 +392,14 @@ export async function renderCertificatePng(opts: {
   ctx.textAlign = 'center'
   ctx.fillStyle = gold
   ctx.font = '800 18px ui-monospace, SFMono-Regular, Menlo, monospace'
-  ctx.fillText((branding.companyName || branding.gameTitle).toUpperCase(), W / 2, 108)
+  ctx.fillText((branding.companyName || branding.gameTitle).toUpperCase(), W / 2, 108, W - 180)
 
   ctx.fillStyle = '#FFFFFF'
   ctx.font = '900 44px system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
   const heading = summary.mode === 'straight' && summary.passed
     ? 'CERTIFICATE OF COMPLETION'
     : 'CERTIFICATE OF READINESS'
-  ctx.fillText(heading, W / 2, 166)
+  ctx.fillText(heading, W / 2, 166, W - 180)
 
   // Gold divider
   ctx.fillStyle = gold
@@ -401,11 +412,11 @@ export async function renderCertificatePng(opts: {
   // Recipient name
   ctx.fillStyle = '#FFFFFF'
   ctx.font = '800 54px system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
-  ctx.fillText(playerName?.trim() || 'Player', W / 2, 306)
+  ctx.fillText(playerName?.trim() || 'Player', W / 2, 306, W - 180)
   if (team?.trim()) {
     ctx.fillStyle = '#CBD5E1'
     ctx.font = '600 22px system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
-    ctx.fillText(team.trim(), W / 2, 342)
+    ctx.fillText(team.trim(), W / 2, 342, W - 220)
   }
 
   ctx.fillStyle = '#94A3B8'
@@ -415,7 +426,7 @@ export async function renderCertificatePng(opts: {
   ctx.fillStyle = gold
   ctx.font = '800 32px system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
   const lines = wrapLines(ctx, quizTitle, W - 220, 2)
-  lines.forEach((l, i) => ctx.fillText(l, W / 2, 446 + i * 40))
+  lines.forEach((l, i) => ctx.fillText(l, W / 2, 446 + i * 40, W - 200))
 
   // 4 verified stat boxes
   const boxY = 532
@@ -425,7 +436,7 @@ export async function renderCertificatePng(opts: {
   const certStats = [
     { label: 'SECTIONS CLEARED', value: `${summary.readiness.cleared}/${summary.readiness.total} (${summary.readiness.percent}%)` },
     { label: 'RUN ACCURACY', value: `${summary.accuracy}%` },
-    { label: 'HIGH SCORE', value: `${summary.score.toLocaleString()} pts` },
+    { label: summary.mode === 'straight' ? 'RESULT' : 'FINAL SCORE', value: summary.mode === 'straight' ? `${summary.report.correct}/${summary.report.answered} right` : `${summary.score.toLocaleString()} pts` },
     { label: 'RANK EARNED', value: summary.mode === 'straight' ? 'PASSED' : (summary.badgeInfo?.label ?? summary.badge ?? 'READY') },
   ]
   certStats.forEach((s, i) => {
@@ -439,10 +450,17 @@ export async function renderCertificatePng(opts: {
     ctx.textAlign = 'center'
     ctx.fillStyle = '#94A3B8'
     ctx.font = '700 12px ui-monospace, SFMono-Regular, Menlo, monospace'
-    ctx.fillText(s.label, x + boxW / 2, boxY + 30)
+    ctx.fillText(s.label, x + boxW / 2, boxY + 28, boxW - 20)
     ctx.fillStyle = '#FFFFFF'
-    ctx.font = '800 20px system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
-    ctx.fillText(s.value.length > 18 ? `${s.value.slice(0, 17)}…` : s.value, x + boxW / 2, boxY + 66)
+    ctx.font = '800 19px system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
+    const valLines = wrapLines(ctx, s.value, boxW - 24, 2)
+    if (valLines.length === 1) {
+      ctx.fillText(valLines[0], x + boxW / 2, boxY + 64, boxW - 24)
+    } else {
+      ctx.font = '800 16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
+      const wrapped = wrapLines(ctx, s.value, boxW - 24, 2)
+      wrapped.forEach((wl, wi) => ctx.fillText(wl, x + boxW / 2, boxY + 55 + wi * 20, boxW - 24))
+    }
   })
 
   // Footer: verified date + seal
@@ -450,7 +468,7 @@ export async function renderCertificatePng(opts: {
   ctx.textAlign = 'left'
   ctx.fillStyle = '#94A3B8'
   ctx.font = '600 16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
-  ctx.fillText(`Issued ${dateStr} · ${branding.gameTitle}`, 84, H - 82)
+  ctx.fillText(`Issued ${dateStr} · ${branding.gameTitle}`, 84, H - 82, 560)
 
   ctx.textAlign = 'right'
   ctx.fillStyle = '#2FBF71'
@@ -472,14 +490,19 @@ export function downloadBlob(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1500)
 }
 
-export async function shareOrDownloadImage(blob: Blob, filename: string, title: string, text: string): Promise<'shared' | 'downloaded'> {
+export async function shareOrDownloadImage(
+  blob: Blob,
+  filename: string,
+  title: string,
+  text: string,
+): Promise<'shared' | 'downloaded' | 'cancelled'> {
   const file = new File([blob], filename, { type: 'image/png' })
   if (typeof navigator !== 'undefined' && navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
       await navigator.share({ files: [file], title, text })
       return 'shared'
     } catch (err) {
-      if ((err as Error)?.name === 'AbortError') return 'shared'
+      if ((err as Error)?.name === 'AbortError') return 'cancelled'
     }
   }
   downloadBlob(blob, filename)

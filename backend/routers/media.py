@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import io
+import uuid
 from collections import OrderedDict
 
 from fastapi import APIRouter, HTTPException, Response
-from PIL import Image, ImageFilter
+from fastapi.responses import FileResponse, StreamingResponse
+from PIL import Image, ImageFilter, UnidentifiedImageError
 
 import db
 from security import verify_media
 from services import settings_store
-from storage import storage
+from storage import LocalStorage, storage
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
@@ -33,20 +35,26 @@ def _blurred(data: bytes) -> bytes:
 
 
 @router.get("/image/{image_id}")
-async def report_image(image_id: str, v: str = "sharp", exp: int = 0, sig: str = "") -> Response:
-    if v not in ("sharp", "blur") or not verify_media(f"{image_id}:{v}", exp, sig):
+async def report_image(image_id: uuid.UUID, v: str = "sharp", exp: int = 0, sig: str = "") -> Response:
+    sid = str(image_id)
+    if v not in ("sharp", "blur") or not verify_media(f"{sid}:{v}", exp, sig):
         raise HTTPException(403, "This picture link has expired.")
-    row = await db.fetchrow("select storage_key, mime_type from doc_images where id = $1", image_id)
+    row = await db.fetchrow("select storage_key, mime_type from doc_images where id = $1", sid)
     if row is None:
         raise HTTPException(404, "Picture not found.")
     headers = {"Cache-Control": "private, max-age=3600", "Content-Security-Policy": "default-src 'none'"}
     if v == "blur":
-        if image_id not in _blur_cache:
-            # Image work is slow enough to hold everyone else up, so it runs on a worker thread.
-            _blur_cache[image_id] = await asyncio.to_thread(_blurred, await storage().get(row["storage_key"]))
+        if sid not in _blur_cache:
+            try:
+                raw = await storage().get(row["storage_key"])
+                _blur_cache[sid] = await asyncio.to_thread(_blurred, raw)
+            except FileNotFoundError as exc:
+                raise HTTPException(404, "Picture not found.") from exc
+            except (UnidentifiedImageError, OSError) as exc:
+                raise HTTPException(422, "Picture could not be processed.") from exc
             while len(_blur_cache) > 200:
                 _blur_cache.popitem(last=False)
-        return Response(_blur_cache[image_id], media_type="image/jpeg", headers=headers)
+        return Response(_blur_cache[sid], media_type="image/jpeg", headers=headers)
     try:
         data = await storage().get(row["storage_key"])
     except FileNotFoundError as exc:
@@ -55,32 +63,51 @@ async def report_image(image_id: str, v: str = "sharp", exp: int = 0, sig: str =
 
 
 @router.get("/document/{document_id}")
-async def report_document(document_id: str, exp: int = 0, sig: str = "") -> Response:
-    """Serve an uploaded report file only when the quiz allows downloads and the link signature is valid."""
-    if not verify_media(f"doc:{document_id}", exp, sig):
+async def report_document(document_id: uuid.UUID, exp: int = 0, sig: str = "", admin: int = 0) -> Response:
+    """Serve an uploaded report file only when the quiz is open (or admin-signed), allows downloads, and signature is valid."""
+    sid = str(document_id)
+    is_admin_link = bool(admin) and verify_media(f"doc:{sid}:admin", exp, sig)
+    if not is_admin_link and not verify_media(f"doc:{sid}", exp, sig):
         raise HTTPException(403, "This report link has expired. Refresh the page for a new one.")
     row = await db.fetchrow(
-        "select d.filename, d.storage_key, d.mime_type, q.id as quiz_id, q.settings"
-        " from documents d join quizzes q on q.id = d.quiz_id where d.id = $1", document_id)
+        "select d.filename, d.storage_key, d.mime_type, q.id as quiz_id, q.status, q.settings"
+        " from documents d join quizzes q on q.id = d.quiz_id where d.id = $1", sid)
     if row is None or not row["storage_key"]:
         raise HTTPException(404, "Report file is not available for download.")
+    if row["status"] != "open" and not is_admin_link:
+        raise HTTPException(403, "This quiz is no longer open for report downloads.")
     rules = await settings_store.quiz_rules({"settings": row["settings"]})
     if not rules.get("allow_download"):
         raise HTTPException(403, "Report download is switched off for this quiz.")
+
+    safe_name = row["filename"].replace('"', "").replace("\r", "").replace("\n", "").replace("/", "_").replace("\\", "_")
+    headers = {
+        "Cache-Control": "private, no-store",
+        "Content-Disposition": f'attachment; filename="{safe_name}"',
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "X-Content-Type-Options": "nosniff",
+    }
+    media_type = row["mime_type"] or "application/octet-stream"
+    store = storage()
+    if isinstance(store, LocalStorage):
+        try:
+            path = store._path(row["storage_key"])
+        except ValueError as exc:
+            raise HTTPException(404, "Report file is no longer stored on this server.") from exc
+        if not path.is_file():
+            raise HTTPException(404, "Report file is no longer stored on this server.")
+        return FileResponse(path, media_type=media_type, headers=headers)
     try:
-        data = await storage().get(row["storage_key"])
+        data = await store.get(row["storage_key"])
     except FileNotFoundError as exc:
         raise HTTPException(404, "Report file is no longer stored on this server.") from exc
-    safe_name = row["filename"].replace('"', "").replace("\r", "").replace("\n", "")
-    return Response(
-        data,
-        media_type=row["mime_type"] or "application/octet-stream",
-        headers={
-            "Cache-Control": "private, no-store",
-            "Content-Disposition": f'inline; filename="{safe_name}"',
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
+
+    def _chunks():
+        view = memoryview(data)
+        for start in range(0, len(view), 65_536):
+            yield bytes(view[start:start + 65_536])
+
+    return StreamingResponse(_chunks(), media_type=media_type, headers=headers)
 
 
 @router.get("/logo")

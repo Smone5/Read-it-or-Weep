@@ -17,10 +17,8 @@ import {
 } from '../components/Icons'
 import { NowPlaying } from '../components/NowPlaying'
 import { api } from '../lib/api'
-import { cueJukebox } from '../lib/jukebox'
 import {
   buildShareText,
-  downloadBlob,
   renderCertificatePng,
   renderTrophyCardPng,
   shareOrDownloadImage,
@@ -32,7 +30,7 @@ import { HighScores, HostBox, ReadinessMap, RollingScore, type TalkControl } fro
 import { VideoClipCard } from './VideoClipCard'
 
 function BadgeIcon({ icon, tone }: { icon?: BadgeInfo['icon']; tone?: BadgeInfo['tone'] }) {
-  const color = tone === 'legend' ? 'var(--accent)' : 'var(--medal)'
+  const color = tone === 'legend' ? 'var(--accent-text)' : 'var(--medal)'
   const props = { size: 18, style: { color } }
   switch (icon) {
     case 'crown': return <IconCrown {...props} />
@@ -60,8 +58,10 @@ type Props = {
   hostTone?: 'accent' | 'brand' | 'cyan' | 'rose'
   talk?: TalkControl | null
   showLeaderboard: boolean
+  shareable?: boolean
   reportUrl?: string | null
   reportFiles?: { id: string; filename: string; url: string }[]
+  onVideoStart?: () => void
   onOpenScores?: () => void
   onPlayReport?: () => void
   onPlayAgain: () => void
@@ -89,8 +89,10 @@ export default function Summary({
   hostTone = 'accent',
   talk,
   showLeaderboard,
+  shareable = true,
   reportUrl,
   reportFiles,
+  onVideoStart,
   onOpenScores,
   onPlayReport,
   onPlayAgain,
@@ -103,8 +105,11 @@ export default function Summary({
   const [showAllReview, setShowAllReview] = useState(false)
   const [shareNote, setShareNote] = useState('')
   const [exporting, setExporting] = useState<'card' | 'cert' | null>(null)
-  const beatChallenge = Boolean(challenge && summary.status === 'completed' && summary.score > challenge.score)
-  const celebrate = (summary.personalBest && summary.score > 0 && summary.status === 'completed') || beatChallenge
+  const matchingChallenge =
+    challenge && (!challenge.mode || challenge.mode === summary.mode) ? challenge : null
+  const isNewBest = Boolean(summary.personalBest && summary.score > 0 && summary.status === 'completed')
+  const beatChallenge = Boolean(matchingChallenge && summary.status === 'completed' && summary.score > matchingChallenge.score)
+  const celebrate = isNewBest || beatChallenge
   const failed = summary.mode === 'straight' && summary.passed === false
   const jukebox = summary.mode === 'jukebox' // the music side game: no report to be ready for
   const completed = summary.status === 'completed' && !failed
@@ -119,6 +124,7 @@ export default function Summary({
     gameTitle: branding.gameTitle,
     playerName,
     summary,
+    includeLink: shareable,
   })
 
   const flashNote = (msg: string) => {
@@ -165,7 +171,8 @@ export default function Summary({
         `${branding.gameTitle} — ${summary.score.toLocaleString()} pts`,
         shareText,
       )
-      flashNote(outcome === 'shared' ? 'Trophy card ready to share!' : 'Trophy card PNG saved!')
+      if (outcome === 'shared') flashNote('Trophy card shared!')
+      else if (outcome === 'downloaded') flashNote('Trophy card PNG saved!')
     } catch {
       flashNote('Could not generate trophy card.')
     } finally {
@@ -178,8 +185,14 @@ export default function Summary({
     setExporting('cert')
     try {
       const blob = await renderCertificatePng({ branding, quizTitle, playerName, team: playerTeam, summary })
-      downloadBlob(blob, `${slug}-ready-certificate.png`)
-      flashNote('Completion certificate PNG saved!')
+      const outcome = await shareOrDownloadImage(
+        blob,
+        `${slug}-ready-certificate.png`,
+        `${branding.gameTitle} — Certificate of Readiness`,
+        `${playerName ? `${playerName} completed ` : 'Completed '}${quizTitle}`,
+      )
+      if (outcome === 'shared') flashNote('Certificate shared!')
+      else if (outcome === 'downloaded') flashNote('Completion certificate PNG saved!')
     } catch {
       flashNote('Could not generate certificate.')
     } finally {
@@ -189,7 +202,6 @@ export default function Summary({
 
   useEffect(() => {
     play(victory ? 'cheer' : completed ? 'levelup' : 'gameover')
-    if (victory) cueJukebox('victory')
     if (celebrate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       const colors = [getComputedStyle(document.documentElement).getPropertyValue('--brand').trim() || '#6d5ef8', '#ffb020', '#ffffff']
       void confetti({ particleCount: 110, spread: 75, origin: { y: 0.35 }, colors, shapes: ['square'], scalar: 0.9 })
@@ -219,10 +231,14 @@ export default function Summary({
           {summary.status !== 'completed' ? 'Game ended early' : failed ? 'Not quite yet' : victory ? 'Stage clear' : 'Run complete'}
         </p>
         <h1 className="neon mt-3 text-2xl tabular-nums sm:text-4xl"><RollingScore value={summary.score} pad={6} durationMs={650} /></h1>
-        {celebrate && <p className="pixel neon-accent mt-3 text-[11px]">New high score!</p>}
+        {isNewBest ? (
+          <p className="pixel neon-accent mt-3 text-[11px]">New high score!</p>
+        ) : beatChallenge ? (
+          <p className="pixel mt-3 text-[11px]" style={{ color: 'var(--good)' }}>Challenge beaten!</p>
+        ) : null}
         {(summary.lifelineBonus ?? 0) > 0 && (
           <p className="mt-2 text-xs text-muted">
-            Includes <b style={{ color: 'var(--accent)' }}>+{summary.lifelineBonus}</b> unused lifeline bonus ({summary.unusedLifelines} saved)
+            Includes <b style={{ color: 'var(--accent-text)' }}>+{summary.lifelineBonus}</b> unused lifeline bonus ({summary.unusedLifelines} saved)
           </p>
         )}
         {bestDelta !== null && previousBest !== null && (
@@ -231,7 +247,7 @@ export default function Summary({
               ? <>Beat your previous best by <b style={{ color: 'var(--good)' }}>+{bestDelta.toLocaleString()}</b>!</>
               : bestDelta === 0
                 ? 'Tied your personal best!'
-                : <>Only <b style={{ color: 'var(--accent)' }}>{Math.abs(bestDelta).toLocaleString()}</b> pts off your best ({previousBest.toLocaleString()})</>}
+                : <>Only <b style={{ color: 'var(--accent-text)' }}>{Math.abs(bestDelta).toLocaleString()}</b> pts off your best ({previousBest.toLocaleString()})</>}
           </p>
         )}
         {summary.mode === 'straight' ? (
@@ -251,7 +267,17 @@ export default function Summary({
                 </p>
               )}
               {summary.badgeInfo?.nextHint && (
-                <p className="text-xs" style={{ color: summary.badgeInfo.nextLabel ? 'var(--accent-text)' : 'var(--good)' }}>
+                <p
+                  className="text-xs"
+                  style={{
+                    color:
+                      summary.badgeInfo.tier === 0
+                        ? 'var(--muted)'
+                        : summary.badgeInfo.nextLabel
+                          ? 'var(--accent-text)'
+                          : 'var(--good)',
+                  }}
+                >
                   {summary.badgeInfo.nextLabel ? `Next rank: ${summary.badgeInfo.nextHint}` : summary.badgeInfo.nextHint}
                 </p>
               )}
@@ -284,7 +310,7 @@ export default function Summary({
         )}
       </section>
 
-      {challenge && summary.status === 'completed' && (
+      {matchingChallenge && summary.status === 'completed' && (
         <section
           className="card flex items-center gap-3 p-4"
           style={{
@@ -294,21 +320,21 @@ export default function Summary({
               : 'color-mix(in oklab, var(--accent) 10%, var(--surface))',
           }}
         >
-          <IconTrophy size={22} className="flex-none" style={{ color: beatChallenge ? 'var(--good)' : 'var(--accent)' }} />
+          <IconTrophy size={22} className="flex-none" style={{ color: beatChallenge ? 'var(--good)' : 'var(--accent-text)' }} />
           <div className="min-w-0 flex-1">
             <p className="pixel text-[10px]" style={{ color: beatChallenge ? 'var(--good)' : 'var(--accent-text)' }}>
               {beatChallenge
                 ? `Challenge beaten!`
-                : summary.score === challenge.score
+                : summary.score === matchingChallenge.score
                   ? 'Dead heat!'
-                  : `Target: ${challenge.by} (${challenge.score.toLocaleString()} pts)`}
+                  : `Target: ${matchingChallenge.by} (${matchingChallenge.score.toLocaleString()} pts)`}
             </p>
             <p className="mt-1 text-sm">
               {beatChallenge
-                ? <>You topped {challenge.by}&rsquo;s {challenge.score.toLocaleString()} pts by <b>+{(summary.score - challenge.score).toLocaleString()}</b>! Send your score back to claim the crown.</>
-                : summary.score === challenge.score
-                  ? <>You tied {challenge.by}&rsquo;s {challenge.score.toLocaleString()} pts on the nose. One more run to take the lead!</>
-                  : <>Only <b>{(challenge.score - summary.score).toLocaleString()} pts</b> shy of {challenge.by}&rsquo;s score. Run it back!</>}
+                ? <>You topped {matchingChallenge.by}&rsquo;s {matchingChallenge.score.toLocaleString()} pts by <b>+{(summary.score - matchingChallenge.score).toLocaleString()}</b>! Send your score back to claim the crown.</>
+                : summary.score === matchingChallenge.score
+                  ? <>You tied {matchingChallenge.by}&rsquo;s {matchingChallenge.score.toLocaleString()} pts on the nose. One more run to take the lead!</>
+                  : <>Only <b>{(matchingChallenge.score - summary.score).toLocaleString()} pts</b> shy of {matchingChallenge.by}&rsquo;s score. Run it back!</>}
             </p>
           </div>
         </section>
@@ -320,7 +346,9 @@ export default function Summary({
             <div>
               <h2 className="neon-accent text-xs">Show off your score</h2>
               <p className="mt-1 text-xs text-muted">
-                Spoiler-free — shares your score, rank, and challenge link only (never report text).
+                {shareable
+                  ? 'Spoiler-free — shares your score, rank, and challenge link only (never report text).'
+                  : 'Spoiler-free — shares your score only (no direct quiz link for private reports).'}
               </p>
             </div>
             {summary.resultsGrid && summary.resultsGrid.length > 0 && (
@@ -338,7 +366,7 @@ export default function Summary({
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
             <button type="button" className="btn btn-primary btn-sm" onClick={() => void copyScore()}>
-              Copy score &amp; challenge link
+              {shareable ? 'Copy score & challenge link' : 'Copy score'}
             </button>
             {typeof navigator !== 'undefined' && 'share' in navigator && (
               <button type="button" className="btn btn-ghost btn-sm" onClick={() => void nativeShare()}>
@@ -450,7 +478,7 @@ export default function Summary({
                             “{miss.sourceQuote}”
                           </blockquote>
                         )}
-                        {miss.video && <VideoClipCard video={miss.video} compact />}
+                        {miss.video && <VideoClipCard video={miss.video} compact onPlayStart={onVideoStart} />}
                       </li>
                     ))}
                   </ol>

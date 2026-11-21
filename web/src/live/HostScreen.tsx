@@ -14,6 +14,7 @@ import { IconBolt, IconCheck, IconCrown, IconPlay, IconStar } from '../component
 import { NowPlaying } from '../components/NowPlaying'
 import { FullScreenMessage, SoundToggle, Spinner, Stage } from '../components/ui'
 import { formatScore, HostBox, LETTERS, TONE_INKS, TONES } from '../game/parts'
+import { VideoClipCard } from '../game/VideoClipCard'
 import { startParty, stopJukebox } from '../lib/jukebox'
 import { api } from '../lib/api'
 import { HostVoice } from '../lib/hostVoice'
@@ -191,7 +192,10 @@ export default function HostScreen() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLButtonElement) return
       if ([' ', 'Enter', 'ArrowRight', 'PageDown'].includes(event.key) && state && state.status !== 'finished') {
+        if (state.status === 'lobby' && !state.players) return
         event.preventDefault()
         void control('next')
       }
@@ -249,7 +253,9 @@ export default function HostScreen() {
 
         <main className="flex min-h-0 flex-1 flex-col">
           {state.status === 'lobby' && <LobbyView state={state} qr={qr} joinUrl={joinUrl} />}
-          {(state.status === 'question' || state.status === 'reveal') && state.question && <QuestionView state={state} until={until} />}
+          {(state.status === 'question' || state.status === 'reveal') && state.question && (
+            <QuestionView state={state} until={until} onVideoStart={() => voice.current?.skip()} />
+          )}
           {state.status === 'scoreboard' && <Scoreboard state={state} />}
           {state.status === 'finished' && <Finale state={state} />}
         </main>
@@ -315,7 +321,15 @@ function LobbyView({ state, qr, joinUrl }: { state: LiveState; qr: string; joinU
   )
 }
 
-function QuestionView({ state, until }: { state: LiveState; until: (iso: string | null | undefined) => number }) {
+function QuestionView({
+  state,
+  until,
+  onVideoStart,
+}: {
+  state: LiveState
+  until: (iso: string | null | undefined) => number
+  onVideoStart?: () => void
+}) {
   const question = state.question!
   const reveal = state.status === 'reveal' ? state.reveal : undefined
   const opensIn = until(question.opensAt)
@@ -323,7 +337,8 @@ function QuestionView({ state, until }: { state: LiveState; until: (iso: string 
   const seconds = Math.ceil(left / 1000)
   const answered = state.answersIn ?? 0
   const most = reveal ? Math.max(1, ...reveal.counts) : 1
-  const hasPicture = Boolean(question.imageUrl)
+  const pictureUrl = reveal?.imageUrl ?? question.imageUrl
+  const hasPicture = Boolean(pictureUrl)
 
   // Animate reveal vote bars from 0 -> final on mount.
   const [barsReady, setBarsReady] = useState(false)
@@ -405,10 +420,11 @@ function QuestionView({ state, until }: { state: LiveState; until: (iso: string 
             </div>
           )}
           {reveal?.explanation && <p className="rise mt-4 text-lg text-muted lg:text-2xl">{reveal.explanation}</p>}
+          {reveal?.video && <div className="mt-3 max-w-lg"><VideoClipCard video={reveal.video} compact onPlayStart={onVideoStart} /></div>}
         </div>
         {hasPicture && (
           <div className="picture-frame overflow-hidden rounded-[6px] border-4 bg-white" style={{ borderColor: 'var(--accent)', boxShadow: '0 0 0 2px #000, 5px 5px 0 2px #000' }}>
-            <img src={question.imageUrl} alt="" className="max-h-[42dvh] w-full object-contain" />
+            <img src={pictureUrl} alt="" className="max-h-[42dvh] w-full object-contain" />
           </div>
         )}
       </div>
@@ -463,7 +479,7 @@ function BigScreenRow({
   top: number
   dense: boolean
 }) {
-  const rankColor = row.rank === 1 ? '#ffd60a' : row.rank === 2 ? '#e2e8f0' : row.rank === 3 ? '#f59e0b' : 'var(--muted)'
+  const rankColor = row.rank === 1 ? 'var(--rank-1)' : row.rank === 2 ? 'var(--rank-2)' : row.rank === 3 ? 'var(--rank-3)' : 'var(--muted)'
   const share = top > 0 ? Math.max(0.04, row.score / top) : 0
   return (
     <li

@@ -47,9 +47,9 @@ async def _setup(host_id: str) -> tuple[dict, dict, dict] | None:
     return settings, character, await settings_store.get("branding")
 
 
-def sample_key(character: dict, settings: dict, branding: dict) -> tuple[str, dict]:
+def sample_key(character: dict, settings: dict, branding: dict, *, allow_eleven: bool = True) -> tuple[str, dict]:
     """The fingerprint of a sample, and how its character will be performed."""
-    performer = host_service.resolve_voice(character["voice"])
+    performer = host_service.resolve_voice(character["voice"], allow_eleven=allow_eleven)
     shape = {"v": VERSION, "id": character["id"], "name": character["name"], "voice": character["voice"],
              "manner": character.get("manner") or host_service.DEFAULT_MANNER, "style": character.get("style") or "",
              "sarcasm": int(settings["sarcasm"]), "game": branding["game_title"], "company": branding["company_name"],
@@ -104,7 +104,7 @@ async def _backup_mp3(words: str, fallback: str, manner: str) -> bytes:
         return b"".join([chunk async for chunk in response.iter_bytes()])
 
 
-async def sample(host_id: str) -> dict | None:
+async def sample(host_id: str, *, allow_eleven: bool = True) -> dict | None:
     """The sample for one host character: recorded now if it does not exist yet. None if there is no such host
     or the host does not speak."""
     setup = await _setup(host_id)
@@ -113,10 +113,11 @@ async def sample(host_id: str) -> dict | None:
     settings, character, branding = setup
     if not settings["voice_enabled"]:
         return None
-    key, performer = sample_key(character, settings, branding)
+    key, performer = sample_key(character, settings, branding, allow_eleven=allow_eleven)
     row = await db.fetchrow("select mime, audio, words from host_samples where key = $1", key)
     if row is None:
-        async with _locks.setdefault(key, asyncio.Lock()):
+        lock = _locks.setdefault(key, asyncio.Lock())
+        async with lock:
             row = await db.fetchrow("select mime, audio, words from host_samples where key = $1", key)
             if row is None:
                 others = [r["words"] for r in await db.fetch(
@@ -128,7 +129,10 @@ async def sample(host_id: str) -> dict | None:
                                  " on conflict (key) do nothing", key, host_id, words, mime, audio)
                 await db.execute("delete from host_samples where host_id = $1 and key <> $2", host_id, key)
                 row = {"mime": mime, "audio": audio, "words": words}
-        _locks.pop(key, None)
+        # Only prune idle locks when the dict grows large — never pop a lock while another waiter holds it.
+        if len(_locks) > 200:
+            for k in [k for k, lk in list(_locks.items()) if not lk.locked()][:100]:
+                _locks.pop(k, None)
     return {"key": key, "mime": row["mime"], "audio": bytes(row["audio"]), "words": row["words"]}
 
 

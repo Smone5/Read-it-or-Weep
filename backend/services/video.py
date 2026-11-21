@@ -86,7 +86,7 @@ def parse_youtube(url: str | None, title: str | None = None) -> dict[str, Any] |
     watch_url = f"https://www.youtube.com/watch?v={vid}" + (f"&t={start}s" if start else "")
     embed_url = (
         None if external_only
-        else f"https://www.youtube-nocookie.com/embed/{vid}?rel=0&autoplay=1" + (f"&start={start}" if start else "")
+        else f"https://www.youtube-nocookie.com/embed/{vid}?rel=0&autoplay=1&enablejsapi=1" + (f"&start={start}" if start else "")
     )
     return {
         "provider": "youtube",
@@ -142,12 +142,12 @@ async def inspect_youtube(url: str, *, timeout: float = 8.0) -> dict[str, Any]:
     note: str | None = None
 
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             resp = await client.get(
                 "https://www.youtube.com/oembed",
                 params={"url": info["watchUrl"], "format": "json"},
             )
-        if resp.status_code == 200:
+        if resp.status_code == 200 and len(resp.content) <= 65_536:
             meta = resp.json()
             yt_title = (meta.get("title") or "").strip() or None
             author = (meta.get("author_name") or "").strip() or None

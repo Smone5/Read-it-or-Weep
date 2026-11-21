@@ -170,12 +170,15 @@ _cache: dict[str, tuple[float, dict]] = {}
 _TTL = 15.0
 
 
+_NULLABLE_KEYS = frozenset({"report_url", "support_email", "logo_key"})
+
+
 def deep_merge(base: dict, override: dict | None) -> dict:
     result = copy.deepcopy(base)
     for key, value in (override or {}).items():
         if isinstance(value, dict) and isinstance(result.get(key), dict):
             result[key] = deep_merge(result[key], value)
-        elif value is not None or key not in result:
+        elif value is not None or key not in result or key in _NULLABLE_KEYS:
             result[key] = value
     return result
 

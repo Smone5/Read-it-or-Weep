@@ -34,13 +34,16 @@ const APPROVAL_OPTIONS = [
   { value: 'hold', label: 'Hold for my approval' },
 ] as const
 
-/** Links from elsewhere (the Overview tiles) can open the bank already filtered. */
+/** Links from elsewhere (Overview tiles, Report sections) can open the bank already filtered. */
 function filtersFromLink(params: URLSearchParams): Filters {
   const status = params.get('status')
+  const section = params.get('section')
   return {
     ...NO_FILTERS,
     status: status === 'approved' || status === 'pending' || status === 'rejected' ? status : 'all',
+    section: section || 'all',
     flaggedOnly: params.get('flagged') === '1',
+    hasVideoOnly: params.get('video') === '1',
   }
 }
 
@@ -82,9 +85,15 @@ export default function QuestionsTab() {
   const data = useMemo(() => {
     if (!bank.data) return null
     return {
-      questions: bank.data.questions.map((question) =>
-        question.imageId && question.imageUrl ? { ...question, imageUrl: stableUrl(question.imageId, question.imageUrl) } : question,
-      ),
+      questions: bank.data.questions.map((question) => {
+        const nextImage = question.imageId && question.imageUrl ? stableUrl(question.imageId, question.imageUrl) : question.imageUrl
+        const nextReveal =
+          question.revealImageId && question.revealImageUrl
+            ? stableUrl(question.revealImageId, question.revealImageUrl)
+            : question.revealImageUrl
+        if (nextImage === question.imageUrl && nextReveal === question.revealImageUrl) return question
+        return { ...question, imageUrl: nextImage, revealImageUrl: nextReveal }
+      }),
       images: bank.data.images.map((image) => ({ ...image, url: stableUrl(image.id, image.url) })),
     }
   }, [bank.data, stableUrl])
@@ -113,16 +122,18 @@ export default function QuestionsTab() {
     let pending = 0
     let rejected = 0
     let flagged = 0
+    let withVideo = 0
     let unfiled = 0
     for (const question of all) {
       if (question.status === 'approved') approved += 1
       else if (question.status === 'pending') pending += 1
       else rejected += 1
       if (question.flags > 0) flagged += 1
+      if (question.videoUrl) withVideo += 1
       if (question.sectionId) perSection.set(question.sectionId, (perSection.get(question.sectionId) ?? 0) + 1)
       else unfiled += 1
     }
-    return { approved, pending, rejected, flagged, unfiled, perSection }
+    return { approved, pending, rejected, flagged, withVideo, unfiled, perSection }
   }, [all])
 
   // How many questions a game can actually draw on, given the "players are asked" setting.
@@ -388,7 +399,7 @@ export default function QuestionsTab() {
       {watch.stalled && (
         <Note tone="warn" role="status">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <span>Nothing has changed for five minutes, so the writing has probably stopped. You can check again, or start it again with “Write more with AI”.</span>
+            <span>Nothing has changed for ten minutes, so the writing has probably stopped. You can check again, or start it again with “Write more with AI”.</span>
             <button type="button" className="btn btn-ghost btn-sm" onClick={watch.resume}>
               Check again
             </button>
@@ -523,12 +534,20 @@ export default function QuestionsTab() {
                 )}
               </Field>
             </div>
-            <label className="ad-check text-sm">
-              <input type="checkbox" checked={filters.flaggedOnly} onChange={(event) => changeFilters({ flaggedOnly: event.target.checked })} />
-              <span>
-                Flagged by players only <span className="text-muted">({counts.flagged})</span>
-              </span>
-            </label>
+            <div className="flex flex-wrap gap-x-6 gap-y-2">
+              <label className="ad-check text-sm">
+                <input type="checkbox" checked={filters.flaggedOnly} onChange={(event) => changeFilters({ flaggedOnly: event.target.checked })} />
+                <span>
+                  Flagged by players only <span className="text-muted">({counts.flagged})</span>
+                </span>
+              </label>
+              <label className="ad-check text-sm">
+                <input type="checkbox" checked={filters.hasVideoOnly} onChange={(event) => changeFilters({ hasVideoOnly: event.target.checked })} />
+                <span>
+                  Has YouTube clip only <span className="text-muted">({counts.withVideo})</span>
+                </span>
+              </label>
+            </div>
           </section>
 
           <div className="flex flex-wrap items-center justify-between gap-x-4">
@@ -669,10 +688,19 @@ export default function QuestionsTab() {
         </ul>
       </ConfirmDialog>
 
-      <Dialog open={previewing !== null} onClose={() => setPreviewing(null)} title={previewing?.section ?? 'Picture'} wide>
-        {previewing?.imageUrl && (
+      <Dialog
+        open={previewing !== null}
+        onClose={() => setPreviewing(null)}
+        title={previewing ? (previewing.imageUrl ? (previewing.section ?? 'Question picture') : `Answer reveal visual · ${previewing.section ?? 'Report'}`) : 'Picture'}
+        wide
+      >
+        {(previewing?.imageUrl || previewing?.revealImageUrl) && (
           <>
-            <img src={previewing.imageUrl} alt={`The picture shown with the question: ${previewing.text}`} className="mx-auto max-h-[70dvh] w-auto max-w-full rounded-lg" />
+            <img
+              src={previewing.imageUrl ?? previewing.revealImageUrl ?? ''}
+              alt={previewing.imageUrl ? `The picture shown with the question: ${previewing.text}` : `The exhibit shown after answering: ${previewing.text}`}
+              className="mx-auto max-h-[70dvh] w-auto max-w-full rounded-lg"
+            />
             <p className="mt-3 text-sm font-semibold">{previewing.text}</p>
           </>
         )}

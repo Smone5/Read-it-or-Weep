@@ -600,19 +600,23 @@ export function Hud({ state, clockMs, position }: { state: RunState; clockMs?: n
 
 // --------------------------------------------------------------------------- readiness + leaderboard
 
-export function ReadinessMap({ readiness, compact }: { readiness: Readiness; compact?: boolean }) {
+export function ReadinessMap({ readiness, compact, listOnly }: { readiness: Readiness; compact?: boolean; listOnly?: boolean }) {
   if (!readiness.total) return null
   return (
     <div>
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <p className="pixel text-[10px] text-muted">Readiness</p>
-        <p className="pixel text-[10px]" style={{ color: readiness.ready ? 'var(--good)' : 'var(--accent-text)' }}>
-          {readiness.cleared}/{readiness.total} sections {readiness.ready ? '· ready!' : ''}
-        </p>
-      </div>
-      <Meter value={readiness.cleared} max={readiness.total} tone={readiness.ready ? 'var(--good)' : 'var(--accent)'} />
+      {!listOnly && (
+        <>
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <p className="pixel text-[10px] text-muted">Readiness</p>
+            <p className="pixel text-[10px]" style={{ color: readiness.ready ? 'var(--good)' : 'var(--accent-text)' }}>
+              {readiness.cleared}/{readiness.total} sections {readiness.ready ? '· ready!' : ''}
+            </p>
+          </div>
+          <Meter value={readiness.cleared} max={readiness.total} tone={readiness.ready ? 'var(--good)' : 'var(--accent)'} />
+        </>
+      )}
       {!compact && (
-        <ul className="mt-3 grid gap-1.5 sm:grid-cols-2">
+        <ul className={`${listOnly ? '' : 'mt-3'} grid gap-1.5 sm:grid-cols-2`}>
           {readiness.sections.map((section) => (
             <li key={section.id} className="flex items-center gap-2 text-[15px]">
               <span
@@ -642,9 +646,9 @@ export function formatScore(value: number): string {
 }
 
 function rankTone(rank: number): { color: string; border: string } {
-  if (rank === 1) return { color: '#ffd60a', border: 'color-mix(in oklab, #ffd60a 60%, transparent)' }
-  if (rank === 2) return { color: '#e2e8f0', border: 'color-mix(in oklab, #cbd5e1 50%, transparent)' }
-  if (rank === 3) return { color: '#f59e0b', border: 'color-mix(in oklab, #f59e0b 55%, transparent)' }
+  if (rank === 1) return { color: 'var(--rank-1)', border: 'color-mix(in oklab, var(--rank-1) 60%, transparent)' }
+  if (rank === 2) return { color: 'var(--rank-2)', border: 'color-mix(in oklab, var(--rank-2) 55%, transparent)' }
+  if (rank === 3) return { color: 'var(--rank-3)', border: 'color-mix(in oklab, var(--rank-3) 55%, transparent)' }
   return { color: 'var(--muted)', border: 'color-mix(in oklab, var(--ink) 16%, transparent)' }
 }
 
@@ -684,7 +688,7 @@ function ScoreRow({
       </div>
       <span
         className="sb-score"
-        style={{ color: entry.you ? 'var(--accent)' : entry.rank === 1 ? '#ffd60a' : 'var(--ink)' }}
+        style={{ color: entry.you ? 'var(--accent-text)' : entry.rank === 1 ? 'var(--rank-1)' : 'var(--ink)' }}
       >
         {formatScore(entry.score)}
       </span>
@@ -740,8 +744,8 @@ export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loa
               className="pixel grid h-11 min-w-[48px] place-items-center rounded-[4px] border-2 px-2 text-sm tabular-nums"
               style={{
                 borderColor: 'var(--accent)',
-                background: 'rgb(0 0 0 / 0.5)',
-                color: board.you.rank === 1 ? '#ffd60a' : 'var(--accent)',
+                background: 'var(--pill-bg)',
+                color: board.you.rank === 1 ? 'var(--rank-1)' : 'var(--accent-text)',
               }}
             >
               #{board.you.rank}
@@ -752,12 +756,12 @@ export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loa
               </p>
               <p className="mt-0.5 text-sm text-ink">
                 {board.you.rank === 1 ? (
-                  <span className="inline-flex items-center gap-1.5" style={{ color: '#ffd60a' }}>
+                  <span className="inline-flex items-center gap-1.5 font-semibold" style={{ color: 'var(--rank-1)' }}>
                     <IconCrown size={13} /> Leading the board!
                   </span>
                 ) : board.you.gapToNext !== undefined ? (
                   <>
-                    <b style={{ color: 'var(--accent)' }}>{formatScore(board.you.gapToNext)}</b> pts behind{' '}
+                    <b style={{ color: 'var(--accent-text)' }}>{formatScore(board.you.gapToNext)}</b> pts behind{' '}
                     {board.you.aheadName ?? `#${board.you.rank - 1}`} (#{board.you.rank - 1})
                   </>
                 ) : (
@@ -769,7 +773,7 @@ export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loa
           <div className="flex items-center gap-2.5">
             <div className="text-right">
               <p className="pixel text-[9px] text-muted">Best</p>
-              <p className="sb-score !text-xl" style={{ color: 'var(--accent)' }}>
+              <p className="sb-score !text-xl" style={{ color: 'var(--accent-text)' }}>
                 {formatScore(board.you.score)}
               </p>
             </div>
@@ -781,14 +785,14 @@ export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loa
           </div>
         </div>
       ) : (
-        <p className="rounded-[4px] border border-line bg-black/25 px-3 py-2 text-sm text-muted">
+        <p className="rounded-[4px] border border-line bg-surface-2 px-3 py-2 text-sm text-muted">
           Finish a {board.modeName} game to put your score on this board.
         </p>
       )}
 
       {/* Player's own recent completed games in this mode (shows ALL of your recent scores, not just 1). */}
       {board.yourRuns && board.yourRuns.length > 0 && (
-        <div className="rounded-[4px] border border-line bg-black/25 px-3 py-2.5">
+        <div className="rounded-[4px] border border-line bg-surface-2 px-3 py-2.5">
           <div className="flex items-center justify-between gap-2">
             <p className="pixel text-[9px] text-muted">Your scores ({board.yourRuns.length})</p>
             {board.yourRuns.length > 4 && (
@@ -808,8 +812,8 @@ export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loa
                 className="inline-flex items-center gap-1.5 rounded-[3px] border px-2.5 py-1 text-sm tabular-nums"
                 style={{
                   borderColor: run.isBest ? 'var(--accent)' : 'var(--line)',
-                  background: run.isBest ? 'color-mix(in oklab, var(--accent) 16%, transparent)' : 'rgb(0 0 0 / 0.35)',
-                  color: run.isBest ? 'var(--accent)' : 'var(--ink)',
+                  background: run.isBest ? 'color-mix(in oklab, var(--accent) 16%, transparent)' : 'var(--pill-bg)',
+                  color: run.isBest ? 'var(--accent-text)' : 'var(--ink)',
                 }}
                 title={run.answered ? `${run.correct}/${run.answered} correct · Best streak x${run.streakMax}` : undefined}
               >
@@ -911,7 +915,7 @@ export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loa
                   <span className="min-w-0 flex-1 truncate font-bold">
                     {team.team} <span className="font-normal text-sm text-muted">({team.players})</span>
                   </span>
-                  <span className="sb-score" style={{ color: index === 0 ? '#ffd60a' : 'var(--ink)' }}>
+                  <span className="sb-score" style={{ color: index === 0 ? 'var(--rank-1)' : 'var(--ink)' }}>
                     {formatScore(team.average)}
                   </span>
                 </li>

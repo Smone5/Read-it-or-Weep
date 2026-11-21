@@ -31,9 +31,18 @@ export type Filters = {
   section: string
   search: string
   flaggedOnly: boolean
+  hasVideoOnly: boolean
 }
 
-export const NO_FILTERS: Filters = { status: 'all', author: 'all', type: 'all', section: 'all', search: '', flaggedOnly: false }
+export const NO_FILTERS: Filters = {
+  status: 'all',
+  author: 'all',
+  type: 'all',
+  section: 'all',
+  search: '',
+  flaggedOnly: false,
+  hasVideoOnly: false,
+}
 
 export const isFiltered = (filters: Filters) =>
   filters.status !== 'all' ||
@@ -41,7 +50,8 @@ export const isFiltered = (filters: Filters) =>
   filters.type !== 'all' ||
   filters.section !== 'all' ||
   filters.search.trim() !== '' ||
-  filters.flaggedOnly
+  filters.flaggedOnly ||
+  filters.hasVideoOnly
 
 export function matches(question: Question, filters: Filters): boolean {
   if (filters.status !== 'all' && question.status !== filters.status) return false
@@ -51,9 +61,10 @@ export function matches(question: Question, filters: Filters): boolean {
   if (filters.section === 'none' && question.sectionId !== null) return false
   if (filters.section !== 'all' && filters.section !== 'none' && question.sectionId !== filters.section) return false
   if (filters.flaggedOnly && question.flags === 0) return false
+  if (filters.hasVideoOnly && !question.videoUrl) return false
   const needle = filters.search.trim().toLowerCase()
   if (needle) {
-    const haystack = [question.title, question.text, ...(question.options ?? []), question.explanation, question.section]
+    const haystack = [question.title, question.text, ...(question.options ?? []), question.explanation, question.section, question.videoTitle]
       .filter(Boolean)
       .join(' ')
       .toLowerCase()

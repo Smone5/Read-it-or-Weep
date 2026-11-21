@@ -17,7 +17,7 @@ import db
 import llm
 from ingest import UnreadableDocument, generate, parse_document
 from ingest.model import StructuredDocument
-from services import settings_store, video
+from services import bank, settings_store, video
 from storage import storage
 
 log = logging.getLogger("pipeline")
@@ -109,39 +109,86 @@ async def _insert_questions(document: dict, report: generate.GenerationReport, s
     return len(rows)
 
 
-async def _attach_section_videos(structured: StructuredDocument, section_ids: list[str]) -> int:
-    """Attach YouTube links found inside uploaded document sections to up to 2 MCQ questions per clip."""
+MAX_AUTO_VIDEOS = 10
+
+
+async def _attach_section_videos(
+    structured: StructuredDocument,
+    section_ids: list[str],
+    *,
+    confidential: bool = False,
+) -> tuple[int, list[str]]:
+    """Attach YouTube links found inside uploaded document sections via semantic matching to text MCQs."""
+    warnings: list[str] = []
+    if confidential:
+        warnings.append("Skipped automatic YouTube link lookup because confidential voice/privacy mode is enabled.")
+        return 0, warnings
+
     attached = 0
+    inspected = 0
     for section, section_id in zip(structured.sections, section_ids):
-        if not section.video_urls:
+        if not section.video_urls or inspected >= MAX_AUTO_VIDEOS:
             continue
         mcqs = await db.fetch(
-            "select id from questions where section_id = $1 and kind = 'mcq' and video_url is null"
-            " order by pinned desc, created_at asc",
+            "select id, question_text, options, correct_index from questions"
+            " where section_id = $1 and kind = 'mcq' and video_url is null"
+            " order by (image_id is not null) asc, pinned desc, created_at asc",
             section_id,
         )
         if not mcqs:
             continue
-        idx = 0
-        for raw_url in section.video_urls[:2]:
-            if idx >= len(mcqs):
+        clips: list[dict] = []
+        for raw_url in section.video_urls[:3]:
+            if inspected >= MAX_AUTO_VIDEOS:
+                warnings.append(f"Reached the per-document limit ({MAX_AUTO_VIDEOS}) for automatic YouTube lookups.")
                 break
+            inspected += 1
             try:
                 info = await video.inspect_youtube(raw_url, timeout=6.0)
-                stored_url = info["normalizedUrl"]
-                title = info["title"] or section.heading[:100]
+                clips.append({
+                    "url": info["normalizedUrl"],
+                    "title": (info["title"] or section.heading)[:120],
+                })
             except Exception as exc:
                 log.warning("skipping unverified YouTube URL %s: %s", raw_url, exc)
-                continue
-            targets = mcqs[idx:idx + 2]
-            idx += len(targets)
-            for row in targets:
-                await db.execute(
-                    "update questions set video_url = $2, video_title = $3 where id = $1",
-                    row["id"], stored_url, title[:120],
-                )
-                attached += 1
-    return attached
+                warnings.append(f"Skipped unreachable YouTube link in \"{section.heading}\": {raw_url}")
+        if not clips:
+            continue
+        pairings = await generate.match_section_videos(mcqs, clips)
+        for qid, clip in pairings.items():
+            await db.execute(
+                "update questions set video_url = $2, video_title = $3 where id = $1",
+                qid, clip["url"], clip["title"],
+            )
+            attached += 1
+    return attached, warnings
+
+
+async def _match_document_reveal_images(document_id: str) -> int:
+    """Pair unlinked text MCQs with informative visuals that directly illustrate their answers."""
+    usable_imgs = await db.fetch(
+        "select id, caption, description from doc_images"
+        " where document_id = $1 and usable is not false order by ordinal",
+        document_id,
+    )
+    if not usable_imgs:
+        return 0
+    text_mcqs = await db.fetch(
+        "select q.id, q.question_text, q.options, q.correct_index, q.explanation, q.source_quote, s.heading"
+        " from questions q left join doc_sections s on s.id = q.section_id"
+        " where q.document_id = $1 and q.kind = 'mcq' and q.image_id is null and q.reveal_image_id is null"
+        " order by q.created_at",
+        document_id,
+    )
+    if not text_mcqs:
+        return 0
+    matches = await generate.match_reveal_images(text_mcqs, usable_imgs)
+    if matches:
+        await db.executemany(
+            "update questions set reveal_image_id = $2 where id = $1",
+            list(matches.items()),
+        )
+    return len(matches)
 
 
 async def process_document(document_id: str) -> None:
@@ -152,6 +199,9 @@ async def process_document(document_id: str) -> None:
     rules = await settings_store.quiz_rules(quiz)
     auto_approve = bool(rules["auto_approve"])   # the quiz's setting, else the company's
     purge_source = bool(rules.get("purge_source_after_process"))
+    confidential = bool(rules.get("confidential_voice"))
+    storage_key = document["storage_key"]
+    purge_warning: str | None = None
 
     async def progress(label: str, done: int, total: int) -> None:
         await _set(document_id, progress={"label": label, "done": done, "total": total})
@@ -159,7 +209,7 @@ async def process_document(document_id: str) -> None:
     try:
         await _set(document_id, status="processing", stage="reading", error=None,
                    progress={"label": "Reading the document", "done": 0, "total": 1})
-        data = await storage().get(document["storage_key"])
+        data = await storage().get(storage_key)
         structured = await asyncio.to_thread(parse_document, data, document["filename"])
 
         untitled = [i for i, s in enumerate(structured.sections) if re.fullmatch(r"Part \d+ of \d+", s.heading)]
@@ -192,28 +242,19 @@ async def process_document(document_id: str) -> None:
                              image_ids[ordinal], kind, description, usable)
         inserted = await _insert_questions(document, report, section_ids, chunk_ids, image_ids,
                                            "approved" if auto_approve else "pending")
+
+        warnings = list(structured.warnings)
         if inserted and any(s.video_urls for s in structured.sections):
-            videos_attached = await _attach_section_videos(structured, section_ids)
+            videos_attached, video_warnings = await _attach_section_videos(
+                structured, section_ids, confidential=confidential,
+            )
+            warnings.extend(video_warnings)
             if videos_attached:
                 log.info("auto-attached %d YouTube clip(s) extracted from %s", videos_attached, document["filename"])
         if inserted and image_ids:
-            usable_imgs = await db.fetch(
-                "select id, caption, description from doc_images where document_id = $1 and usable is not false order by ordinal",
-                document_id,
-            )
-            text_mcqs = await db.fetch(
-                "select id, question_text, options, correct_index from questions"
-                " where document_id = $1 and kind = 'mcq' and image_id is null order by created_at",
-                document_id,
-            )
-            if usable_imgs and text_mcqs:
-                matches = await generate.match_reveal_images(text_mcqs, usable_imgs)
-                if matches:
-                    await db.executemany(
-                        "update questions set reveal_image_id = $2 where id = $1",
-                        list(matches.items()),
-                    )
-                    log.info("AI-matched %d reveal visual(s) for %s", len(matches), document["filename"])
+            matched_reveals = await _match_document_reveal_images(document_id)
+            if matched_reveals:
+                log.info("AI-matched %d reveal visual(s) for %s", matched_reveals, document["filename"])
 
         summary_text = None
         try:
@@ -224,17 +265,17 @@ async def process_document(document_id: str) -> None:
         except Exception as exc:
             log.warning("could not summarise: %s", exc)
 
-        warnings = list(structured.warnings)
         if not inserted:
             warnings.append("No questions passed the quality checks. Add questions by hand or try a fuller document.")
-        storage_key = document["storage_key"]
         if purge_source and storage_key:
             try:
                 await storage().delete_prefix(storage_key)
                 storage_key = ""
                 warnings.append("Source file was purged after processing (confidential retention mode).")
             except Exception as exc:
-                log.warning("could not purge source file %s: %s", storage_key, exc)
+                log.exception("could not purge source file %s", storage_key)
+                purge_warning = "WARNING: Automatic source file purge failed — please delete or re-check storage."
+                warnings.append(purge_warning)
         await _set(
             document_id, status="ready", stage=None, title=structured.title, summary=summary_text,
             storage_key=storage_key,
@@ -243,16 +284,27 @@ async def process_document(document_id: str) -> None:
             warnings=warnings, processed_at=datetime.now(timezone.utc),
             progress={"label": "Ready", "done": 1, "total": 1, "drafted": report.drafted, "kept": inserted,
                       "rejected": report.rejected})
+        bank.invalidate(document["quiz_id"])
         log.info("document %s ready: %s questions kept of %s drafted", document_id, inserted, report.drafted)
     except UnreadableDocument as exc:
         await _set(document_id, status="failed", stage=None, error=str(exc))
-    except llm.AIUnavailable as exc:
+    except llm.AIUnavailable:
+        log.exception("AI unavailable while processing %s", document_id)
         await _set(document_id, status="failed", stage=None,
-                   error=f"The AI service could not be reached, so no questions were written. ({exc})")
-    except Exception as exc:  # noqa: BLE001 – report anything unexpected to the admin instead of hanging
+                   error="The AI service could not be reached right now, so no questions were written. Try again shortly.")
+    except Exception:  # noqa: BLE001 – report a sanitized error to the admin instead of hanging or leaking internals
         log.exception("processing failed for %s", document_id)
         await _set(document_id, status="failed", stage=None,
-                   error=f"Something went wrong while processing this document ({type(exc).__name__}: {exc}).")
+                   error="Something went wrong while processing this document. Check server logs or try Process again.")
+    finally:
+        # Even if parsing/AI failed, confidential purge mode must never leave raw source files behind.
+        if purge_source and storage_key:
+            try:
+                await storage().delete_prefix(storage_key)
+                await _set(document_id, storage_key="")
+            except Exception:
+                log.exception("could not purge source file %s during cleanup", storage_key)
+        bank.invalidate(document["quiz_id"])
 
 
 def start_more_questions(document_id: str) -> None:
@@ -273,7 +325,9 @@ async def more_questions(document_id: str) -> None:
     sections = await db.fetch("select * from doc_sections where document_id = $1 order by ordinal", document_id)
     chunks = await db.fetch("select * from doc_chunks where document_id = $1 order by ordinal", document_id)
     if not chunks:
+        await _set(document_id, stage=None)
         return
+    prior_progress = dict(document.get("progress") or {})
     section_index = {s["id"]: i for i, s in enumerate(sections)}
     structured = StructuredDocument(
         title=document["title"] or document["filename"],
@@ -290,24 +344,29 @@ async def more_questions(document_id: str) -> None:
         if row["chunk_id"] in chunk_position:
             avoid.setdefault(chunk_position[row["chunk_id"]], []).append(row["question_text"])
     try:
-        await _set(document_id, stage="writing", progress={"label": "Writing more questions", "done": 0, "total": len(chunks)})
+        await _set(document_id, stage="writing", progress={**prior_progress, "label": "Writing more questions", "done": 0, "total": len(chunks)})
         if any(c["embedding"] is None for c in chunks):
             embeddings = await llm.embed([c["chunk_text"] for c in chunks])
         else:
             embeddings = np.asarray([c["embedding"] for c in chunks], dtype=np.float32)
 
         async def progress(label: str, done: int, total: int) -> None:
-            await _set(document_id, progress={"label": "Writing more questions", "done": done, "total": total})
+            await _set(document_id, progress={**prior_progress, "label": "Writing more questions", "done": done, "total": total})
 
         report = await generate.generate_bank(
             structured, embeddings, progress=progress, avoid_by_chunk=avoid, include_images=False,
             existing_embeddings=await _existing_question_vectors(document["quiz_id"]))
         inserted = await _insert_questions(document, report, [s["id"] for s in sections], [c["id"] for c in chunks], [],
                                            "approved" if auto_approve else "pending")
+        if inserted:
+            await _match_document_reveal_images(document_id)
         total = await db.fetchval("select count(*) from questions where document_id = $1", document_id)
         await _set(document_id, stage=None, question_count=total,
-                   progress={"label": "Ready", "done": 1, "total": 1, "added": inserted, "rejected": report.rejected})
-    except Exception as exc:  # noqa: BLE001
+                   progress={**prior_progress, "label": "Ready", "done": 1, "total": 1,
+                             "added": inserted, "rejected": report.rejected})
+    except Exception:  # noqa: BLE001
         log.exception("writing more questions failed for %s", document_id)
-        await _set(document_id, stage=None, progress={"label": f"Could not write more questions ({type(exc).__name__})",
-                                                       "done": 1, "total": 1})
+        await _set(document_id, stage=None,
+                   progress={**prior_progress, "label": "Could not write more questions right now", "done": 1, "total": 1})
+    finally:
+        bank.invalidate(document["quiz_id"])

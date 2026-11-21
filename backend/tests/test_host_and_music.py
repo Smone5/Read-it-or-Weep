@@ -110,7 +110,8 @@ def test_contextual_music_cues_match_moods_sections_and_favorites():
     assert cues["tension"]["title"] == "The Final Countdown"
     assert cues["victory"]["title"] == "Your Fav"           # prefers player's favorite artist for victory
     assert cues["bySection"]["sec-fin"]["title"] == "Money for Nothing"
-    assert "Matched to:" in cues["bySection"]["sec-fin"]["because"]
+    assert "Matched to:" in cues["bySection"]["sec-fin"]["cueReason"]
+    assert "because" not in cues["bySection"]["sec-fin"]
     assert cues["bySection"]["sec-fleet"]["title"] == "On the Road Again"
 
 
@@ -294,12 +295,26 @@ def fake_client(result):
 @pytest.mark.parametrize("status, dead", [(200, False), (206, False), (404, True), (410, True), (403, True), (500, False)])
 async def test_a_clip_is_only_retired_when_the_music_host_says_it_is_gone(monkeypatch, status, dead):
     monkeypatch.setattr(music_service.httpx, "AsyncClient", fake_client(status))
-    assert await music_service.preview_is_dead("https://clips.example/1.m4a") is dead
+    assert await music_service.preview_is_dead("https://audio-ssl.itunes.apple.com/itunes-assets/1.m4a") is dead
 
 
 async def test_a_clip_keeps_the_benefit_of_the_doubt_when_we_cannot_tell(monkeypatch):
     monkeypatch.setattr(music_service.httpx, "AsyncClient", fake_client(music_service.httpx.ConnectError("offline")))
+    assert await music_service.preview_is_dead("https://audio-ssl.itunes.apple.com/itunes-assets/1.m4a") is False
+
+
+async def test_preview_probe_refuses_non_apple_hosts(monkeypatch):
+    called = False
+
+    class GuardClient:
+        def __init__(self, *args, **kwargs):
+            nonlocal called
+            called = True
+
+    monkeypatch.setattr(music_service.httpx, "AsyncClient", GuardClient)
     assert await music_service.preview_is_dead("https://clips.example/1.m4a") is False
+    assert await music_service.preview_is_dead("http://169.254.169.254/latest/meta-data/") is False
+    assert called is False
 
 
 # --- live games: how long the phones stay locked while the host reads ------------------------------------

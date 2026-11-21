@@ -47,11 +47,18 @@ export default function QuizList() {
       if (!needle) return true
       return q.title.toLowerCase().includes(needle) || q.slug.toLowerCase().includes(needle)
     })
+    const now = Date.now()
+    const bucket = (q: QuizListItem) => {
+      if (!q.meetingAt) return 1
+      return new Date(q.meetingAt).getTime() >= now ? 0 : 2
+    }
     return [...filtered].sort((a, b) => {
       if (sortBy === 'meeting') {
-        const am = a.meetingAt ? new Date(a.meetingAt).getTime() : Number.MAX_SAFE_INTEGER
-        const bm = b.meetingAt ? new Date(b.meetingAt).getTime() : Number.MAX_SAFE_INTEGER
-        if (am !== bm) return am - bm
+        const ab = bucket(a)
+        const bb = bucket(b)
+        if (ab !== bb) return ab - bb
+        if (ab === 0) return new Date(a.meetingAt!).getTime() - new Date(b.meetingAt!).getTime() // upcoming: soonest first
+        if (ab === 2) return new Date(b.meetingAt!).getTime() - new Date(a.meetingAt!).getTime() // past: most recent first
       }
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     })

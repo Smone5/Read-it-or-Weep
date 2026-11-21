@@ -136,6 +136,10 @@ export class HostVoice {
   private talking = false
   private replyId = 0
   private waking = false
+  private onVisibility = () => {
+    // Switching to another tab (e.g. an external YouTube clip) should immediately hush the host.
+    if (document.hidden && this.busy) this.skip()
+  }
   canTalk = false
 
   constructor(target: Target, listener: HostListener) {
@@ -145,6 +149,8 @@ export class HostVoice {
 
   connect() {
     if (this.closed) return
+    document.removeEventListener('visibilitychange', this.onVisibility)
+    document.addEventListener('visibilitychange', this.onVisibility)
     this.ready = false
     this.listener.onStatus?.('connecting')
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -228,10 +234,9 @@ export class HostVoice {
     trace('host.hold', at ? { inMs: Math.round(at - Date.now()) } : { released: true })
   }
 
-  /** The game stopped waiting for a line that had not begun. Counts against the connection's health. */
+  /** The game stopped waiting for a slow line. Skip just this turn without killing the connection or wiping history. */
   tooLate() {
     this.skip()
-    this.missed()
   }
 
   private missed() {
@@ -323,6 +328,7 @@ export class HostVoice {
 
   close() {
     this.closed = true
+    document.removeEventListener('visibilitychange', this.onVisibility)
     window.clearTimeout(this.reconnectTimer)
     this.talking = false
     void this.mic?.stop()

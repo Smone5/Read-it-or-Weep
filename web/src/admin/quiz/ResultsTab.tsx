@@ -183,17 +183,32 @@ function compare(a: Participant, b: Participant, key: SortKey): number {
   return String(left).localeCompare(String(right), undefined, { sensitivity: 'base' })
 }
 
+const PARTICIPANTS_PAGE = 50
+
 function ParticipantsPanel({ people, threshold }: { people: Participant[]; threshold: number }) {
   const [who, setWho] = useState<(typeof WHO)[number]['value']>('all')
+  const [search, setSearch] = useState('')
+  const [shown, setShown] = useState(PARTICIPANTS_PAGE)
   const [sort, setSort] = useState<Sort | null>(null) // null keeps the server's order: most sections cleared first
 
   const rows = useMemo(() => {
-    const shown = people.filter((person) => who === 'all' || (who === 'ready') === person.ready)
-    if (!sort) return shown
-    const sorted = [...shown].sort((a, b) => compare(a, b, sort.key))
+    const needle = search.trim().toLowerCase()
+    const filtered = people.filter((person) => {
+      if (who !== 'all' && (who === 'ready') !== person.ready) return false
+      if (!needle) return true
+      return (
+        person.name.toLowerCase().includes(needle) ||
+        person.email.toLowerCase().includes(needle) ||
+        (person.team ?? '').toLowerCase().includes(needle)
+      )
+    })
+    if (!sort) return filtered
+    const sorted = [...filtered].sort((a, b) => compare(a, b, sort.key))
     // Missing values stay at the bottom whichever way the column is sorted.
     return sort.descending ? sorted.reverse().sort((a, b) => Number(a[sort.key] === null) - Number(b[sort.key] === null)) : sorted
-  }, [people, who, sort])
+  }, [people, who, search, sort])
+
+  const visibleRows = rows.slice(0, shown)
 
   const toggleSort = (key: SortKey, numeric: boolean) =>
     setSort((current) => (current?.key === key ? { key, descending: !current.descending } : { key, descending: numeric || key === 'readiness' || key === 'lastPlayedAt' }))
@@ -208,60 +223,97 @@ function ParticipantsPanel({ people, threshold }: { people: Participant[]; thres
           ? 'Everyone who has played is ready.'
           : `${plural(notReady, 'person', 'people')} still ${notReady === 1 ? 'needs' : 'need'} to clear ${threshold}% of the sections to count as ready.`
       }
-      actions={<Segmented label="Show" options={WHO} value={who} onChange={setWho} />}
+      actions={
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="search"
+            className="field w-48 sm:w-56"
+            placeholder="Search name, email, team…"
+            aria-label="Search participants"
+            value={search}
+            onChange={(event) => {
+              setSearch(event.target.value)
+              setShown(PARTICIPANTS_PAGE)
+            }}
+          />
+          <Segmented
+            label="Show"
+            options={WHO}
+            value={who}
+            onChange={(next) => {
+              setWho(next)
+              setShown(PARTICIPANTS_PAGE)
+            }}
+          />
+        </div>
+      }
     >
       {rows.length === 0 ? (
-        <p className="py-6 text-center text-sm text-muted">{who === 'ready' ? 'Nobody is ready yet.' : 'Everyone is ready.'}</p>
+        <p className="py-6 text-center text-sm text-muted">
+          {search.trim() ? 'No participants match that search.' : who === 'ready' ? 'Nobody is ready yet.' : 'Everyone is ready.'}
+        </p>
       ) : (
-        <div className="ad-table-wrap">
-          <table className="ad-table" style={{ minWidth: 980 }}>
-            <thead>
-              <tr>
-                {COLUMNS.map((column) => (
-                  <th
-                    key={column.key}
-                    scope="col"
-                    className={column.numeric ? 'num' : undefined}
-                    aria-sort={sort?.key === column.key ? (sort.descending ? 'descending' : 'ascending') : undefined}
-                  >
-                    <button type="button" className="ad-sort" onClick={() => toggleSort(column.key, Boolean(column.numeric))} title={column.title ?? `Sort by ${column.label.toLowerCase()}`}>
-                      {column.label}
-                      <span aria-hidden>{sort?.key === column.key ? (sort.descending ? '▼' : '▲') : '↕'}</span>
-                    </button>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((person) => (
-                <tr key={person.id}>
-                  <th scope="row">
-                    <div className="font-semibold">{person.name}</div>
-                    <div className="font-normal text-muted [overflow-wrap:anywhere]">{person.email}</div>
-                  </th>
-                  <td>{person.team ?? <span className="text-muted">—</span>}</td>
-                  <td>
-                    <div className="flex items-center gap-2">
-                      <div className="w-20 flex-none">
-                        <Bar value={person.readiness} label={`Readiness of ${person.name}`} tone={person.ready ? 'var(--good)' : undefined} />
-                      </div>
-                      <span className="w-10 tabular-nums">{person.readiness}%</span>
-                      {person.ready && <Badge tone="good">Ready</Badge>}
-                    </div>
-                  </td>
-                  <td className="num">
-                    {person.sectionsCleared} of {person.sectionsTotal}
-                  </td>
-                  <td className="num">{person.answered ? `${person.accuracy}%` : '—'}</td>
-                  <td className="num">{person.games}</td>
-                  <td className="num">{person.bestScore === null ? '—' : person.bestScore.toLocaleString()}</td>
-                  <td className="num">{person.peeksUsed}</td>
-                  <td className="whitespace-nowrap">{timeAgo(person.lastPlayedAt)}</td>
+        <>
+          <div className="ad-table-wrap">
+            <table className="ad-table" style={{ minWidth: 980 }}>
+              <thead>
+                <tr>
+                  {COLUMNS.map((column) => (
+                    <th
+                      key={column.key}
+                      scope="col"
+                      className={column.numeric ? 'num' : undefined}
+                      aria-sort={sort?.key === column.key ? (sort.descending ? 'descending' : 'ascending') : undefined}
+                    >
+                      <button type="button" className="ad-sort" onClick={() => toggleSort(column.key, Boolean(column.numeric))} title={column.title ?? `Sort by ${column.label.toLowerCase()}`}>
+                        {column.label}
+                        <span aria-hidden>{sort?.key === column.key ? (sort.descending ? '▼' : '▲') : '↕'}</span>
+                      </button>
+                    </th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {visibleRows.map((person) => (
+                  <tr key={person.id}>
+                    <th scope="row">
+                      <div className="font-semibold">{person.name}</div>
+                      <div className="font-normal text-muted [overflow-wrap:anywhere]">{person.email}</div>
+                    </th>
+                    <td>{person.team ?? <span className="text-muted">—</span>}</td>
+                    <td>
+                      <div className="flex items-center gap-2">
+                        <div className="w-20 flex-none">
+                          <Bar value={person.readiness} label={`Readiness of ${person.name}`} tone={person.ready ? 'var(--good)' : undefined} />
+                        </div>
+                        <span className="w-10 tabular-nums">{person.readiness}%</span>
+                        {person.ready && <Badge tone="good">Ready</Badge>}
+                      </div>
+                    </td>
+                    <td className="num">
+                      {person.sectionsCleared} of {person.sectionsTotal}
+                    </td>
+                    <td className="num">{person.answered ? `${person.accuracy}%` : '—'}</td>
+                    <td className="num">{person.games}</td>
+                    <td className="num">{person.bestScore === null ? '—' : person.bestScore.toLocaleString()}</td>
+                    <td className="num">{person.peeksUsed}</td>
+                    <td className="whitespace-nowrap">{timeAgo(person.lastPlayedAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {rows.length > shown && (
+            <div className="mt-3 flex items-center justify-between gap-2 text-xs text-muted">
+              <span>
+                Showing {visibleRows.length} of {rows.length} participants
+              </span>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShown((n) => n + PARTICIPANTS_PAGE)}>
+                Show {Math.min(PARTICIPANTS_PAGE, rows.length - shown)} more
+              </button>
+            </div>
+          )}
+        </>
       )}
     </Panel>
   )
@@ -322,7 +374,15 @@ function InsightsPanel({ insights, quizId }: { insights: Results['insights']; qu
               <ol className="mt-2 grid gap-2">
                 {insights.hardestQuestions.map((question) => (
                   <li key={question.id} className="rounded-lg border border-line p-2.5 text-sm">
-                    <p className="font-semibold [overflow-wrap:anywhere]">{question.question_text}</p>
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="min-w-0 flex-1 font-semibold [overflow-wrap:anywhere]">{question.question_text}</p>
+                      <Link
+                        className="ad-link flex-none text-xs font-semibold"
+                        to={`${paths.quiz(quizId, 'questions')}?edit=${encodeURIComponent(question.id)}`}
+                      >
+                        Edit
+                      </Link>
+                    </div>
                     <p className="mt-0.5 text-muted">
                       <span style={{ color: accuracyTone(question.accuracy).text, fontWeight: 600 }}>{question.accuracy}% correct</span>
                       {' · '}asked {plural(question.times_served, 'time')}

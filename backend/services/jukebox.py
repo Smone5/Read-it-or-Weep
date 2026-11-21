@@ -81,20 +81,29 @@ async def jargon_title(track: dict) -> str | None:
     return jargon
 
 
-async def prepare(tracks: list[dict], count: int = 6) -> None:
-    """Write some jargon titles ahead of time (at the start of a game), so round two never waits for one."""
+async def prepare(tracks: list[dict], count: int = 12, avoid: set | None = None) -> None:
+    """Write jargon titles ahead of time so round two stays fresh across replays without waiting."""
+    if not tracks:
+        return
     have = {r["track_id"] for r in await db.fetch("select track_id from music_jargon where track_id = any($1::uuid[])",
                                                   [t["id"] for t in tracks])}
-    missing = [t for t in tracks if t["id"] not in have]
+    skip = avoid or set()
+    unseen_ready = sum(1 for t in tracks if t["id"] in have and t["id"] not in skip)
+    needed = max(count - len(have), 4 - unseen_ready)
+    if needed <= 0:
+        return
+    missing = [t for t in tracks if t["id"] not in have and t["id"] not in skip]
+    if not missing:
+        missing = [t for t in tracks if t["id"] not in have]
     random.shuffle(missing)
-    for track in missing[:max(0, count - len(have))]:
+    for track in missing[:min(needed, 6)]:
         await jargon_title(track)
 
 
-def prepare_soon(tracks: list[dict]) -> None:
+def prepare_soon(tracks: list[dict], avoid: set | None = None) -> None:
     async def run() -> None:
         try:
-            await prepare(tracks)
+            await prepare(tracks, avoid=avoid)
         except Exception as exc:  # noqa: BLE001
             log.warning("jargon titles not prepared: %s", exc)
 
@@ -110,10 +119,12 @@ def _other_titles(tracks: list[dict], track: dict, n: int = 3) -> list[str] | No
 async def jargon_item(tracks: list[dict], avoid: set) -> dict | None:
     """A Jargon Jukebox question: the corporate title, and four real ones to choose from."""
     fresh = [t for t in tracks if t["id"] not in avoid]
+    if not fresh:
+        fresh = list(tracks)
     random.shuffle(fresh)
     ready = {r["track_id"]: r["jargon"] for r in await db.fetch(
         "select track_id, jargon from music_jargon where track_id = any($1::uuid[])", [t["id"] for t in fresh])}
-    ordered = [t for t in fresh if t["id"] in ready] + [t for t in fresh if t["id"] not in ready][:3]
+    ordered = [t for t in fresh if t["id"] in ready] + [t for t in fresh if t["id"] not in ready][:4]
     for track in ordered:
         jargon = ready.get(track["id"]) or await jargon_title(track)
         wrong = _other_titles(tracks, track)

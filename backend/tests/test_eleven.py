@@ -575,14 +575,18 @@ async def test_only_the_final_question_is_read_and_word_for_word(monkeypatch):
     final = {"slot": "final", "wager": 100, "answered_at": None, "payload": {"text": question}}
     monkeypatch.setattr(host_service, "db", _Db(item=final))
     line = await host_service.final_question_line(RUN, "item-1")
-    assert line == f"[impressed] Bold move, 100 on the line... [dramatic] Your final question... [clearly] {question}"
-    assert host_service.spoken_text(line) == f"Bold move, 100 on the line... Your final question... {question}"
-    # His reaction to the bet depends on how big it was (the options are safe, bold, go big).
-    tiers = {50: "Playing it safe for 50", 100: "Bold move, 100", 200: "Going big \u2014 200"}
-    for amount, words in tiers.items():
+    # He reacts to the bet first (a line from the bank for how big it was, in this host's manner), then the question,
+    # word for word and last, with a clearly-spoken tag and nothing after it.
+    assert line.endswith(f" [clearly] {question}") and "100" in line
+    assert host_service.spoken_text(line).endswith(f" {question}") and "[" not in host_service.spoken_text(line)
+    # The reaction depends on how big the bet was (the options are safe, bold, go big).
+    for amount, tier in ((50, "safe"), (100, "bold"), (200, "big")):
         bet = {**final, "wager": amount, "payload": {"text": question, "wager_options": [50, 100, 200]}}
         monkeypatch.setattr(host_service, "db", _Db(item=bet))
-        assert words in await host_service.final_question_line(RUN, "item-1")
+        lead = host_service._FINAL_LEADS[host_service.DEFAULT_MANNER][tier]
+        for _ in range(8):                                 # the bank is picked from at random
+            said = await host_service.final_question_line(RUN, "item-1")
+            assert said.removesuffix(f" [clearly] {question}") in {option.format(wager=amount) for option in lead}
     monkeypatch.setattr(host_service, "db", _Db(item=final))
     for other in ({**final, "slot": "report"}, {**final, "wager": None}, {**final, "answered_at": "now"}):
         monkeypatch.setattr(host_service, "db", _Db(item=other))

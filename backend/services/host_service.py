@@ -136,7 +136,7 @@ _SARCASM = [
     (7, "Properly sarcastic: backhanded compliments, deadpan disbelief, mock exasperation at wrong answers. "
         "Still clearly enjoying the contestant's company."),
     (9, "Very sarcastic and irreverent: gleeful mockery of wrong answers, grudging praise for right ones, running "
-        "gags about corporate life and about the show itself."),
+        "gags about the topic and about the show itself."),
     (10, "Maximum roast: theatrical despair, relentless but never cruel mockery, every wrong answer treated as a "
          "personal betrayal."),
 ]
@@ -184,9 +184,9 @@ def _performance_notes(name: str, manner: str, warm: bool, style: str | None) ->
 _TAGGED_SHAPES = (
     "# The shape to aim for (never these exact words)\n"
     "\"[deadpan] Nope - [plainly] 184 million. [amused] ... Bold guess, though. I respect bold.\"\n"
-    "\"[delighted] Correct! [dry] Somebody actually opened the attachment.\"\n"
+    "\"[delighted] Correct! [dry] Somebody actually did the reading.\"\n"
     "\"[impressed] Yes! And fast. [suspicious] ... Suspiciously fast.\"\n"
-    "\"[wincing] Ohh, that's time - [plainly] Phoenix. [dry] The clock didn't read it either.\"\n"
+    "\"[wincing] Ohh, that's time - [plainly] Phoenix. [dry] The clock didn't know it either.\"\n"
     "\"[smooth] Yes! [delighted] Pure eighties gold... [announcing] Blondie, 'Heart of Glass.'\"\n"
     "\"[building] Hold on... [announcing, big] the Lightning Round! [teasing] Fact or fake, no thinking... "
     "[dry] your specialty.\"")
@@ -194,7 +194,7 @@ _TAGGED_SHAPES = (
 _SOUTHERN_TAGGED_SHAPES = (
     "# The shape to aim for (never these exact words - keep the rich Southern voice and idioms in every line)\n"
     "\"[wincing] Well bless your heart - [plainly] 184 million. [amused] ... Bold guess though, sugar, I'll give y'all that.\"\n"
-    "\"[delighted] Hot dog, nailed it! [sassy] Somebody actually read past the cover page, y'all.\"\n"
+    "\"[delighted] Hot dog, nailed it! [sassy] Somebody actually read past page one, y'all.\"\n"
     "\"[impressed] Look at you go - quick as a hiccup! [suspicious] ... Almost too quick, darlin'.\"\n"
     "\"[sighs] Ohh, time's up, sugar - [plainly] Phoenix. [teasing] Even the porch clock moves faster than that.\"\n"
     "\"[warm] Well now, yes indeed! [delighted] Pure eighties gold... [announcing] Blondie, 'Heart of Glass.'\"\n"
@@ -204,11 +204,11 @@ _SOUTHERN_TAGGED_SHAPES = (
 _SOUTHERN_PLAIN_SHAPES = (
     "# The shape to aim for (never these exact words - keep the rich Southern voice and idioms in every line)\n"
     "\"Well bless your heart - 184 million. ... Bold guess though, sugar, I'll give y'all that.\"\n"
-    "\"Hot dog, nailed it! Somebody actually read past the cover page, y'all.\"\n"
+    "\"Hot dog, nailed it! Somebody actually read past page one, y'all.\"\n"
     "\"Look at you go - quick as a hiccup! ... Almost too quick, darlin'.\"\n"
     "\"Ohh, time's up, sugar - Phoenix. Even the porch clock moves faster than that.\"\n"
     "\"Hold your horses, y'all... Lightning Round! Fact or fake, faster than sweet tea at a picnic!\"\n"
-    "\"Next up, sugar... Picture Round! A chart somebody lost a whole Sunday to.\"")
+    "\"Next up, sugar... Picture Round! Let's see how sharp your eyes really are.\"")
 
 _TAG = re.compile(r"\[[^\[\]]{0,60}\]")
 
@@ -298,31 +298,31 @@ def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, roo
         + ("- Write only the words you say out loud, plus the delivery tags in square brackets. No quotation marks, no "
            "stage directions in parentheses, no asterisks, no emoji. Word limits count spoken words, not tags.\n" if tags
            else "- Spoken words only. Never say a stage direction or a sound effect out loud as words.\n") +
-        "- Jokes target the answer, the situation, corporate life or yourself. Never a person's intelligence, job, "
+        "- Jokes target the answer, the situation, the quiz topic, or yourself. Never a person's intelligence, job, "
         "looks or identity. No profanity.\n"
-        "- Workplace-safe, as if their manager and HR were in the room: no romance, dating, flirting or innuendo - "
-        "nothing like \"get a room\", and the contestant never has a \"relationship\" with the report or with "
+        "- Keep it friendly and all-ages safe: no romance, dating, flirting or innuendo - "
+        "nothing like \"get a room\", and the contestant never has a \"relationship\" with the material or with "
         "anything else - and nothing about bodies, politics or religion. Never assume anyone's gender from a name: no "
         "\"he\", \"she\", \"man\", \"lady\" or \"guy\" for the contestant - use their name or \"you\".\n"
         "- Never reveal or hint at an answer before it has been given, unless you are asked to deliver a hint.\n"
-        "- Report facts come only from what you are told. Never invent them.\n"
+        "- Facts come only from what you are told. Never invent them.\n"
         "- Do not name real game shows or their hosts, and never say you are an AI.",
         (_SOUTHERN_TAGGED_SHAPES if "southern" in (style or "").lower() else _TAGGED_SHAPES) if tags else (
             _SOUTHERN_PLAIN_SHAPES if "southern" in (style or "").lower() else (
                 "# The shape to aim for (never these exact words)\n"
                 "\"Nope - 184 million. ... Bold guess, though. I respect bold.\"\n"
-                "\"Correct. Somebody actually opened the attachment.\"\n"
+                "\"Correct. Somebody actually did the reading.\"\n"
                 "\"Yes! And fast. ... Suspiciously fast.\"\n"
-                "\"Ohh, that's time - Phoenix. The clock didn't read it either.\"\n"
+                "\"Ohh, that's time - Phoenix. The clock didn't know it either.\"\n"
                 "\"Hold on... Lightning Round! Fact or fake, no thinking... your specialty.\"\n"
-                "\"Next up... Picture Round! The diagram somebody lost a weekend to.\"")),
+                "\"Next up... Picture Round! Let's see how sharp your eyes really are.\"")),
     ]
     if quiz_title:
         context = f"# Tonight\nThe quiz: \"{quiz_title}\"."
         if outline:
             # Topics only, never facts: the host must not know anything a question could ask about
             # until that question has been answered.
-            context += "\nThe report's sections (for flavour): " + "; ".join(outline[:14]) + "."
+            context += "\nTonight's topics (for flavour): " + "; ".join(outline[:14]) + "."
         sections.append(context)
     sections.append(
         "# When the contestant talks to you\n"
@@ -399,7 +399,7 @@ def _first_name(name: str) -> str:
 
 _ROUND_ANGLE = {
     "Warm-Up": "the easy ones come first",
-    "Picture Round": "charts and pictures from the report",
+    "Picture Round": "visuals and exhibits from the reading",
     "The Deep End": "the questions get harder now",
     "Lightning Round": "rapid-fire statements; call each one Fact or Fake",
     "Second Chance": "the questions they missed come back, and can only help their score",
@@ -423,7 +423,7 @@ _ROUND_ANGLE = {
 # skip it. Every opening gets a different angle, and the host is shown the player's last openings.
 
 _LIFELINE_WORDS = {"fifty": "50/50 (two wrong answers removed, for 75% points)",
-                   "peek": "a peek at the report's passage with extra time, for half points",
+                   "peek": "a peek at the source passage with extra time, for half points",
                    "hint": "a hint from you, the host, for 80% points"}
 
 
@@ -664,8 +664,9 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
             ending = f"then, if you like, ONE joke of five words or fewer about it. {throw}"
         elif item["slot"] == "music":
             if run["mode"] == "sudden_death":
+                prize = "win back a life" if run.get("strikes", 0) > 0 else "score bonus points"
                 return (f"Announce a bonus music break. Its name first, as a headline - \"Music Break!\" - then, in ten "
-                        f"words or fewer: name the tune - a hit from the {run['decade']} - and win back a life. {throw} "
+                        f"words or fewer: name the tune - a hit from the {run['decade']} - and {prize}. {throw} "
                         "Do not say the contestant's name, the song or the artist. Word limit: 14.")
             round_name, angle = "Music Break", f"name that tune, hits from the {run['decade']}"
             ending = f"then, if you like, ONE joke of five words or fewer. {throw}"
@@ -696,6 +697,14 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
         helped = f" They used a lifeline ({', '.join(item['lifelines_used'])})." if item["lifelines_used"] else ""
         warm = (" This is the warm-up side game: be on their side - celebrate a right answer big, and make a miss a "
                 "gentle laugh, never a roast.") if run["mode"] == "jukebox" else ""
+        if item["slot"] == "song_or_jargon":
+            phrase = payload.get("phrase") or payload.get("text", "")
+            verdict = ("ran out of time" if item["timed_out"] else "got it RIGHT" if item["is_correct"]
+                       else "guessed WRONG")
+            was_song = item["correct_index"] == 0
+            detail = payload.get("explain") or ("a real hit song" if was_song else "pure office jargon")
+            return (f"Song or Synergy?: the phrase was \"{phrase}\" ({detail}). {name} {verdict}.{warm} "
+                    "React: a crisp verdict and one quick quip. Word limit: 12.")
         if item["slot"] == "jargon":
             track = await db.fetchrow("select artist, title from music_tracks where id = $1", item["music_track_id"])
             song = f"\"{track['title']}\" by {track['artist']}" if track else "the song"
@@ -708,7 +717,8 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
         if item["slot"] == "music":
             track = await db.fetchrow("select artist, title from music_tracks where id = $1", item["music_track_id"])
             song = f"\"{track['title']}\" by {track['artist']}" if track else "the track"
-            life = " That wins them a life back." if run["mode"] == "sudden_death" and item["is_correct"] else ""
+            # Only say they won a life back when a strike was actually restored (never at full health!).
+            life = " That wins them a life back!" if payload.get("strike_restored") else ""
             if item["timed_out"]:
                 return (f"Music break. The track was {song}. The contestant ran out of time without answering.{warm} React: "
                         "the verdict, one quick joke, and end on the track's title and artist, like a DJ. Word limit: 16.")
@@ -721,6 +731,18 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
                     "like a DJ. Word limit: 16.")
         first = " This is their first answer of the game." if run["questions_answered"] <= 1 else ""
         retry_note = " This was a Second Chance retry of a question they missed earlier." if item["slot"] == "second_chance" else ""
+        sd_stakes = ""
+        if run["mode"] == "sudden_death" and not item["is_correct"]:
+            quiz_row = await db.fetchrow("select settings from quizzes where id = $1", run["quiz_id"])
+            rules = await settings_store.quiz_rules(quiz_row or {})
+            max_strikes = int(rules["sudden_death"]["strikes"])
+            left = max(0, max_strikes - int(run["strikes"]))
+            if left == 0:
+                sd_stakes = " That was their final strike — they are eliminated!"
+            elif left == 1:
+                sd_stakes = " They are down to their VERY LAST LIFE!"
+            else:
+                sd_stakes = f" They have {left} lives left."
         # Inspect recent prior answers so the host knows if a hot streak just snapped or if they are on a cold run.
         prev_rows = await db.fetch(
             "select is_correct from run_items where run_id = $1 and answered_at is not null and id <> $2"
@@ -741,7 +763,7 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
         about = f"Question: \"{payload['text']}\" Correct answer: \"{correct_answer}\".{first}{retry_note}"
         if item["timed_out"]:
             snapped = f" That snaps a {prev_streak}-question streak." if prev_streak >= 3 else ""
-            return (f"{about} {name} ran out of time.{snapped} React: the verdict with the right answer inside it, then one quick "
+            return (f"{about} {name} ran out of time.{snapped}{sd_stakes} React: the verdict with the right answer inside it, then one quick "
                     f"joke, ending on its funniest word.{short} Word limit: 14.")
         if item["is_correct"]:
             streak = f" That is {run['streak']} in a row." if run["streak"] >= 3 else ""
@@ -751,7 +773,7 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
         wager = f" They had wagered {item['wager']} points and lost them." if item["wager"] else ""
         snapped = f" That snaps a {prev_streak}-question streak." if prev_streak >= 3 else ""
         cold = f" That is {prev_wrong + 1} misses in a row." if prev_wrong >= 2 else ""
-        return (f"{about} {name} answered \"{_chosen(item)}\", which is WRONG.{speed}{helped}{wager}{snapped}{cold} React: the verdict "
+        return (f"{about} {name} answered \"{_chosen(item)}\", which is WRONG.{speed}{helped}{wager}{snapped}{cold}{sd_stakes} React: the verdict "
                 f"with the right answer inside it, then one quick joke about that specific wrong answer, ending on its "
                 f"funniest word.{short} Word limit: 14.")
     return None
@@ -808,8 +830,54 @@ async def round_set(run: dict, item_id: str | None) -> str | None:
     return f"{run['mode']}|{item['slot']}|{item['round_name']}|{decade}{edition}"
 
 
-async def final_question_line(run: dict, item_id: str | None) -> str | None:
-    """The final question as the host reads it: a 1-beat bet-tier reaction, then the question word for word
+_FINAL_LEADS: dict[str, dict[str, tuple[str, ...]]] = {
+    "wiseguy": {
+        "big": (
+            "[excited] Going big — {wager} on the line! [dramatic] Your final question...",
+            "[amused] All swagger, {wager} on the table. [dramatic] Let's see what you've got...",
+        ),
+        "safe": (
+            "[amused] Playing it safe for {wager}... [dry] Smart, or nervous? [dramatic] Final question...",
+            "[teasing] A careful {wager} — protecting the lead. [dramatic] Here it comes...",
+        ),
+        "bold": (
+            "[impressed] Bold move, {wager} on the line... [dramatic] Your final question...",
+            "[grinning] Respectable bet — {wager} riding on this one. [dramatic] Ready?",
+        ),
+    },
+    "deadpan": {
+        "big": (
+            "[dry] {wager} points. Boldly ignoring all risk management. [dramatic] Final question...",
+            "[deadpan] Going large for {wager}. I do admire optimism. [dramatic] Here we are...",
+        ),
+        "safe": (
+            "[deadpan] {wager} points. A delightfully cautious wager. [dramatic] Your final question...",
+            "[dry] Playing defence with {wager}. Sensible. [dramatic] Last question...",
+        ),
+        "bold": (
+            "[dry] {wager} on the line. Right down the middle. [dramatic] Your final question...",
+            "[deadpan] {wager} points. Let's settle this properly. [dramatic] Final question...",
+        ),
+    },
+    "showman": {
+        "big": (
+            "[booming] Going BIG — {wager} points on the line! [dramatic] For all the glory...",
+            "[excited] Swinging for the fences with {wager}! [dramatic] Your final question...",
+        ),
+        "safe": (
+            "[warm] Playing it smart with {wager} on the board! [dramatic] Bring it home...",
+            "[delighted] Keeping it steady for {wager} — [dramatic] here comes the finale...",
+        ),
+        "bold": (
+            "[booming] {wager} points riding on one last call! [dramatic] Your final question...",
+            "[excited] Putting {wager} on the line — [dramatic] let's finish strong!",
+        ),
+    },
+}
+
+
+async def final_question_line(run: dict, item_id: str | None, *, manner: str | None = None) -> str | None:
+    """The final question as the host reads it: a character-voiced bet-tier reaction, then the question word for word
     (never through the writer: nothing paraphrased, nothing given away, no tag inside it to single a word out)."""
     if not item_id:
         return None
@@ -823,12 +891,12 @@ async def final_question_line(run: dict, item_id: str | None) -> str | None:
         return None
     wager = item["wager"]
     options = payload.get("wager_options") or []
-    if len(options) >= 2 and wager == options[-1]:
-        lead = f"[excited] Going big — {wager} on the line! [dramatic] Your final question..."
-    elif len(options) >= 2 and wager == options[0]:
-        lead = f"[amused] Playing it safe for {wager}... [dramatic] Your final question..."
-    else:
-        lead = f"[impressed] Bold move, {wager} on the line... [dramatic] Your final question..."
+    tier = (
+        "big" if len(options) >= 2 and wager == options[-1]
+        else ("safe" if len(options) >= 2 and wager == options[0] else "bold")
+    )
+    bank_leads = _FINAL_LEADS.get(manner or DEFAULT_MANNER, _FINAL_LEADS[DEFAULT_MANNER])[tier]
+    lead = random.choice(bank_leads).format(wager=wager)
     return f"{lead} [clearly] {text}"
 
 
@@ -1360,13 +1428,13 @@ async def hint_with_status(question: dict) -> tuple[str, bool]:
     section = None
     if question.get("section_id"):
         section = await db.fetchval("select heading from doc_sections where id = $1", question["section_id"])
-    fallback = (f"It is covered under \"{section}\". Think about what the report said there."
-                if section else "Think back to what the report said about this.")
+    fallback = (f"It is covered under \"{section}\". Think about what you read there."
+                if section else "Think back to what the guide said about this.")
     answer = question["options"][question["correct_index"]]
     try:
         hint = await llm.text(
             model=config.model_fast,
-            system=("You give hints in a quiz about a report. Write ONE sentence that helps without giving the answer away. "
+            system=("You give hints in a quiz. Write ONE sentence that helps without giving the answer away. "
                     "Good hints: say what KIND of thing the answer is, rule out a tempting misreading, or recall the "
                     "surrounding context. NEVER state the answer, paraphrase it, use its key words or numbers, or name "
                     "any option."),

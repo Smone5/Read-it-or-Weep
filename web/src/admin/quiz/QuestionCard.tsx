@@ -55,6 +55,16 @@ export default function QuestionCard({
             <Badge title={question.skill === 'recall' ? 'Tests remembering a detail' : 'Tests understanding what it means'}>
               {SKILL_LABEL[question.skill]}
             </Badge>
+            {question.videoUrl && (
+              <Badge tone="info" title={question.videoTitle || question.videoUrl}>
+                Video{question.videoTitle ? `: ${question.videoTitle.slice(0, 28)}${question.videoTitle.length > 28 ? '…' : ''}` : ''}
+              </Badge>
+            )}
+            {!question.imageUrl && question.revealImageUrl && (
+              <Badge tone="neutral" title="Shows a supporting chart or diagram on answer reveal">
+                Reveal visual
+              </Badge>
+            )}
             {question.flags > 0 && <Badge tone="bad">Flagged by {plural(question.flags, 'player')}</Badge>}
           </div>
 
@@ -63,14 +73,15 @@ export default function QuestionCard({
               {question.title && <p className="text-xs font-bold uppercase tracking-wide text-muted">{question.title}</p>}
               <p className="text-[15px] font-semibold leading-snug [overflow-wrap:anywhere]">{question.text}</p>
             </div>
-            {question.imageUrl && (
+            {(question.imageUrl || question.revealImageUrl) && (
               <button
                 type="button"
                 className="ad-thumb h-16 w-24 flex-none"
                 onClick={() => actions.onPreview(question)}
-                aria-label="Show the picture for this question larger"
+                aria-label={question.imageUrl ? 'Show the picture for this question larger' : 'Show the answer reveal visual larger'}
+                title={question.imageUrl ? 'Question picture' : 'Answer reveal visual'}
               >
-                <img src={question.imageUrl} alt="" loading="lazy" />
+                <img src={question.imageUrl ?? question.revealImageUrl ?? ''} alt="" loading="lazy" />
               </button>
             )}
           </div>
@@ -162,8 +173,8 @@ export default function QuestionCard({
           )}
           {lostPicture && (
             <Note tone="warn">
-              <strong>This picture question has lost its picture</strong> (the report was processed again). Edit it so it makes sense on its own, or
-              delete it.
+              <strong>This picture question has lost its picture</strong> (the report was processed again). Edit it to choose a picture again,
+              reword it so it makes sense on its own, or delete it.
             </Note>
           )}
         </div>

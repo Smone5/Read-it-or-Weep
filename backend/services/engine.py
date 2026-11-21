@@ -267,6 +267,12 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
     if kind in ("jargon", "song_or_jargon"):
         tracks = await music_service.tracks_for(run["decade"])
         avoid = {i["music_track_id"] for i in items if i["music_track_id"]}
+        past = await db.fetch(
+            "select distinct music_track_id from run_items where player_id = $1 and quiz_id = $2"
+            " and music_track_id is not null",
+            run["player_id"], run["quiz_id"],
+        )
+        avoid |= {r["music_track_id"] for r in past}
         if rules.get("soundtrack", True):            # never a song the background music is playing: no spoilers
             avoid |= {t["id"] for t in await music_service.soundtrack_rows(run["decade"], run["id"])}
         if kind == "jargon":
@@ -310,8 +316,9 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
         prior = [i["correct_index"] == 0 for i in items if i["slot"] == "fact_fake"]
         want_fact = _next_binary_choice(prior)
         question = (bank.choose([q for q in pool if q["is_true"] == want_fact], seen, used, section_load=load,
-                                asked=asked, section_states=sec_states)
-                    or bank.choose(pool, seen, used, section_load=load, asked=asked, section_states=sec_states))
+                                difficulty=slot.get("difficulty"), asked=asked, section_states=sec_states)
+                    or bank.choose(pool, seen, used, section_load=load, difficulty=slot.get("difficulty"),
+                                   asked=asked, section_states=sec_states))
         if question is None:
             return None
         return {**base, "question_id": question["id"], "section_id": question["section_id"],
@@ -411,7 +418,7 @@ async def next_item(run: dict, rules: dict) -> dict | None:
                 plan = _sudden_death_block(rules, level, bank.counts(questions), bool(run["decade"]))
         if not plan:
             await db.execute("update runs set plan = '[]'::jsonb where id = $1", run["id"])
-            await finish_run(run, rules)
+            await finish_run(run, rules, cleared_bank=(run["mode"] == "sudden_death"))
             return None
         slot = plan.pop(0)
         fields = await _materialise(run, rules, slot, items)
@@ -421,23 +428,31 @@ async def next_item(run: dict, rules: dict) -> dict | None:
             continue
         break
 
-    position = len(items)
     fields.setdefault("question_id", None)
     fields.setdefault("section_id", None)
     fields.setdefault("music_track_id", None)
     needs_wager = fields["slot"] == "final"
     if _deals_sealed(run, items, fields):
         fields["payload"] = {**fields["payload"], "sealed": True}
-    item = await db.fetchrow(
-        "insert into run_items (run_id, player_id, quiz_id, position, slot, round_no, round_name, question_id,"
-        " section_id, music_track_id, payload, correct_index, time_limit_sec, points_multiplier, served_at)"
-        " values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) returning *",
-        run["id"], run["player_id"], run["quiz_id"], position, fields["slot"], fields["round_no"], fields["round_name"],
-        fields["question_id"], fields["section_id"], fields["music_track_id"], fields["payload"],
-        fields["correct_index"], fields["time_limit_sec"], fields["points_multiplier"],
-        _now() + (timedelta(days=1) if needs_wager else timedelta()))
-    await db.execute("update runs set plan = $2, position = $3 where id = $1", run["id"], plan, position + 1)
-    return item
+
+    async with db.transaction() as tx:
+        locked = await tx.fetchrow("select * from runs where id = $1 for update", run["id"])
+        if locked is None or locked["status"] != "in_progress":
+            return None
+        existing = await tx.fetch("select * from run_items where run_id = $1 order by position", run["id"])
+        if existing and existing[-1]["answered_at"] is None:
+            return existing[-1]
+        position = len(existing)
+        item = await tx.fetchrow(
+            "insert into run_items (run_id, player_id, quiz_id, position, slot, round_no, round_name, question_id,"
+            " section_id, music_track_id, payload, correct_index, time_limit_sec, points_multiplier, served_at)"
+            " values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) returning *",
+            run["id"], run["player_id"], run["quiz_id"], position, fields["slot"], fields["round_no"], fields["round_name"],
+            fields["question_id"], fields["section_id"], fields["music_track_id"], fields["payload"],
+            fields["correct_index"], fields["time_limit_sec"], fields["points_multiplier"],
+            _now() + (timedelta(days=1) if needs_wager else timedelta()))
+        await tx.execute("update runs set plan = $2, position = $3 where id = $1", run["id"], plan, position + 1)
+        return item
 
 
 async def public_item(item: dict, run: dict) -> dict:
@@ -563,33 +578,33 @@ async def use_lifeline(run: dict, item_id: str, kind: str, hint_writer=None) -> 
         raise GameError("That lifeline cannot be used on this question.")
     if kind in item["lifelines_used"]:
         return item
-    remaining = dict(run["lifelines"])
-    if remaining.get(kind, 0) <= 0:
+    if dict(run["lifelines"]).get(kind, 0) <= 0:
         raise GameError("You have used that lifeline already.")
-    payload = dict(item["payload"])
-    question = await db.fetchrow("select * from questions where id = $1", item["question_id"])
-    thinking = timedelta()
 
+    question = await db.fetchrow("select * from questions where id = $1", item["question_id"])
+    patch: dict[str, Any] = {}
+    thinking = timedelta()
     charge = True
+
     if kind == "fifty":
-        wrong = [i for i in range(len(payload["options"])) if i != item["correct_index"]]
-        payload["removed"] = sorted(random.sample(wrong, 2))
+        wrong = [i for i in range(len(item["payload"]["options"])) if i != item["correct_index"]]
+        patch["removed"] = sorted(random.sample(wrong, 2))
     elif kind == "peek":
         excerpt = question["source_quote"] or ""
         if question["chunk_id"]:
             chunk = await db.fetchval("select chunk_text from doc_chunks where id = $1", question["chunk_id"])
             excerpt = _excerpt(chunk or "", question["source_quote"] or "")
-        if payload.get("image_id"):
-            if payload.get("picture_mode") == "memory":
+        if item["payload"].get("image_id"):
+            if item["payload"].get("picture_mode") == "memory":
                 excerpt = "Take a proper look at the picture."
             else:
-                img_ctx = await db.fetchval("select context_text from doc_images where id = $1", payload["image_id"])
+                img_ctx = await db.fetchval("select context_text from doc_images where id = $1", item["payload"]["image_id"])
                 excerpt = _excerpt(img_ctx or "", question["source_quote"] or "") if img_ctx else ""
                 if not excerpt.strip():
                     raise GameError("The full picture is already on screen. Try 50/50 or Hint.")
         if not excerpt.strip():                   # a hand-written question with no passage behind it
             raise GameError("There is no passage to peek at for this one. Try another lifeline.")
-        payload["peek"] = excerpt[:700]
+        patch["peek"] = excerpt[:700]
         thinking = timedelta(seconds=PEEK_GRACE_SEC)   # reading grace so peeking does not drain the clock
     else:
         asked = _now()
@@ -598,20 +613,36 @@ async def use_lifeline(run: dict, item_id: str, kind: str, hint_writer=None) -> 
             hint_str, is_fallback = raw_hint
         else:
             hint_str, is_fallback = raw_hint, False
-        payload["hint"] = hint_str
+        patch["hint"] = hint_str
         thinking = _now() - asked                 # the clock does not run while the hint is being written
         if is_fallback:
             charge = False                        # never charge 20% + a lifeline for a generic fallback reminder
-            payload["hint_refunded"] = True
+            patch["hint_refunded"] = True
 
-    multiplier = float(item["points_multiplier"])
-    if charge:
-        remaining[kind] -= 1
-        multiplier *= LIFELINE_MULTIPLIER[kind]
-        await db.execute("update runs set lifelines = $2 where id = $1", run["id"], remaining)
-    return await db.fetchrow(
-        "update run_items set payload = $2, points_multiplier = $3, lifelines_used = array_append(lifelines_used, $4),"
-        " served_at = served_at + $5 where id = $1 returning *", item_id, payload, multiplier, kind, thinking)
+    async with db.transaction() as tx:
+        locked_run = await tx.fetchrow("select * from runs where id = $1 for update", run["id"])
+        locked_item = await tx.fetchrow("select * from run_items where id = $1 and run_id = $2 for update",
+                                        item_id, run["id"])
+        if locked_run is None or locked_item is None:
+            raise GameError("Question not found.", 404)
+        if locked_run["status"] != "in_progress" or locked_item["answered_at"] is not None:
+            raise GameError("That question has already been answered.")
+        if kind in locked_item["lifelines_used"]:
+            return locked_item
+        remaining = dict(locked_run["lifelines"])
+        if remaining.get(kind, 0) <= 0:
+            raise GameError("You have used that lifeline already.")
+        merged_payload = {**locked_item["payload"], **patch}
+        multiplier = float(locked_item["points_multiplier"])
+        if charge:
+            remaining[kind] -= 1
+            multiplier *= LIFELINE_MULTIPLIER[kind]
+            await tx.execute("update runs set lifelines = $2 where id = $1", run["id"], remaining)
+        return await tx.fetchrow(
+            "update run_items set payload = $2, points_multiplier = $3,"
+            " lifelines_used = array_append(lifelines_used, $4), served_at = served_at + $5"
+            " where id = $1 and answered_at is null returning *",
+            item_id, merged_payload, multiplier, kind, thinking)
 
 
 def _excerpt(passage: str, quote: str, radius: int = 320) -> str:
@@ -634,7 +665,10 @@ def _points(run: dict, rules: dict, item: dict, correct: bool, timed_out: bool, 
     if mode == "straight":
         return 100 if correct else 0
     if mode == "speed":
-        return round(100 * (1 + 0.1 * min(run["streak"], 10))) if correct else 0
+        if not correct:
+            return 0
+        base = 75 if slot == "fact_fake" else 150
+        return round(base * (1 + 0.1 * min(run["streak"], 10)))
     if mode == "jukebox":
         if not correct:
             return 0                                        # a warm-up: nothing costs points
@@ -644,82 +678,113 @@ def _points(run: dict, rules: dict, item: dict, correct: bool, timed_out: bool, 
             return 0
         if slot == "music":
             return 75
-        return round((50 + 50 * time_fraction) * (1 + 0.1 * (item["round_no"] - 1)) * multiplier)
+        streak_bonus = 10 * min(run["streak"], 5)
+        return round((50 + 50 * time_fraction) * (1 + 0.1 * (item["round_no"] - 1)) * multiplier) + streak_bonus
     # Game Show — wrong guesses and timeouts are symmetric (0 pts) so stalling never beats guessing.
     if slot == "fact_fake":
         return round(30 + 20 * time_fraction) if correct else 0
     if not correct:
         return 0
     streak_bonus = 10 * min(run["streak"], 5)               # run["streak"] is the streak *before* this answer
+    if slot == "second_chance":
+        # Strictly half points on already-seen missed questions (never full un-halved streak bonus).
+        return round((50 + 50 * time_fraction + streak_bonus) * multiplier)
     return round((50 + 50 * time_fraction) * multiplier) + streak_bonus
 
 
 async def submit_answer(run: dict, rules: dict, item_id: str, choice: int | None) -> dict:
-    item = await _current_item(run, item_id)
-    if item["answered_at"] is not None:
-        return await _reveal(item, await db.fetchrow("select * from runs where id = $1", run["id"]), rules)
-    if item["slot"] == "final" and item["wager"] is None:
-        raise GameError("Place your wager first.")
-    if item["payload"].get("sealed"):
-        raise GameError("That question has not been opened yet.")
-    if item["slot"] == "final" and item["served_at"] > _now():
-        raise GameError("The answers are not up yet.")
-    if run["status"] != "in_progress":
-        raise GameError("This game is already over.", 409)
-
-    now = _now()
-    elapsed_ms = max(0, int((now - item["served_at"]).total_seconds() * 1000))
-    limit_ms = item["time_limit_sec"] * 1000
-    clock_expired = run["mode"] == "speed" and run["deadline_at"] and now > run["deadline_at"] + timedelta(seconds=2)
-    timed_out = choice is None or clock_expired or (limit_ms and elapsed_ms > limit_ms + LATE_MS)
-    if choice is not None and not (0 <= choice < len(item["payload"]["options"])):
-        raise GameError("That is not one of the options.")
-    if choice is not None and choice in item["payload"].get("removed", []):
-        raise GameError("That option was removed.")
-    correct = (not timed_out) and choice == item["correct_index"]
-    time_fraction = 1.0 if not limit_ms else max(0.0, min(1.0, 1 - max(0, elapsed_ms - _grace_ms(item)) / limit_ms))
-    points = _points(run, rules, item, correct, bool(timed_out), time_fraction)
-
-    saved = await db.fetchrow(
-        "update run_items set answered_at = $2, selected_index = $3, is_correct = $4, timed_out = $5,"
-        " time_taken_ms = $6, points = $7 where id = $1 and answered_at is null returning *",
-        item_id, now, None if timed_out else choice, correct, bool(timed_out), elapsed_ms, points)
-    if saved is None:                                       # a double tap: the first answer stands
-        return await _reveal(await _current_item(run, item_id),
-                             await db.fetchrow("select * from runs where id = $1", run["id"]), rules)
-
-    is_music = item["slot"] in MUSIC_SLOTS
-    counts_for_streak = item["slot"] != "fact_fake" or run["mode"] == "speed"
-    streak = (run["streak"] + 1 if correct else 0) if counts_for_streak else run["streak"]
-    strikes = run["strikes"]
     strike_restored = False
-    deadline = run["deadline_at"]
-    if run["mode"] == "sudden_death":
-        if is_music:
-            if correct and strikes > 0:
-                strikes -= 1
-                strike_restored = True
-        elif not correct:
-            strikes += 1
-    if run["mode"] == "speed" and not correct and deadline:
-        deadline = deadline - timedelta(seconds=int(rules["speed"]["wrong_penalty_sec"]))
+    async with db.transaction() as tx:
+        locked_run = await tx.fetchrow("select * from runs where id = $1 for update", run["id"])
+        if locked_run is None:
+            raise GameError("Game not found.", 404)
+        item = await tx.fetchrow("select * from run_items where id = $1 and run_id = $2 for update",
+                                 item_id, run["id"])
+        if item is None:
+            raise GameError("Question not found.", 404)
+        if item["answered_at"] is not None:
+            saved = item
+            updated = locked_run
+        else:
+            if item["slot"] == "final" and item["wager"] is None:
+                raise GameError("Place your wager first.")
+            if item["payload"].get("sealed"):
+                raise GameError("That question has not been opened yet.")
+            if item["slot"] == "final" and item["served_at"] > _now():
+                raise GameError("The answers are not up yet.")
+            if locked_run["status"] != "in_progress":
+                raise GameError("This game is already over.", 409)
 
-    updated = await db.fetchrow(
-        "update runs set score = greatest(0, score + $2), streak = $3, streak_max = greatest(streak_max, $3),"
-        " strikes = $4, deadline_at = $5, questions_answered = questions_answered + 1,"
-        " correct_answers = correct_answers + $6, report_answered = report_answered + $7,"
-        " report_correct = report_correct + $8, music_answered = music_answered + $9,"
-        " music_correct = music_correct + $10 where id = $1 returning *",
-        run["id"], points, streak, strikes, deadline, int(correct), int(not is_music), int(correct and not is_music),
-        int(is_music), int(correct and is_music))
-    if item["question_id"]:
-        await db.execute("update questions set times_served = times_served + 1, times_correct = times_correct + $2"
-                         " where id = $1", item["question_id"], int(correct))
+            now = _now()
+            elapsed_ms = max(0, int((now - item["served_at"]).total_seconds() * 1000))
+            limit_ms = item["time_limit_sec"] * 1000
+            clock_expired = (
+                locked_run["mode"] == "speed" and locked_run["deadline_at"]
+                and now > locked_run["deadline_at"] + timedelta(seconds=2)
+            )
+            timed_out = choice is None or clock_expired or (limit_ms and elapsed_ms > limit_ms + LATE_MS)
+            if choice is not None and not (0 <= choice < len(item["payload"]["options"])):
+                raise GameError("That is not one of the options.")
+            if choice is not None and choice in item["payload"].get("removed", []):
+                raise GameError("That option was removed.")
+            correct = (not timed_out) and choice == item["correct_index"]
+            time_fraction = 1.0 if not limit_ms else max(0.0, min(1.0, 1 - max(0, elapsed_ms - _grace_ms(item)) / limit_ms))
+            points = _points(locked_run, rules, item, correct, bool(timed_out), time_fraction)
 
-    over = (updated["mode"] == "sudden_death" and strikes >= int(rules["sudden_death"]["strikes"])) or (
-        updated["mode"] == "speed" and deadline is not None and now >= deadline)
-    if over:
-        updated = await finish_run(updated, rules)
+            is_music = item["slot"] in MUSIC_SLOTS
+            is_second_chance = item["slot"] == "second_chance"
+            counts_for_streak = item["slot"] not in ("fact_fake", "second_chance") or locked_run["mode"] == "speed"
+            if is_second_chance:
+                # Second Chance "can only help": never wipe the player's streak on a miss.
+                streak = locked_run["streak"] + 1 if correct else locked_run["streak"]
+            elif counts_for_streak:
+                streak = locked_run["streak"] + 1 if correct else 0
+            else:
+                streak = locked_run["streak"]
+
+            strikes = locked_run["strikes"]
+            deadline = locked_run["deadline_at"]
+            if locked_run["mode"] == "sudden_death":
+                if is_music:
+                    if correct and strikes > 0:
+                        strikes -= 1
+                        strike_restored = True
+                elif not correct:
+                    strikes += 1
+            if locked_run["mode"] == "speed" and not correct and deadline:
+                deadline = deadline - timedelta(seconds=int(rules["speed"]["wrong_penalty_sec"]))
+
+            payload = dict(item["payload"])
+            if strike_restored:
+                payload["strike_restored"] = True
+
+            saved = await tx.fetchrow(
+                "update run_items set answered_at = $2, selected_index = $3, is_correct = $4, timed_out = $5,"
+                " time_taken_ms = $6, points = $7, payload = $8 where id = $1 and answered_at is null returning *",
+                item_id, now, None if timed_out else choice, correct, bool(timed_out), elapsed_ms, points, payload)
+            if saved is None:
+                saved = await tx.fetchrow("select * from run_items where id = $1", item_id)
+                updated = locked_run
+            else:
+                counts_report = (not is_music) and (not is_second_chance)
+                updated = await tx.fetchrow(
+                    "update runs set score = greatest(0, score + $2), streak = $3, streak_max = greatest(streak_max, $3),"
+                    " strikes = $4, deadline_at = $5, questions_answered = questions_answered + 1,"
+                    " correct_answers = correct_answers + $6, report_answered = report_answered + $7,"
+                    " report_correct = report_correct + $8, music_answered = music_answered + $9,"
+                    " music_correct = music_correct + $10 where id = $1 returning *",
+                    run["id"], points, streak, strikes, deadline, int(correct),
+                    int(counts_report), int(correct and counts_report),
+                    int(is_music), int(correct and is_music))
+                if item["question_id"]:
+                    await tx.execute(
+                        "update questions set times_served = times_served + 1, times_correct = times_correct + $2"
+                        " where id = $1", item["question_id"], int(correct))
+                over = (updated["mode"] == "sudden_death" and strikes >= int(rules["sudden_death"]["strikes"])) or (
+                    updated["mode"] == "speed" and deadline is not None and now >= deadline)
+                if over:
+                    updated = await finish_run(updated, rules, conn=tx)
+
     reveal = await _reveal(saved, updated, rules)
     reveal["strikeRestored"] = strike_restored
     return reveal
@@ -796,14 +861,33 @@ def run_state(run: dict, rules: dict) -> dict:
 
 # --------------------------------------------------------------------------- finishing
 
-async def finish_run(run: dict, rules: dict, abandoned: bool = False) -> dict:
-    current = await db.fetchrow("select * from runs where id = $1", run["id"])
+async def finish_run(
+    run: dict,
+    rules: dict,
+    abandoned: bool = False,
+    *,
+    cleared_bank: bool = False,
+    conn: Any = None,
+) -> dict:
+    exec_db = conn or db
+    current = await exec_db.fetchrow("select * from runs where id = $1", run["id"])
     if current["status"] != "in_progress":
         return current
     accuracy = round(100 * current["report_correct"] / current["report_answered"]) if current["report_answered"] else 0
-    status = "abandoned" if abandoned and current["questions_answered"] < 3 else "completed"
-    badge = badges.evaluate_run(current, rules, status=status)["label"]
-    passed = accuracy >= int(rules["straight"]["pass_mark"]) if current["mode"] == "straight" else None
+    # Manual quits are ALWAYS "abandoned" — never promote a 3-question quit to "completed",
+    # "passed", leaderboard-eligible, or Tier-6 badge-eligible.
+    status = "abandoned" if abandoned else "completed"
+    badge = badges.evaluate_run(
+        current,
+        rules,
+        status=status,
+        cleared_bank=(cleared_bank and not abandoned),
+    )["label"]
+    passed = (
+        accuracy >= int(rules["straight"]["pass_mark"])
+        if current["mode"] == "straight" and status == "completed"
+        else None
+    )
     unused_lifelines = (
         sum(max(0, int(v)) for v in (current["lifelines"] or {}).values())
         if status == "completed" and not abandoned and (
@@ -814,14 +898,18 @@ async def finish_run(run: dict, rules: dict, abandoned: bool = False) -> dict:
     )
     lifeline_bonus = unused_lifelines * UNUSED_LIFELINE_BONUS
     duration = int((_now() - current["started_at"]).total_seconds())
-    finished = await db.fetchrow(
+    finished = await exec_db.fetchrow(
         "update runs set status = $2, finished_at = now(), duration_sec = $3, badge = $4, passed = $5,"
         " score = score + $6, plan = '[]'::jsonb"
-        " where id = $1 and status = 'in_progress' returning *", run["id"], status, duration, badge, passed, lifeline_bonus)
+        " where id = $1 and status = 'in_progress' returning *",
+        run["id"], status, duration, badge, passed, lifeline_bonus,
+    )
     if finished is None:
-        return await db.fetchrow("select * from runs where id = $1", run["id"])
-    await db.execute("delete from run_items where run_id = $1 and answered_at is null", run["id"])
+        return await exec_db.fetchrow("select * from runs where id = $1", run["id"])
+    await exec_db.execute("delete from run_items where run_id = $1 and answered_at is null", run["id"])
     if status == "completed":
-        await db.execute("update players set games_played_count = games_played_count + 1, last_seen_at = now()"
-                         " where id = $1", run["player_id"])
+        await exec_db.execute(
+            "update players set games_played_count = games_played_count + 1, last_seen_at = now()"
+            " where id = $1", run["player_id"],
+        )
     return finished

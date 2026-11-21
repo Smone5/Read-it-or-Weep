@@ -1,10 +1,13 @@
 """Player-facing API: look up a quiz, join it, play a game."""
 from __future__ import annotations
 
+import hmac
 import logging
 import re
 import time
+import uuid
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
@@ -19,17 +22,34 @@ from services.settings_store import MODES
 _log = logging.getLogger("play")
 router = APIRouter(prefix="/api", tags=["play"])
 
-# A small in-memory brake on abuse. Generous, because a whole office can share one IP address.
+# A bounded in-memory brake on abuse. Generous, because a whole office can share one IP address.
 _hits: dict[str, deque] = defaultdict(deque)
+_MAX_THROTTLE_KEYS = 4000
+
+
+def _client_ip(request: Request) -> str:
+    host = request.client.host if request.client else "unknown"
+    # Only trust X-Forwarded-For when the immediate peer is a local reverse proxy / tunnel.
+    if host in ("127.0.0.1", "::1"):
+        fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        if fwd:
+            return fwd
+    return host
 
 
 def throttle(request: Request, bucket: str, limit: int, window: int = 60) -> None:
-    throttle_key(f"{bucket}:{request.client.host if request.client else 'unknown'}", limit, window)
+    throttle_key(f"{bucket}:{_client_ip(request)}", limit, window)
 
 
 def throttle_key(key: str, limit: int, window: int = 60) -> None:
     """The same brake for anything that should be counted by something other than the caller's address."""
     now = time.monotonic()
+    if len(_hits) > _MAX_THROTTLE_KEYS:
+        stale = [k for k, dq in list(_hits.items()) if not dq or now - dq[-1] > 3600]
+        for k in stale[: len(stale)]:
+            _hits.pop(k, None)
+        while len(_hits) > _MAX_THROTTLE_KEYS:
+            _hits.pop(next(iter(_hits)), None)
     hits = _hits[key]
     while hits and now - hits[0] > window:
         hits.popleft()
@@ -38,21 +58,59 @@ def throttle_key(key: str, limit: int, window: int = 60) -> None:
     hits.append(now)
 
 
-def _is_admin(token: str | None) -> bool:
+async def _is_admin(token: str | None) -> bool:
     if not token:
         return False
     try:
-        read_admin_token(token)
-        return True
+        admin_id = read_admin_token(token)
     except TokenError:
         return False
+    return bool(await db.fetchval("select 1 from admin_users where id = $1", admin_id))
+
+
+def _quiz_is_restricted(quiz: dict) -> bool:
+    return bool(quiz.get("access_code")) or bool(quiz.get("allowed_email_domains"))
+
+
+def _email_allowed(quiz: dict, email: str) -> bool:
+    domains = [d.lower().lstrip("@") for d in (quiz.get("allowed_email_domains") or [])]
+    if not domains:
+        return True
+    return email.strip().lower().split("@")[-1] in domains
+
+
+async def record_quiz_membership(quiz_id: str, player_id: str) -> None:
+    await db.execute(
+        "insert into quiz_memberships (quiz_id, player_id) values ($1, $2) on conflict do nothing",
+        quiz_id, player_id,
+    )
+
+
+async def has_quiz_access(quiz: dict, player: dict | None, *, is_admin: bool = False) -> bool:
+    if is_admin:
+        return True
+    if player is None:
+        return False
+    if not _email_allowed(quiz, player["email"]):
+        return False
+    if not _quiz_is_restricted(quiz):
+        return True
+    return bool(await db.fetchval(
+        "select 1 from quiz_memberships where quiz_id = $1 and player_id = $2",
+        quiz["id"], player["id"],
+    ))
+
+
+async def require_quiz_access(quiz: dict, player: dict | None, *, is_admin: bool = False) -> None:
+    if not await has_quiz_access(quiz, player, is_admin=is_admin):
+        raise HTTPException(403, "Join this quiz with an eligible email and access code first.")
 
 
 async def find_quiz(slug: str, admin_token: str | None = None) -> dict:
     quiz = await db.fetchrow("select * from quizzes where slug = $1", slug.lower())
     if quiz is None:
         raise HTTPException(404, "We could not find that quiz. Check the link you were sent.")
-    if quiz["status"] != "open" and not _is_admin(admin_token):
+    if quiz["status"] != "open" and not await _is_admin(admin_token):
         message = "This quiz has closed." if quiz["status"] == "closed" else "This quiz is not open yet."
         raise HTTPException(403, message)
     return quiz
@@ -101,17 +159,19 @@ async def health() -> dict:
 async def site_config(player: dict | None = Depends(optional_player)) -> dict:
     quizzes = await db.fetch(
         "select id, slug, title, description, meeting_at, teams, settings from quizzes"
-        " where status = 'open' and not coalesce((settings->>'unlisted')::boolean, false)"
+        " where status = 'open'"
         " order by case when meeting_at is not null and meeting_at >= now() - interval '1 day' then 0 else 1 end,"
         " meeting_at asc nulls last, created_at desc limit 60")
     items = []
     for q in quizzes:
+        rules = await settings_store.quiz_rules(q)
+        if rules.get("unlisted"):
+            continue
         entry: dict[str, Any] = {
             "slug": q["slug"], "title": q["title"], "description": q["description"],
             "meetingAt": q["meeting_at"], "teams": q["teams"] or [],
         }
         if player is not None:
-            rules = await settings_store.quiz_rules(q)
             ready = await stats.readiness(q["id"], player["id"], int(rules["ready_threshold"]))
             entry["readiness"] = {
                 "cleared": ready["cleared"], "total": ready["total"],
@@ -123,22 +183,29 @@ async def site_config(player: dict | None = Depends(optional_player)) -> dict:
 
 
 @router.get("/quiz/{slug}")
-async def quiz_info(slug: str, player: dict | None = Depends(optional_player),
+async def quiz_info(slug: str, request: Request, player: dict | None = Depends(optional_player),
                     x_admin_token: str | None = Header(default=None)) -> dict:
+    throttle(request, "quiz-info", 120)
+    admin = await _is_admin(x_admin_token)
     quiz = await find_quiz(slug, x_admin_token)
     rules = await settings_store.quiz_rules(quiz)
+    authorized = await has_quiz_access(quiz, player, is_admin=admin)
     stock = bank.counts(await bank.approved(quiz["id"], rules["question_sources"]))
     sections = await stats.askable_sections(quiz["id"])
     music = bool(rules["music_enabled"])
     report_files: list[dict] = []
-    if rules.get("allow_download") and (player is not None or _is_admin(x_admin_token)):
+    if rules.get("allow_download") and authorized:
         docs = await db.fetch(
             "select id, filename from documents where quiz_id = $1 and status = 'ready' and storage_key <> ''"
             " order by created_at asc", quiz["id"])
         for d in docs:
-            exp, sig = sign_media(f"doc:{d['id']}", ttl_seconds=3600)
-            report_files.append({"id": d["id"], "filename": d["filename"],
-                                 "url": f"/api/media/document/{d['id']}?exp={exp}&sig={sig}"})
+            if admin and quiz["status"] != "open":
+                exp, sig = sign_media(f"doc:{d['id']}:admin", ttl_seconds=3600)
+                url = f"/api/media/document/{d['id']}?exp={exp}&sig={sig}&admin=1"
+            else:
+                exp, sig = sign_media(f"doc:{d['id']}", ttl_seconds=3600)
+                url = f"/api/media/document/{d['id']}?exp={exp}&sig={sig}"
+            report_files.append({"id": d["id"], "filename": d["filename"], "url": url})
     view = {
         "branding": await _branding_view(),
         "quiz": {
@@ -146,7 +213,8 @@ async def quiz_info(slug: str, player: dict | None = Depends(optional_player),
             "meetingAt": quiz["meeting_at"], "status": quiz["status"], "requiresCode": bool(quiz["access_code"]),
             "teams": quiz["teams"], "sections": len(sections), "questions": stock["mcq"] + stock["fact_fake"],
             "ready": stock["mcq"] >= 3, "leaderboard": bool(rules["leaderboard"]),
-            "reportUrl": rules.get("report_url"),
+            "shareable": not (rules.get("unlisted") or bool(quiz.get("access_code"))),
+            "reportUrl": rules.get("report_url") if authorized else None,
             "reportFiles": report_files,
             "modes": [{**settings_store.mode_view(m, rules), "music": music and m in ("show", "sudden_death", "jukebox")}
                       for m in rules["modes"]],
@@ -154,7 +222,7 @@ async def quiz_info(slug: str, player: dict | None = Depends(optional_player),
         },
         "player": None,
     }
-    if player:
+    if player and authorized:
         view["player"] = await _player_view(player, quiz, rules)
     return view
 
@@ -197,17 +265,20 @@ async def host_sample(slug: str, host_id: str, request: Request, x_admin_token: 
     next tap is instant. The address stays the same when a host changes, so the browser checks back (ETag).
     """
     throttle(request, "host-sample", 120)
-    await find_quiz(slug, x_admin_token)
+    quiz = await find_quiz(slug, x_admin_token)
+    rules = await settings_store.quiz_rules(quiz)
+    allow_eleven = not bool(rules.get("confidential_voice"))
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,60}", host_id):
         raise HTTPException(404, "There is no such host.")
     try:
-        found = await host_samples.sample(host_id)
+        found = await host_samples.sample(host_id, allow_eleven=allow_eleven)
     except Exception as exc:  # noqa: BLE001 – the voice services can be down; the lobby carries on without it
         _log.warning("host sample for %s failed: %s", host_id, exc)
         raise HTTPException(503, "That host cannot be heard right now. Try again in a minute.") from exc
     if found is None:
         raise HTTPException(404, "There is no such host.")
-    host_samples.warm_soon()
+    if allow_eleven:
+        host_samples.warm_soon()
     tag = f'"{found["key"]}"'
     headers = {"ETag": tag, "Cache-Control": "no-cache"}
     if if_none_match == tag:
@@ -237,18 +308,22 @@ async def set_favourite_artist(body: FavouriteBody, request: Request, player: di
 
 @router.post("/quiz/{slug}/join")
 async def join(slug: str, body: JoinRequest, request: Request, x_admin_token: str | None = Header(default=None)) -> dict:
-    throttle(request, "join", 600)      # a whole company can sit behind one address and join in the same minute
+    throttle(request, "join", 120)
     quiz = await find_quiz(slug, x_admin_token)
     email = body.email.strip().lower()
-    domains = [d.lower().lstrip("@") for d in quiz["allowed_email_domains"]]
-    if domains and email.split("@")[-1] not in domains:
-        raise HTTPException(403, f"Please use your work email ({', '.join('@' + d for d in domains)}).")
-    if quiz["access_code"] and (body.accessCode or "").strip().lower() != quiz["access_code"].strip().lower():
-        raise HTTPException(403, "That access code is not right. Check the invitation.")
+    if not _email_allowed(quiz, email):
+        raise HTTPException(403, "That email address is not eligible for this quiz. Use your work email.")
+    if quiz["access_code"]:
+        throttle(request, f"join-code:{quiz['id']}", 20)
+        given = (body.accessCode or "").strip().lower()
+        expected = quiz["access_code"].strip().lower()
+        if not hmac.compare_digest(given, expected):
+            raise HTTPException(403, "That access code is not right. Check the invitation.")
     team = body.team if (body.team and (not quiz["teams"] or body.team in quiz["teams"])) else None
     if quiz["teams"] and not team:
         raise HTTPException(422, "Pick your team.")
     player = await upsert_player(body.name, email, team)
+    await record_quiz_membership(quiz["id"], player["id"])
     rules = await settings_store.quiz_rules(quiz)
     return {"token": issue_player_token(player["id"]), "player": await _player_view(player, quiz, rules)}
 
@@ -258,7 +333,9 @@ async def quiz_leaderboard(slug: str, mode: str | None = None, team: str | None 
                            limit: int = 100, offset: int = 0, q: str | None = None,
                            player: dict = Depends(current_player),      # names and scores are for people who joined
                            x_admin_token: str | None = Header(default=None)) -> dict:
+    admin = await _is_admin(x_admin_token)
     quiz = await find_quiz(slug, x_admin_token)
+    await require_quiz_access(quiz, player, is_admin=admin)
     rules = await settings_store.quiz_rules(quiz)
     if not rules["leaderboard"]:
         raise HTTPException(403, "The leaderboard is switched off for this quiz.")
@@ -274,31 +351,31 @@ class StartRun(BaseModel):
 
 
 class AnswerBody(BaseModel):
-    itemId: str
+    itemId: uuid.UUID
     choiceIndex: int | None = None
 
 
 class WagerBody(BaseModel):
-    itemId: str
+    itemId: uuid.UUID
     amount: int
     readAloud: bool = False      # the page shows the question while the host reads it, then asks for its answers
 
 
 class LifelineBody(BaseModel):
-    itemId: str
+    itemId: uuid.UUID
     kind: str
 
 
 class ItemBody(BaseModel):
-    itemId: str
+    itemId: uuid.UUID
 
 
 def _game_error(exc: engine.GameError) -> HTTPException:
     return HTTPException(exc.status, str(exc))
 
 
-async def _load_run(run_id: str, player: dict) -> tuple[dict, dict, dict]:
-    run = await db.fetchrow("select * from runs where id = $1", run_id)
+async def _load_run(run_id: uuid.UUID | str, player: dict) -> tuple[dict, dict, dict]:
+    run = await db.fetchrow("select * from runs where id = $1", str(run_id))
     if run is None or run["player_id"] != player["id"]:
         raise HTTPException(404, "We could not find that game.")
     quiz = await db.fetchrow("select * from quizzes where id = $1", run["quiz_id"])
@@ -321,8 +398,10 @@ async def _turn(run: dict, rules: dict, deal: bool = True) -> dict:
 @router.post("/quiz/{slug}/runs")
 async def start_run(slug: str, body: StartRun, request: Request, player: dict = Depends(current_player),
                     x_admin_token: str | None = Header(default=None)) -> dict:
-    throttle(request, "start", 600)
+    throttle(request, "start", 120)
+    admin = await _is_admin(x_admin_token)
     quiz = await find_quiz(slug, x_admin_token)
+    await require_quiz_access(quiz, player, is_admin=admin)
     rules = await settings_store.quiz_rules(quiz)
     try:
         run = await engine.start_run(quiz, rules, player, body.mode or rules["default_mode"], body.decade)
@@ -332,13 +411,13 @@ async def start_run(slug: str, body: StartRun, request: Request, player: dict = 
 
 
 @router.get("/runs/{run_id}")
-async def resume_run(run_id: str, player: dict = Depends(current_player)) -> dict:
+async def resume_run(run_id: uuid.UUID, player: dict = Depends(current_player)) -> dict:
     run, _, rules = await _load_run(run_id, player)
     return await _turn(run, rules, deal=False)
 
 
 @router.get("/runs/{run_id}/soundtrack")
-async def run_soundtrack(run_id: str, player: dict = Depends(current_player)) -> dict:
+async def run_soundtrack(run_id: uuid.UUID, player: dict = Depends(current_player)) -> dict:
     """Songs to play quietly behind this game (none for a Straight Quiz, or when music is switched off)."""
     run, _, rules = await _load_run(run_id, player)
     if not (rules["music_enabled"] and rules.get("soundtrack", True)) or run["mode"] == "straight":
@@ -349,7 +428,7 @@ async def run_soundtrack(run_id: str, player: dict = Depends(current_player)) ->
     music_service.ensure_decade(decade)
     music_service.ensure_moods(decade)
     asked = {r["music_track_id"] for r in await db.fetch(
-        "select music_track_id from run_items where run_id = $1 and music_track_id is not null", run_id)}
+        "select music_track_id from run_items where run_id = $1 and music_track_id is not null", str(run_id))}
     rows = [r for r in await music_service.soundtrack_rows(decade, run["id"]) if r["id"] not in asked]
     tracks = [music_service._track_view(r) for r in rows]
     favs = await favorites.for_player(player["id"])
@@ -361,138 +440,174 @@ async def run_soundtrack(run_id: str, player: dict = Depends(current_player)) ->
 
 
 @router.post("/runs/{run_id}/next")
-async def next_turn(run_id: str, player: dict = Depends(current_player)) -> dict:
+async def next_turn(run_id: uuid.UUID, player: dict = Depends(current_player)) -> dict:
     run, _, rules = await _load_run(run_id, player)
     return await _turn(run, rules)
 
 
 @router.post("/runs/{run_id}/open")
-async def open_item(run_id: str, body: ItemBody, player: dict = Depends(current_player)) -> dict:
+async def open_item(run_id: uuid.UUID, body: ItemBody, player: dict = Depends(current_player)) -> dict:
     """The title card is done: reveal a sealed item and start its clock."""
     run, _, rules = await _load_run(run_id, player)
     try:
-        item, run = await engine.open_item(run, rules, body.itemId)
+        item, run = await engine.open_item(run, rules, str(body.itemId))
     except engine.GameError as exc:
         raise _game_error(exc) from exc
     return {"item": await engine.public_item(item, run), "state": engine.run_state(run, rules)}
 
 
 @router.post("/runs/{run_id}/answer")
-async def answer(run_id: str, body: AnswerBody, player: dict = Depends(current_player)) -> dict:
+async def answer(run_id: uuid.UUID, body: AnswerBody, player: dict = Depends(current_player)) -> dict:
     run, _, rules = await _load_run(run_id, player)
+    item_id = str(body.itemId)
     try:
-        reveal = await engine.submit_answer(run, rules, body.itemId, body.choiceIndex)
+        reveal = await engine.submit_answer(run, rules, item_id, body.choiceIndex)
     except engine.GameError as exc:
         raise _game_error(exc) from exc
-    item = await db.fetchrow("select question_id from run_items where id = $1", body.itemId)
+    item = await db.fetchrow("select question_id from run_items where id = $1", item_id)
     if item and item["question_id"]:
         await stats.note_question_health(item["question_id"])
     return reveal
 
 
 @router.post("/runs/{run_id}/wager")
-async def wager(run_id: str, body: WagerBody, player: dict = Depends(current_player)) -> dict:
+async def wager(run_id: uuid.UUID, body: WagerBody, player: dict = Depends(current_player)) -> dict:
     run, _, rules = await _load_run(run_id, player)
     try:
-        item = await engine.place_wager(run, body.itemId, body.amount, read_aloud=body.readAloud)
+        item = await engine.place_wager(run, str(body.itemId), body.amount, read_aloud=body.readAloud)
     except engine.GameError as exc:
         raise _game_error(exc) from exc
     return {"item": await engine.public_item(item, run), "state": engine.run_state(run, rules)}
 
 
 @router.post("/runs/{run_id}/start-clock")
-async def start_clock(run_id: str, body: ItemBody, player: dict = Depends(current_player)) -> dict:
+async def start_clock(run_id: uuid.UUID, body: ItemBody, player: dict = Depends(current_player)) -> dict:
     """The final question has been read out, or the player skipped the reading: show its answers, start its clock."""
     run, _, rules = await _load_run(run_id, player)
     try:
-        item = await engine.start_clock(run, body.itemId)
+        item = await engine.start_clock(run, str(body.itemId))
     except engine.GameError as exc:
         raise _game_error(exc) from exc
     return {"item": await engine.public_item(item, run), "state": engine.run_state(run, rules)}
 
 
 @router.post("/runs/{run_id}/lifeline")
-async def lifeline(run_id: str, body: LifelineBody, player: dict = Depends(current_player)) -> dict:
+async def lifeline(run_id: uuid.UUID, body: LifelineBody, player: dict = Depends(current_player)) -> dict:
     run, _, rules = await _load_run(run_id, player)
     try:
-        item = await engine.use_lifeline(run, body.itemId, body.kind, hint_writer=host_service.hint_with_status)
+        item = await engine.use_lifeline(run, str(body.itemId), body.kind, hint_writer=host_service.hint_with_status)
     except engine.GameError as exc:
         raise _game_error(exc) from exc
-    run = await db.fetchrow("select * from runs where id = $1", run_id)
+    run = await db.fetchrow("select * from runs where id = $1", str(run_id))
     return {"item": await engine.public_item(item, run), "state": engine.run_state(run, rules)}
 
 
 @router.post("/runs/{run_id}/media-error")
-async def media_error(run_id: str, body: ItemBody, player: dict = Depends(current_player)) -> dict:
+async def media_error(run_id: uuid.UUID, body: ItemBody, request: Request,
+                      player: dict = Depends(current_player)) -> dict:
     """The browser could not play a question's song (a music clip, or the song behind a jargon title). Work out whose
-    fault that is, and carry on either way.
-
-    If the clip really is gone it is retired and the question is dealt again with another song. If the
-    clip is fine, the trouble is on the player's side (a network that blocks the music host, say):
-    nothing is retired, and this game simply continues without music instead of failing every break.
-    Office Jukebox is all music, but its jargon rounds still work as words: they stay, without their
-    songs (and its decade stays, since the questions are about it); only its clip questions go.
-    """
-    run, _, rules = await _load_run(run_id, player)
+    fault that is, and carry on either way."""
+    throttle(request, "media-error", 20)
+    rid, iid = str(run_id), str(body.itemId)
+    run, _, rules = await _load_run(rid, player)
     item = await db.fetchrow("select * from run_items where id = $1 and run_id = $2 and answered_at is null",
-                             body.itemId, run_id)
+                             iid, rid)
     if item and item["slot"] in engine.CLIP_SLOTS:
         payload = item["payload"]
-        attempt = int(payload.get("attempt", 1))
-        clip_gone = await music_service.preview_is_dead(payload["preview_url"])
-        if clip_gone:
-            await music_service.retire_track(item["music_track_id"])
-        if clip_gone and attempt < 3:
-            slot = {"slot": item["slot"], "round": item["round_no"], "name": item["round_name"],
-                    "limit": item["time_limit_sec"], "mult": float(item["points_multiplier"]), "attempt": attempt + 1}
-            if payload.get("asks"):
-                slot["asks"] = payload["asks"]           # "name the artist" stays "name the artist"
-            await db.execute("delete from run_items where id = $1", item["id"])
-            await db.execute("update runs set position = position - 1, plan = $2::jsonb || plan where id = $1",
-                             run_id, [slot])
-        elif run["mode"] == "jukebox":
-            rest = [{**slot, "no_clip": True} if slot["slot"] in ("jargon", "song_or_jargon") else slot
-                    for slot in run["plan"] if slot["slot"] != "music"]
-            if item["slot"] == "jargon":                 # the title stays on screen, now without its song
-                await db.execute("update run_items set payload = payload || '{\"no_clip\": true}'::jsonb where id = $1",
-                                 item["id"])
-                await db.execute("update runs set plan = $2 where id = $1", run_id, rest)
-            else:
-                await db.execute("delete from run_items where id = $1", item["id"])
-                await db.execute("update runs set position = position - 1, plan = $2 where id = $1", run_id, rest)
-        else:
-            without_music = [slot for slot in run["plan"] if slot["slot"] != "music"]
-            await db.execute("delete from run_items where id = $1", item["id"])
-            await db.execute("update runs set position = position - 1, plan = $2, decade = null where id = $1",
-                             run_id, without_music)
-        run = await db.fetchrow("select * from runs where id = $1", run_id)
+        preview_url = payload.get("preview_url")
+        if not payload.get("no_clip") and preview_url:
+            attempt = int(payload.get("attempt", 1))
+            clip_gone = await music_service.preview_is_dead(preview_url)
+            if clip_gone and item["music_track_id"]:
+                await music_service.retire_track(item["music_track_id"])
+            async with db.transaction() as tx:
+                locked_run = await tx.fetchrow("select * from runs where id = $1 for update", rid)
+                locked_item = await tx.fetchrow(
+                    "select * from run_items where id = $1 and run_id = $2 and answered_at is null for update",
+                    iid, rid,
+                )
+                if locked_run and locked_item and not locked_item["payload"].get("no_clip"):
+                    if clip_gone and attempt < 3:
+                        slot = {"slot": locked_item["slot"], "round": locked_item["round_no"],
+                                "name": locked_item["round_name"], "limit": locked_item["time_limit_sec"],
+                                "mult": float(locked_item["points_multiplier"]), "attempt": attempt + 1}
+                        if payload.get("asks"):
+                            slot["asks"] = payload["asks"]
+                        deleted = await tx.fetchval(
+                            "delete from run_items where id = $1 and answered_at is null returning id", locked_item["id"])
+                        if deleted:
+                            await tx.execute(
+                                "update runs set position = greatest(0, position - 1), plan = $2::jsonb || plan where id = $1",
+                                rid, [slot],
+                            )
+                    elif locked_run["mode"] == "jukebox":
+                        rest = [{**slot, "no_clip": True} if slot["slot"] in ("jargon", "song_or_jargon") else slot
+                                for slot in locked_run["plan"] if slot["slot"] != "music"]
+                        if locked_item["slot"] == "jargon":
+                            await tx.execute(
+                                "update run_items set payload = payload || '{\"no_clip\": true}'::jsonb"
+                                " where id = $1 and answered_at is null",
+                                locked_item["id"],
+                            )
+                            await tx.execute("update runs set plan = $2 where id = $1", rid, rest)
+                        else:
+                            deleted = await tx.fetchval(
+                                "delete from run_items where id = $1 and answered_at is null returning id", locked_item["id"])
+                            if deleted:
+                                await tx.execute(
+                                    "update runs set position = greatest(0, position - 1), plan = $2 where id = $1",
+                                    rid, rest,
+                                )
+                    else:
+                        without_music = [slot for slot in locked_run["plan"] if slot["slot"] != "music"]
+                        deleted = await tx.fetchval(
+                            "delete from run_items where id = $1 and answered_at is null returning id", locked_item["id"])
+                        if deleted:
+                            await tx.execute(
+                                "update runs set position = greatest(0, position - 1), plan = $2, decade = null where id = $1",
+                                rid, without_music,
+                            )
+            run = await db.fetchrow("select * from runs where id = $1", rid)
     return await _turn(run, rules)
 
 
+def _speed_clock_expired(run: dict) -> bool:
+    return (
+        run["mode"] == "speed"
+        and run["deadline_at"] is not None
+        and datetime.now(timezone.utc) >= run["deadline_at"]
+    )
+
+
 @router.post("/runs/{run_id}/quit")
-async def quit_run(run_id: str, player: dict = Depends(current_player)) -> dict:
+async def quit_run(run_id: uuid.UUID, player: dict = Depends(current_player)) -> dict:
     run, _, rules = await _load_run(run_id, player)
-    run = await engine.finish_run(run, rules, abandoned=True)
+    # If a Speed Run clock has genuinely run out, closing the run completes it instead of abandoning it.
+    run = await engine.finish_run(run, rules, abandoned=not _speed_clock_expired(run))
     return {"summary": await stats.run_summary(run, rules)}
 
 
 @router.get("/runs/{run_id}/summary")
-async def summary(run_id: str, player: dict = Depends(current_player)) -> dict:
+async def summary(run_id: uuid.UUID, player: dict = Depends(current_player)) -> dict:
     run, _, rules = await _load_run(run_id, player)
     if run["status"] == "in_progress":
-        raise HTTPException(409, "This game is still going.")
+        if _speed_clock_expired(run):
+            run = await engine.finish_run(run, rules, abandoned=False)
+        else:
+            raise HTTPException(409, "This game is still going.")
     return {"summary": await stats.run_summary(run, rules)}
 
 
 class FlagBody(BaseModel):
-    itemId: str
+    itemId: uuid.UUID
     reason: str | None = Field(default=None, max_length=300)
 
 
 @router.post("/questions/flag")
 async def flag_question(body: FlagBody, request: Request, player: dict = Depends(current_player)) -> dict:
     throttle(request, "flag", 40)
-    item = await db.fetchrow("select question_id from run_items where id = $1 and player_id = $2", body.itemId, player["id"])
+    item = await db.fetchrow("select question_id from run_items where id = $1 and player_id = $2",
+                             str(body.itemId), player["id"])
     if item is None or not item["question_id"]:
         raise HTTPException(404, "We could not find that question.")
     already = await db.fetchval("select 1 from question_flags where question_id = $1 and player_id = $2",
@@ -506,7 +621,7 @@ async def flag_question(body: FlagBody, request: Request, player: dict = Depends
 
 
 class FeedbackBody(BaseModel):
-    runId: str
+    runId: uuid.UUID
     stars: int = Field(ge=1, le=5)
     comment: str | None = Field(default=None, max_length=1000)
 
@@ -514,7 +629,8 @@ class FeedbackBody(BaseModel):
 @router.post("/feedback")
 async def feedback(body: FeedbackBody, player: dict = Depends(current_player)) -> dict:
     """Rate a game. A player has one rating per game: tapping a different star replaces it."""
-    run = await db.fetchrow("select id, quiz_id from runs where id = $1 and player_id = $2", body.runId, player["id"])
+    run = await db.fetchrow("select id, quiz_id from runs where id = $1 and player_id = $2",
+                            str(body.runId), player["id"])
     if run is None:
         raise HTTPException(404, "We could not find that game.")
     await db.execute("insert into feedback (player_id, quiz_id, run_id, stars, comment) values ($1,$2,$3,$4,$5)"

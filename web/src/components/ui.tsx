@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { onSoundChange, setSoundOn, soundOn } from '../lib/sound'
 import type { Branding } from '../lib/types'
 import { IconClose, IconSoundOff, IconSoundOn } from './Icons'
@@ -74,22 +74,56 @@ export function ErrorNote({ children }: { children: ReactNode }) {
 }
 
 export function Modal({ open, onClose, children, wide }: { open: boolean; onClose: () => void; children: ReactNode; wide?: boolean }) {
+  const panelRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!open) return
-    const onKey = (event: KeyboardEvent) => event.key === 'Escape' && onClose()
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const focusables = () =>
+      Array.from(
+        panelRef.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      )
+    const first = focusables()[0]
+    if (first) first.focus()
+    else panelRef.current?.focus()
+
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        onClose()
+        return
+      }
+      if (event.key === 'Tab') {
+        const list = focusables()
+        if (!list.length) return
+        const head = list[0]
+        const tail = list[list.length - 1]
+        if (event.shiftKey && document.activeElement === head) {
+          event.preventDefault()
+          tail.focus()
+        } else if (!event.shiftKey && document.activeElement === tail) {
+          event.preventDefault()
+          head.focus()
+        }
+      }
+    }
     window.addEventListener('keydown', onKey)
     const previousOverflow = document.documentElement.style.overflow
     document.documentElement.style.overflow = 'hidden'
     return () => {
       window.removeEventListener('keydown', onKey)
       document.documentElement.style.overflow = previousOverflow
+      if (previousFocus && document.contains(previousFocus)) previousFocus.focus()
     }
   }, [open, onClose])
   if (!open) return null
   return (
     <div className="fixed inset-0 z-50 grid place-items-end sm:place-items-center" role="dialog" aria-modal="true">
-      <button aria-label="Close" className="absolute inset-0 cursor-default bg-black/65" onClick={onClose} />
+      <button aria-label="Close" tabIndex={-1} className="absolute inset-0 cursor-default bg-black/65" onClick={onClose} />
       <div
+        ref={panelRef}
+        tabIndex={-1}
         className={`card rise relative max-h-[92dvh] w-full overflow-y-auto rounded-b-none p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:rounded-b-[var(--radius)] sm:pb-5 ${wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'}`}
       >
         {children}

@@ -7,7 +7,7 @@ import { IconCheck, IconPlay, IconStop, IconTrophy } from '../components/Icons'
 import { ErrorNote, FullScreenMessage, Logo, Modal, SoundToggle, Spinner, Stage, untilText } from '../components/ui'
 import { api, ApiError, session } from '../lib/api'
 import { HostVoice, type TalkState } from '../lib/hostVoice'
-import { setJukeboxLevel, startJukebox, startParty, stopJukebox } from '../lib/jukebox'
+import { cueJukebox, setJukeboxLevel, startJukebox, startParty, stopJukebox } from '../lib/jukebox'
 import { unlockMusic } from '../lib/music'
 import { parseChallenge, type Challenge } from '../lib/shareCard'
 import { play, preloadSounds, unlockAudio } from '../lib/sound'
@@ -187,29 +187,40 @@ export default function QuizPage() {
     begin(first)
   }
 
+  const summaryCueTimer = useRef<number | undefined>(undefined)
+
   const resume = async (runId: string) => {
     unlockAudio()
     unlockMusic()
     const first = await api<Turn>(`/api/runs/${runId}`)
     if (first.finished) await load()
-    else begin(first, true)
+    else {
+      lastStart.current = { mode: first.state.mode, decade: first.state.decade }
+      begin(first, true)
+    }
   }
 
   const finished = (result: SummaryData) => {
     setSummary(result)
     setScreen('summary')
     void load()
-    // The ending, in order: the game-over sting in a moment of quiet, then the host's sign-off with the music
-    // coming up under him, then - on his last word - the music up big for a few seconds (a show ends on its biggest
-    // music, not its smallest), settling into the results playlist. A game that had a soundtrack never goes silent:
-    // the song that is playing carries on under all of it, and the playlist picks up when that song ends.
     const party = result.afterParty
     partyFor.current = result.runId
     soundtrackFor.current = null
+    window.clearTimeout(summaryCueTimer.current)
     const ours = () => Boolean(party) && partyFor.current === result.runId
+    const isVictory =
+      result.status === 'completed' &&
+      ((result.personalBest && result.score > 0) ||
+        (result.mode === 'straight' && result.passed === true) ||
+        (result.mode !== 'jukebox' && result.readiness.ready))
     if (party) {
       setJukeboxLevel('think')
-      window.setTimeout(() => ours() && setJukeboxLevel('party'), ENDING_QUIET_MS)
+      window.setTimeout(() => {
+        if (!ours()) return
+        setJukeboxLevel('party')
+        if (isVictory) cueJukebox('victory')
+      }, ENDING_QUIET_MS)
     } else stopJukebox(1200) // no music on this quiz's results screen
     const music = () => {
       if (party && ours()) startParty(party.tracks)
@@ -220,7 +231,7 @@ export default function QuizPage() {
       return
     }
     const celebrating = result.personalBest && result.score > 0
-    window.setTimeout(() => {
+    summaryCueTimer.current = window.setTimeout(() => {
       if (!host.cue('summary')) {
         music() // no host to sign off after all
         return
@@ -228,6 +239,7 @@ export default function QuizPage() {
       void host.whenQuiet().then(() => {
         if (!ours()) return
         setJukeboxLevel('title')
+        if (isVictory) cueJukebox('victory')
         window.setTimeout(music, FINALE_MS)
       })
     }, celebrating ? 500 : 1500)
@@ -235,6 +247,7 @@ export default function QuizPage() {
 
   /** Leave the results screen: its music and its host stop. */
   const leaveResults = () => {
+    window.clearTimeout(summaryCueTimer.current)
     partyFor.current = null
     soundtrackFor.current = null
     stopJukebox()
@@ -317,6 +330,9 @@ export default function QuizPage() {
               challenge={challenge}
               hostId={hostId}
               onChooseHost={chooseHost}
+              onFavouriteArtist={(artist) =>
+                setInfo((now) => (now && now.player ? { ...now, player: { ...now.player, favoriteArtist: artist } } : now))
+              }
               onStart={start}
               onResume={resume}
               onOpenScores={(selectedMode) => setScoresView({ from: 'lobby', mode: selectedMode })}
@@ -341,8 +357,13 @@ export default function QuizPage() {
               hostTone={hostTone}
               talk={talk}
               showLeaderboard={info.quiz.leaderboard}
+              shareable={info.quiz.shareable !== false}
               reportUrl={info.quiz.reportUrl}
               reportFiles={info.quiz.reportFiles}
+              onVideoStart={() => {
+                window.clearTimeout(summaryCueTimer.current)
+                hostRef.current?.skip()
+              }}
               onOpenScores={() => setScoresView({ from: 'summary', mode: summary.mode })}
               onPlayReport={info.quiz.modes.some((m) => m.id !== 'jukebox') ? playReport : undefined}
               onPlayAgain={playAgain}
@@ -476,6 +497,7 @@ type LobbyProps = {
   challenge: Challenge | null
   hostId: string | null
   onChooseHost: (id: string) => void
+  onFavouriteArtist: (artist: string | null) => void
   onStart: (mode: ModeId, decade: string | null) => Promise<void>
   onResume: (runId: string) => Promise<void>
   onOpenScores: (mode: ModeId) => void
@@ -484,7 +506,7 @@ type LobbyProps = {
 
 const REGISTER_LABEL: Record<string, string> = { deeper: 'Deeper voice', middle: 'Mid voice', brighter: 'Brighter voice' }
 
-function Lobby({ info, player, challenge, hostId, onChooseHost, onStart, onResume, onOpenScores, onSwitchPlayer }: LobbyProps) {
+function Lobby({ info, player, challenge, hostId, onChooseHost, onFavouriteArtist, onStart, onResume, onOpenScores, onSwitchPlayer }: LobbyProps) {
   const { quiz, branding } = info
   const initialMode = (challenge?.mode && quiz.modes.some((m) => m.id === challenge.mode))
     ? challenge.mode
@@ -546,19 +568,43 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onStart, onResum
   const [customizeOpen, setCustomizeOpen] = useState(false)
   const [readinessOpen, setReadinessOpen] = useState(false)
   const [switcherOpen, setSwitcherOpen] = useState(false)
-  const [openReports, setOpenReports] = useState<{ slug: string; title: string; description?: string | null }[]>([])
+  const switcherRef = useRef<HTMLDivElement | null>(null)
+  const [openReports, setOpenReports] = useState<
+    { slug: string; title: string; description?: string | null; readiness?: { cleared: number; total: number; ready: boolean } }[]
+  >([])
 
   useEffect(() => {
-    api<{ quizzes: { slug: string; title: string; description?: string | null }[] }>('/api/config')
+    api<{
+      quizzes: { slug: string; title: string; description?: string | null; readiness?: { cleared: number; total: number; ready: boolean } }[]
+    }>('/api/config')
       .then((data) => setOpenReports(data.quizzes ?? []))
       .catch(() => undefined)
   }, [quiz.slug])
+
+  useEffect(() => {
+    if (!switcherOpen) return
+    const onDown = (event: PointerEvent) => {
+      if (!switcherRef.current?.contains(event.target as Node)) setSwitcherOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSwitcherOpen(false)
+    }
+    document.addEventListener('pointerdown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [switcherOpen])
 
   const activeHost = branding.host.choices.find((c) => c.id === hostId) ?? branding.host.choices[0]
   const activeHostTone = activeHost ? hostToneFor(activeHost.register) : 'accent'
   const showCustomize = chosen?.id !== 'straight' && (branding.host.choices.length > 1 || quiz.decades.length > 0)
   const readiness = player.readiness
   const hasMultipleReports = openReports.length > 1
+  const pausedModeName = player.unfinishedRun
+    ? (quiz.modes.find((m) => m.id === player.unfinishedRun!.mode)?.name ?? 'game')
+    : null
 
   const hostLiveRoom = async () => {
     if (hostingLive || busy) return
@@ -592,56 +638,71 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onStart, onResum
 
       {/* 1. Hero Launchpad: Report + Switcher + Primary Start CTA */}
       <section className="card rise p-5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="pixel text-[10px] text-muted">Now playing · {firstName}</span>
-          {hasMultipleReports ? (
-            <button
-              type="button"
-              className="btn btn-accent btn-sm"
-              onClick={() => setSwitcherOpen((open) => !open)}
-              aria-expanded={switcherOpen}
-            >
-              Switch report ({openReports.length}) {switcherOpen ? '▴' : '▾'}
-            </button>
-          ) : (
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => navigate('/')}>
-              All reports
-            </button>
+        <div ref={switcherRef}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="pixel text-[10px] text-muted">Now playing · {firstName}</span>
+            {hasMultipleReports ? (
+              <button
+                type="button"
+                className="btn btn-accent btn-sm"
+                onClick={() => setSwitcherOpen((open) => !open)}
+                aria-expanded={switcherOpen}
+              >
+                Switch report ({openReports.length}) {switcherOpen ? '▴' : '▾'}
+              </button>
+            ) : (
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => navigate('/')}>
+                All reports
+              </button>
+            )}
+          </div>
+
+          {switcherOpen && hasMultipleReports && (
+            <div className="scroll-thin mt-3 flex max-h-[45dvh] flex-col gap-1.5 overflow-y-auto overflow-x-hidden rounded-lg border border-line bg-surface-2 p-2">
+              {openReports.map((r) => {
+                const current = r.slug === quiz.slug
+                return (
+                  <button
+                    key={r.slug}
+                    type="button"
+                    className="flex w-full min-w-0 items-center justify-between gap-3 overflow-hidden rounded-md border px-3 py-2.5 text-left text-sm transition hover:bg-surface"
+                    style={{
+                      borderColor: current ? 'var(--brand)' : 'transparent',
+                      background: current ? 'color-mix(in oklab, var(--brand) 18%, var(--surface))' : 'transparent',
+                    }}
+                    onClick={() => {
+                      setSwitcherOpen(false)
+                      if (!current) navigate(`/q/${r.slug}`)
+                    }}
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-semibold leading-snug">{r.title}</span>
+                      {r.description && <span className="mt-0.5 block truncate text-xs text-muted">{r.description}</span>}
+                    </span>
+                    <span className="flex flex-none items-center gap-2">
+                      {r.readiness && r.readiness.total > 0 && (
+                        <span
+                          className="pixel rounded-[3px] border px-1.5 py-0.5 text-[9px] tabular-nums"
+                          style={{
+                            borderColor: r.readiness.ready ? 'var(--good)' : 'var(--line)',
+                            color: r.readiness.ready ? 'var(--good)' : 'var(--muted)',
+                          }}
+                        >
+                          {r.readiness.ready ? 'Ready' : `${r.readiness.cleared}/${r.readiness.total}`}
+                        </span>
+                      )}
+                      {current && (
+                        <span className="pixel inline-flex items-center gap-1 text-[9px]" style={{ color: 'var(--good)' }}>
+                          <IconCheck size={12} /> Active
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
           )}
         </div>
-
-        {switcherOpen && hasMultipleReports && (
-          <div className="mt-3 flex flex-col gap-1.5 overflow-hidden rounded-lg border border-line bg-surface-2 p-2">
-            {openReports.map((r) => {
-              const current = r.slug === quiz.slug
-              return (
-                <button
-                  key={r.slug}
-                  type="button"
-                  className="flex w-full min-w-0 items-center justify-between gap-3 overflow-hidden rounded-md border px-3 py-2.5 text-left text-sm transition hover:bg-surface"
-                  style={{
-                    borderColor: current ? 'var(--brand)' : 'transparent',
-                    background: current ? 'color-mix(in oklab, var(--brand) 18%, var(--surface))' : 'transparent',
-                  }}
-                  onClick={() => {
-                    setSwitcherOpen(false)
-                    if (!current) navigate(`/q/${r.slug}`)
-                  }}
-                >
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate font-semibold leading-snug">{r.title}</span>
-                    {r.description && <span className="mt-0.5 block truncate text-xs text-muted">{r.description}</span>}
-                  </span>
-                  {current && (
-                    <span className="pixel inline-flex flex-none items-center gap-1 text-[9px]" style={{ color: 'var(--good)' }}>
-                      <IconCheck size={12} /> Active
-                    </span>
-                  )}
-                </button>
-              )
-            })}
-          </div>
-        )}
 
         <h1 className="mt-3 !normal-case text-[22px] font-bold sm:text-2xl" style={{ fontFamily: 'var(--font-sans)', lineHeight: 1.25 }}>
           {quiz.title}
@@ -680,18 +741,25 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onStart, onResum
                 {readinessOpen ? 'Hide' : 'Details'}
               </button>
             </div>
-            <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-black/35">
+            <div
+              className="mt-1.5 h-2 overflow-hidden rounded-full bg-black/25"
+              role="progressbar"
+              aria-label="Report readiness progress"
+              aria-valuenow={readiness.percent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
               <div
                 className="h-full transition-all"
                 style={{
-                  width: `${Math.max(4, readiness.percent)}%`,
+                  width: `${readiness.percent}%`,
                   background: readiness.ready ? 'var(--good)' : 'var(--accent)',
                 }}
               />
             </div>
             {readinessOpen && (
               <div className="mt-3 border-t border-line pt-3">
-                <ReadinessMap readiness={readiness} />
+                <ReadinessMap readiness={readiness} listOnly />
               </div>
             )}
           </div>
@@ -703,7 +771,7 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onStart, onResum
         <div className="mt-5 flex flex-col gap-2.5">
           {player.unfinishedRun && (
             <button className="btn btn-accent btn-lg w-full" disabled={busy} onClick={() => void go(() => onResume(player.unfinishedRun!.id))}>
-              Continue your game <IconPlay size={14} />
+              Continue {pausedModeName} <IconPlay size={14} />
             </button>
           )}
           <button
@@ -873,7 +941,9 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onStart, onResum
                 </div>
               )}
 
-              {quiz.decades.length > 0 && <FavouriteArtist initial={player.favoriteArtist ?? null} />}
+              {quiz.decades.length > 0 && (
+                <FavouriteArtist initial={player.favoriteArtist ?? null} onSaved={onFavouriteArtist} />
+              )}
             </div>
           )}
         </section>
@@ -920,7 +990,7 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onStart, onResum
               }}
             >
               <input
-                className="field pixel min-w-0 flex-1 text-center text-sm tracking-widest"
+                className="field pixel min-w-0 flex-1 text-center text-base tracking-widest sm:text-sm"
                 value={liveCode}
                 onChange={(e) => setLiveCode(e.target.value.toUpperCase())}
                 maxLength={6}
@@ -944,12 +1014,17 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onStart, onResum
  * "Who do you like?" - a player's favourite artist. Now and then a song from them, or from artists like them,
  * plays behind their game and on their results screen (never as a name-that-tune question). Optional.
  */
-function FavouriteArtist({ initial }: { initial: string | null }) {
+function FavouriteArtist({ initial, onSaved }: { initial: string | null; onSaved?: (artist: string | null) => void }) {
   const [saved, setSaved] = useState(initial)
   const [text, setText] = useState(initial ?? '')
   const [similar, setSimilar] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState('')
+
+  useEffect(() => {
+    setSaved(initial)
+    setText(initial ?? '')
+  }, [initial])
 
   const save = async (value: string) => {
     setBusy(true)
@@ -962,6 +1037,7 @@ function FavouriteArtist({ initial }: { initial: string | null }) {
       setSaved(reply.artist)
       setText(reply.artist ?? '')
       setSimilar(reply.similar ?? [])
+      onSaved?.(reply.artist)
     } catch (caught) {
       setProblem(caught instanceof ApiError ? caught.message : 'That did not save. Try again.')
     } finally {

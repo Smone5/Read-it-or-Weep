@@ -14,6 +14,7 @@ export function useLive({ code, hostKey, enabled }: Options) {
   const [connected, setConnected] = useState(false)
   const offset = useRef(0) // server clock minus this device's clock, in ms
   const lastMessage = useRef(0)
+  const latestVersion = useRef(-1)
 
   const headers = useCallback((): Record<string, string> => {
     const result: Record<string, string> = {}
@@ -23,9 +24,11 @@ export function useLive({ code, hostKey, enabled }: Options) {
   }, [hostKey])
 
   const accept = useCallback((next: LiveState) => {
+    if (next.version < latestVersion.current) return
+    latestVersion.current = next.version
     offset.current = new Date(next.serverNow).getTime() - Date.now()
     lastMessage.current = Date.now()
-    setState((current) => (current && current.version > next.version ? current : next))
+    setState(next)
     setError('')
   }, [])
 
@@ -34,6 +37,10 @@ export function useLive({ code, hostKey, enabled }: Options) {
       const response = await fetch(`/api/live/${code}/state`, { headers: headers() })
       if (response.status === 404) {
         setError('No live game with that code.')
+        return
+      }
+      if (response.status === 401 || response.status === 403) {
+        setError('Join the live game to follow along, or ask the host for a fresh link.')
         return
       }
       if (response.ok) accept((await response.json()) as LiveState)

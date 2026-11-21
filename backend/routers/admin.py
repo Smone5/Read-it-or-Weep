@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import re
 import secrets
 import uuid
@@ -24,10 +25,18 @@ from services import eleven, host_samples
 from services.settings_store import ALL_DECADES, DEFAULTS, MODES, VOICES
 from storage import storage
 
+log = logging.getLogger("admin")
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 MAX_UPLOAD_BYTES = 60 * 1024 * 1024
 MAX_LOGO_BYTES = 2 * 1024 * 1024
+_UNSAFE_SVG_RE = re.compile(
+    rb"<(?:script|foreignObject|iframe|embed|object|animate\w*|set|use)\b"
+    rb"|\bon[a-z]+\s*="
+    rb"|javascript\s*:|vbscript\s*:|data\s*:|&#|@import|expression\s*\("
+    rb"|(?:xlink:)?href\s*=\s*['\"]?\s*(?:https?:|//|%|javascript:|data:)",
+    flags=re.I,
+)
 
 
 # --------------------------------------------------------------------------- sign-in
@@ -118,10 +127,11 @@ async def add_admin(body: NewAdmin, admin: dict = Depends(current_admin)) -> dic
 
 
 @router.delete("/admins/{admin_id}")
-async def remove_admin(admin_id: str, admin: dict = Depends(current_admin)) -> dict:
-    if admin_id == admin["id"]:
+async def remove_admin(admin_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
+    aid = str(admin_id)
+    if aid == admin["id"]:
         raise HTTPException(400, "You cannot remove your own account.")
-    await db.execute("delete from admin_users where id = $1", admin_id)
+    await db.execute("delete from admin_users where id = $1", aid)
     return {"ok": True}
 
 
@@ -150,8 +160,8 @@ async def upload_logo(file: UploadFile = File(...), admin: dict = Depends(curren
     data = await file.read(MAX_LOGO_BYTES + 1)
     if len(data) > MAX_LOGO_BYTES:
         raise HTTPException(413, "That logo is larger than 2 MB.")
-    if extension == ".svg" and re.search(rb"<script|on\w+\s*=|javascript:", data, flags=re.I):
-        raise HTTPException(415, "That SVG contains scripts. Export a plain SVG or use PNG.")
+    if extension == ".svg" and _UNSAFE_SVG_RE.search(data):
+        raise HTTPException(415, "That SVG contains active or external content. Export a plain static SVG or use PNG.")
     key = f"branding/logo-{secrets.token_hex(6)}{extension}"
     await storage().put(key, data, file.content_type or "application/octet-stream")
     current = await settings_store.get("branding")
@@ -203,7 +213,8 @@ async def host_sample(body: HostSample, request: Request, admin: dict = Depends(
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"The AI service could not produce a sample ({exc}).") from exc
+        log.exception("host sample failed for voice=%s", body.voice)
+        raise HTTPException(502, "The AI service could not produce a sample right now. Please try again.") from exc
 
 
 class MusicRefresh(BaseModel):
@@ -267,14 +278,17 @@ class QuizUpdate(BaseModel):
 @router.get("/quizzes")
 async def list_quizzes(admin: dict = Depends(current_admin)) -> dict:
     quizzes = await db.fetch("select * from quizzes order by created_at desc")
-    return {"quizzes": [{**_quiz_view(q), "overview": await stats.quiz_overview(q["id"])} for q in quizzes]}
+    overviews = await stats.quiz_overviews([q["id"] for q in quizzes])
+    return {"quizzes": [{**_quiz_view(q), "overview": overviews[q["id"]]} for q in quizzes]}
 
 
 @router.post("/quizzes")
 async def create_quiz(body: QuizCreate, admin: dict = Depends(current_admin)) -> dict:
-    slug = base = _slugify(body.title)
+    defaults = await settings_store.get("game")
+    base = _slugify(body.title)
+    slug = f"{base}-{secrets.token_hex(4)}" if defaults.get("unlisted") else base
     while await db.fetchval("select 1 from quizzes where slug = $1", slug):
-        slug = f"{base}-{secrets.token_hex(2)}"
+        slug = f"{base}-{secrets.token_hex(4 if defaults.get('unlisted') else 2)}"
     quiz = await db.fetchrow(
         "insert into quizzes (slug, title, description, meeting_at, created_by) values ($1,$2,$3,$4,$5) returning *",
         slug, body.title.strip(), body.description, body.meetingAt, admin["id"])
@@ -282,10 +296,11 @@ async def create_quiz(body: QuizCreate, admin: dict = Depends(current_admin)) ->
 
 
 @router.get("/quizzes/{quiz_id}")
-async def quiz_detail(quiz_id: str, admin: dict = Depends(current_admin)) -> dict:
-    quiz = await _quiz(quiz_id)
+async def quiz_detail(quiz_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
+    qid = str(quiz_id)
+    quiz = await _quiz(qid)
     return {"quiz": _quiz_view(quiz), "rules": await settings_store.quiz_rules(quiz),
-            "overview": await stats.quiz_overview(quiz_id), "documents": await _documents(quiz_id),
+            "overview": await stats.quiz_overview(qid), "documents": await _documents(qid),
             "sections": await db.fetch(
                 "select s.id, s.heading, s.ordinal, s.document_id,"
                 " (select count(*) from questions q where q.section_id = s.id and q.status = 'approved') as questions,"
@@ -293,14 +308,23 @@ async def quiz_detail(quiz_id: str, admin: dict = Depends(current_admin)) -> dic
                 " (select q.video_url from questions q where q.section_id = s.id and q.video_url is not null"
                 "  order by q.created_at asc limit 1) as video_url,"
                 " (select q.video_title from questions q where q.section_id = s.id and q.video_url is not null"
-                "  order by q.created_at asc limit 1) as video_title"
+                "  order by q.created_at asc limit 1) as video_title,"
+                " coalesce(("
+                "   select jsonb_agg(jsonb_build_object('url', v.video_url, 'title', v.video_title, 'count', v.cnt)"
+                "     order by v.first_at asc)"
+                "   from ("
+                "     select q.video_url, max(q.video_title) as video_title, count(*) as cnt, min(q.created_at) as first_at"
+                "     from questions q where q.section_id = s.id and q.video_url is not null group by q.video_url"
+                "   ) v"
+                " ), '[]'::jsonb) as video_clips"
                 " from doc_sections s"
-                " join documents d on d.id = s.document_id where s.quiz_id = $1 order by d.created_at, s.ordinal", quiz_id)}
+                " join documents d on d.id = s.document_id where s.quiz_id = $1 order by d.created_at, s.ordinal", qid)}
 
 
 @router.patch("/quizzes/{quiz_id}")
-async def update_quiz(quiz_id: str, body: QuizUpdate, admin: dict = Depends(current_admin)) -> dict:
-    quiz = await _quiz(quiz_id)
+async def update_quiz(quiz_id: uuid.UUID, body: QuizUpdate, admin: dict = Depends(current_admin)) -> dict:
+    qid = str(quiz_id)
+    quiz = await _quiz(qid)
     changes: dict[str, Any] = {}
     if body.title is not None:
         changes["title"] = body.title.strip()
@@ -315,11 +339,30 @@ async def update_quiz(quiz_id: str, body: QuizUpdate, admin: dict = Depends(curr
     if body.teams is not None:
         changes["teams"] = list(dict.fromkeys(t.strip()[:60] for t in body.teams if t.strip()))
     if body.settings is not None:
-        changes["settings"] = settings_store.deep_merge(quiz["settings"] or {}, body.settings)
+        prior_rules = await settings_store.quiz_rules(quiz)
+        merged = settings_store.deep_merge(quiz["settings"] or {}, body.settings)
+        # Keep download vs purge mutually exclusive: purging deletes the raw file so download cannot work.
+        if body.settings.get("purge_source_after_process"):
+            merged["allow_download"] = False
+        elif body.settings.get("allow_download"):
+            merged["purge_source_after_process"] = False
+        changes["settings"] = merged
+        # When an unpublished draft becomes unlisted, give it an unguessable slug suffix.
+        if (
+            merged.get("unlisted")
+            and not prior_rules.get("unlisted")
+            and quiz["status"] == "draft"
+            and not re.search(r"-[0-9a-f]{8}$", quiz["slug"])
+        ):
+            base_slug = quiz["slug"][:40]
+            candidate = f"{base_slug}-{secrets.token_hex(4)}"
+            while await db.fetchval("select 1 from quizzes where slug = $1", candidate):
+                candidate = f"{base_slug}-{secrets.token_hex(4)}"
+            changes["slug"] = candidate
     if body.status is not None:
         if body.status == "open":
             live_questions = await db.fetchval(
-                "select count(*) from questions where quiz_id = $1 and status = 'approved' and kind = 'mcq'", quiz_id)
+                "select count(*) from questions where quiz_id = $1 and status = 'approved' and kind = 'mcq'", qid)
             if live_questions < 3:
                 raise HTTPException(409, "Add a report (or at least three approved multiple-choice questions) before "
                                          "opening the quiz.")
@@ -327,39 +370,47 @@ async def update_quiz(quiz_id: str, body: QuizUpdate, admin: dict = Depends(curr
     if changes:
         columns = ", ".join(f"{name} = ${i}" for i, name in enumerate(changes, start=2))
         quiz = await db.fetchrow(f"update quizzes set {columns}, updated_at = now() where id = $1 returning *",
-                                 quiz_id, *changes.values())
-        bank.invalidate(quiz_id)
+                                 qid, *changes.values())
+        bank.invalidate(qid)
     return {"quiz": _quiz_view(quiz), "rules": await settings_store.quiz_rules(quiz)}
 
 
 @router.delete("/quizzes/{quiz_id}")
-async def delete_quiz(quiz_id: str, admin: dict = Depends(current_admin)) -> dict:
-    await _quiz(quiz_id)
-    for document in await db.fetch("select id from documents where quiz_id = $1", quiz_id):
+async def delete_quiz(quiz_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
+    qid = str(quiz_id)
+    await _quiz(qid)
+    for document in await db.fetch("select id from documents where quiz_id = $1", qid):
         await storage().delete_prefix(f"quizzes/images/{document['id']}")
         await storage().delete_prefix(f"quizzes/reports/{document['id']}")
-    await db.execute("delete from quizzes where id = $1", quiz_id)
-    bank.invalidate(quiz_id)
+    await db.execute("delete from quizzes where id = $1", qid)
+    bank.invalidate(qid)
     return {"ok": True}
 
 
 # --------------------------------------------------------------------------- documents
 
 async def _documents(quiz_id: str) -> list[dict]:
-    return await db.fetch(
+    rows = await db.fetch(
         "select id, filename, role, status, stage, progress, error, warnings, title, summary, word_count, section_count,"
-        " image_count, chunk_count, question_count, size_bytes, created_at, processed_at from documents"
+        " image_count, chunk_count, question_count, size_bytes, storage_key, created_at, processed_at from documents"
         " where quiz_id = $1 order by created_at", quiz_id)
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["sourcePurged"] = not bool(item.pop("storage_key", ""))
+        result.append(item)
+    return result
 
 
 @router.get("/quizzes/{quiz_id}/documents")
-async def list_documents(quiz_id: str, admin: dict = Depends(current_admin)) -> dict:
-    return {"documents": await _documents(quiz_id)}
+async def list_documents(quiz_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
+    return {"documents": await _documents(str(quiz_id))}
 
 
 @router.post("/quizzes/{quiz_id}/documents")
-async def upload_document(quiz_id: str, file: UploadFile = File(...), admin: dict = Depends(current_admin)) -> dict:
-    await _quiz(quiz_id)
+async def upload_document(quiz_id: uuid.UUID, file: UploadFile = File(...), admin: dict = Depends(current_admin)) -> dict:
+    qid = str(quiz_id)
+    await _quiz(qid)
     filename = re.sub(r"[^\w.\- ()]+", "_", (file.filename or "document").split("/")[-1].split("\\")[-1])[:160]
     extension = extension_of(filename)
     if extension not in supported_extensions():
@@ -372,43 +423,48 @@ async def upload_document(quiz_id: str, file: UploadFile = File(...), admin: dic
         raise HTTPException(413, "That file is larger than 60 MB.")
     if not data:
         raise HTTPException(422, "That file is empty.")
-    first = not await db.fetchval("select 1 from documents where quiz_id = $1", quiz_id)
+    first = not await db.fetchval("select 1 from documents where quiz_id = $1", qid)
     document = await db.fetchrow(
         "insert into documents (quiz_id, filename, storage_key, mime_type, size_bytes, role) values ($1,$2,'',$3,$4,$5)"
-        " returning id", quiz_id, filename, MIME_TYPES.get(extension), len(data), "primary" if first else "supporting")
+        " returning id", qid, filename, MIME_TYPES.get(extension), len(data), "primary" if first else "supporting")
     key = f"quizzes/reports/{document['id']}/{filename}"
     await storage().put(key, data, MIME_TYPES.get(extension, "application/octet-stream"))
     await db.execute("update documents set storage_key = $2 where id = $1", document["id"], key)
     pipeline.start_processing(document["id"])
-    return {"documents": await _documents(quiz_id)}
+    return {"documents": await _documents(qid)}
 
 
 @router.post("/documents/{document_id}/reprocess")
-async def reprocess_document(document_id: str, admin: dict = Depends(current_admin)) -> dict:
-    document = await db.fetchrow("select quiz_id, status, storage_key from documents where id = $1", document_id)
-    if document is None:
-        raise HTTPException(404, "Document not found.")
-    if not document["storage_key"]:
-        raise HTTPException(409, "The source file was purged after processing. Upload the report again to reprocess it.")
-    if document["status"] == "processing":
-        # "Stuck" means no sign of life for a while, however old the document itself is.
-        stuck = await db.fetchval("select coalesce(heartbeat_at, created_at) < now() - interval '10 minutes'"
-                                  " from documents where id = $1", document_id)
-        if not stuck:
-            raise HTTPException(409, "This document is still being processed.")
-    pipeline.start_processing(document_id)
-    bank.invalidate(document["quiz_id"])
+async def reprocess_document(document_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
+    did = str(document_id)
+    claimed = await db.fetchrow(
+        "update documents set status = 'processing', stage = 'reading', heartbeat_at = now(), error = null"
+        " where id = $1 and storage_key <> ''"
+        " and (status <> 'processing' or coalesce(heartbeat_at, created_at) < now() - interval '10 minutes')"
+        " returning quiz_id",
+        did,
+    )
+    if claimed is None:
+        document = await db.fetchrow("select status, storage_key from documents where id = $1", did)
+        if document is None:
+            raise HTTPException(404, "Document not found.")
+        if not document["storage_key"]:
+            raise HTTPException(409, "The source file was purged after processing. Upload the report again to reprocess it.")
+        raise HTTPException(409, "This document is still being processed.")
+    pipeline.start_processing(did)
+    bank.invalidate(claimed["quiz_id"])
     return {"ok": True}
 
 
 @router.delete("/documents/{document_id}")
-async def delete_document(document_id: str, admin: dict = Depends(current_admin)) -> dict:
-    document = await db.fetchrow("select quiz_id from documents where id = $1", document_id)
+async def delete_document(document_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
+    did = str(document_id)
+    document = await db.fetchrow("select quiz_id from documents where id = $1", did)
     if document is None:
         raise HTTPException(404, "Document not found.")
-    await storage().delete_prefix(f"quizzes/images/{document_id}")
-    await storage().delete_prefix(f"quizzes/reports/{document_id}")
-    await db.execute("delete from documents where id = $1", document_id)
+    await storage().delete_prefix(f"quizzes/images/{did}")
+    await storage().delete_prefix(f"quizzes/reports/{did}")
+    await db.execute("delete from documents where id = $1", did)
     bank.invalidate(document["quiz_id"])
     return {"ok": True}
 
@@ -421,11 +477,14 @@ class SectionVideoWrite(BaseModel):
     videoUrl: str | None = Field(default=None, max_length=300)
     videoTitle: str | None = Field(default=None, max_length=120)
     externalOnly: bool | None = None
-    maxQuestions: int = Field(default=3, ge=1, le=20)
+    maxQuestions: int = Field(default=2, ge=1, le=20)
+    mode: Literal["add", "replace", "remove"] = "add"
+    removeUrl: str | None = Field(default=None, max_length=300)
 
 
 @router.post("/video/inspect")
-async def inspect_video(body: VideoInspect, admin: dict = Depends(current_admin)) -> dict:
+async def inspect_video(body: VideoInspect, request: Request, admin: dict = Depends(current_admin)) -> dict:
+    throttle(request, "video-inspect", 30)
     try:
         return await video.inspect_youtube(body.url)
     except ValueError as exc:
@@ -433,12 +492,25 @@ async def inspect_video(body: VideoInspect, admin: dict = Depends(current_admin)
 
 
 @router.post("/sections/{section_id}/video")
-async def set_section_video(section_id: str, body: SectionVideoWrite, admin: dict = Depends(current_admin)) -> dict:
-    section = await db.fetchrow("select id, quiz_id, heading from doc_sections where id = $1", section_id)
+async def set_section_video(section_id: uuid.UUID, body: SectionVideoWrite, admin: dict = Depends(current_admin)) -> dict:
+    sid = str(section_id)
+    section = await db.fetchrow("select id, quiz_id, heading from doc_sections where id = $1", sid)
     if section is None:
         raise HTTPException(404, "Section not found.")
-    if not body.videoUrl or not body.videoUrl.strip():
-        await db.execute("update questions set video_url = null, video_title = null where section_id = $1", section_id)
+    if body.mode == "remove" or (not body.videoUrl or not body.videoUrl.strip()):
+        async with db.transaction() as tx:
+            if body.removeUrl:
+                await tx.execute(
+                    "update questions set video_url = null, video_title = null, edited_at = now(), edited_by = $3"
+                    " where section_id = $1 and video_url = $2",
+                    sid, body.removeUrl, admin["id"],
+                )
+            else:
+                await tx.execute(
+                    "update questions set video_url = null, video_title = null, edited_at = now(), edited_by = $2"
+                    " where section_id = $1 and video_url is not null",
+                    sid, admin["id"],
+                )
         bank.invalidate(section["quiz_id"])
         return {"updated": 0, "videoUrl": None, "videoTitle": None}
     try:
@@ -446,23 +518,40 @@ async def set_section_video(section_id: str, body: SectionVideoWrite, admin: dic
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     title = (body.videoTitle or "").strip()[:120] or section["heading"][:120]
-    await db.execute("update questions set video_url = null, video_title = null where section_id = $1", section_id)
-    targets = await db.fetch(
-        "select id from questions where section_id = $1 and status <> 'rejected' and kind = 'mcq'"
-        " order by pinned desc, created_at asc limit $2",
-        section_id, body.maxQuestions,
-    )
-    if not targets:
-        targets = await db.fetch(
-            "select id from questions where section_id = $1 and status <> 'rejected'"
-            " order by pinned desc, created_at asc limit $2",
-            section_id, body.maxQuestions,
-        )
-    for row in targets:
-        await db.execute(
-            "update questions set video_url = $2, video_title = $3 where id = $1",
-            row["id"], stored_url, title,
-        )
+    async with db.transaction() as tx:
+        if body.mode == "replace":
+            await tx.execute("update questions set video_url = null, video_title = null where section_id = $1", sid)
+            targets = await tx.fetch(
+                "select id from questions where section_id = $1 and status <> 'rejected' and kind = 'mcq'"
+                " order by pinned desc, created_at asc limit $2",
+                sid, body.maxQuestions,
+            )
+            if not targets:
+                targets = await tx.fetch(
+                    "select id from questions where section_id = $1 and status <> 'rejected'"
+                    " order by pinned desc, created_at asc limit $2",
+                    sid, body.maxQuestions,
+                )
+        else:
+            # Additive mode: never wipe unrelated clips already paired with other questions in this section.
+            targets = await tx.fetch(
+                "select id from questions where section_id = $1 and status <> 'rejected'"
+                " and (video_url is null or video_url = $2)"
+                " order by (video_url = $2) desc, (kind = 'mcq') desc, pinned desc, created_at asc limit $3",
+                sid, stored_url, body.maxQuestions,
+            )
+            if not targets:
+                targets = await tx.fetch(
+                    "select id from questions where section_id = $1 and status <> 'rejected'"
+                    " order by (kind = 'mcq') desc, pinned desc, created_at asc limit $2",
+                    sid, body.maxQuestions,
+                )
+        for row in targets:
+            await tx.execute(
+                "update questions set video_url = $2, video_title = $3, edited_at = now(), edited_by = $4, updated_at = now()"
+                " where id = $1",
+                row["id"], stored_url, title, admin["id"],
+            )
     bank.invalidate(section["quiz_id"])
     return {"updated": len(targets), "videoUrl": stored_url, "videoTitle": title}
 
@@ -472,7 +561,7 @@ async def set_section_video(section_id: str, body: SectionVideoWrite, admin: dic
 _QUESTION_COLUMNS = ("q.id, q.kind, q.source_type, q.skill, q.title, q.question_text, q.options, q.correct_index, q.is_true,"
                      " q.explanation, q.source_quote, q.video_url, q.video_title, q.difficulty, q.status, q.origin, q.pinned,"
                      " q.edited_at, q.flag_count, q.times_served, q.times_correct, q.quality, q.section_id, q.image_id,"
-                     " q.created_at")
+                     " q.reveal_image_id, q.created_at")
 
 
 def _question_view(row: dict) -> dict:
@@ -487,25 +576,35 @@ def _question_view(row: dict) -> dict:
             "accuracy": round(100 * row["times_correct"] / served) if served else None,
             "pulledReason": (row["quality"] or {}).get("pulled"), "sectionId": row["section_id"],
             "section": row.get("heading"), "imageId": row["image_id"],
-            "imageUrl": live._image_url(row["image_id"]) if row["image_id"] else None}
+            "imageUrl": live._image_url(row["image_id"]) if row["image_id"] else None,
+            "revealImageId": row.get("reveal_image_id"),
+            "revealImageUrl": live._image_url(row["reveal_image_id"]) if row.get("reveal_image_id") else None}
 
 
 @router.get("/quizzes/{quiz_id}/questions")
-async def list_questions(quiz_id: str, admin: dict = Depends(current_admin)) -> dict:
-    await _quiz(quiz_id)
+async def list_questions(quiz_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
+    qid = str(quiz_id)
+    await _quiz(qid)
     rows = await db.fetch(
         f"select {_QUESTION_COLUMNS}, s.heading from questions q left join doc_sections s on s.id = q.section_id"
         " left join documents d on d.id = s.document_id where q.quiz_id = $1"
-        " order by q.pinned desc, d.created_at nulls last, s.ordinal nulls last, q.kind desc, q.created_at", quiz_id)
+        " order by q.pinned desc, d.created_at nulls last, s.ordinal nulls last, q.kind desc, q.created_at", qid)
     flags = await db.fetch(
         "select f.question_id, f.reason, f.created_at from question_flags f join questions q on q.id = f.question_id"
-        " where q.quiz_id = $1 order by f.created_at desc", quiz_id)
+        " where q.quiz_id = $1 order by f.created_at desc", qid)
     reasons: dict[str, list[str]] = {}
     for flag in flags:
         if flag["reason"]:
             reasons.setdefault(flag["question_id"], []).append(flag["reason"])
     questions = [{**_question_view(r), "flagReasons": reasons.get(r["id"], [])} for r in rows]
-    images = await db.fetch("select id, caption, description from doc_images where quiz_id = $1 order by ordinal", quiz_id)
+    images = await db.fetch(
+        "select id, caption, description from doc_images"
+        " where quiz_id = $1 and (usable is not false"
+        "   or id in (select image_id from questions where quiz_id = $1 and image_id is not null"
+        "             union select reveal_image_id from questions where quiz_id = $1 and reveal_image_id is not null))"
+        " order by ordinal",
+        qid,
+    )
     return {"questions": questions,
             "images": [{"id": i["id"], "label": i["caption"] or i["description"] or "Picture",
                         "url": live._image_url(i["id"])} for i in images]}
@@ -524,6 +623,7 @@ class QuestionWrite(BaseModel):
     difficulty: Literal["easy", "medium", "hard"] = "medium"
     sectionId: str | None = None
     imageId: str | None = None
+    revealImageId: str | None = None
     pinned: bool = False
     status: Literal["pending", "approved", "rejected"] = "approved"
 
@@ -552,51 +652,67 @@ def _validated(body: QuestionWrite) -> dict:
 
 
 @router.post("/quizzes/{quiz_id}/questions")
-async def create_question(quiz_id: str, body: QuestionWrite, admin: dict = Depends(current_admin)) -> dict:
-    await _quiz(quiz_id)
+async def create_question(quiz_id: uuid.UUID, body: QuestionWrite, admin: dict = Depends(current_admin)) -> dict:
+    qid = str(quiz_id)
+    await _quiz(qid)
     shape = _validated(body)
+    section_id = _uuid_or_none(body.sectionId, "section")
+    image_id = _uuid_or_none(body.imageId, "picture")
+    reveal_image_id = _uuid_or_none(body.revealImageId, "reveal visual")
     document_id = None
-    if body.sectionId:
+    if section_id:
         document_id = await db.fetchval("select document_id from doc_sections where id = $1 and quiz_id = $2",
-                                        body.sectionId, quiz_id)
+                                        section_id, qid)
         if document_id is None:
             raise HTTPException(422, "That section does not belong to this quiz.")
-    if body.imageId and not await db.fetchval("select 1 from doc_images where id = $1 and quiz_id = $2", body.imageId, quiz_id):
+    if image_id and not await db.fetchval("select 1 from doc_images where id = $1 and quiz_id = $2", image_id, qid):
         raise HTTPException(422, "That picture does not belong to this quiz.")
+    if reveal_image_id and not await db.fetchval("select 1 from doc_images where id = $1 and quiz_id = $2", reveal_image_id, qid):
+        raise HTTPException(422, "That reveal visual does not belong to this quiz.")
+    if image_id:
+        reveal_image_id = None
     try:
         video_url = video.normalize_url(body.videoUrl)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     video_title = (body.videoTitle or "").strip()[:120] or None
     row = await db.fetchrow(
-        "insert into questions (quiz_id, document_id, section_id, image_id, kind, source_type, skill, title, question_text,"
-        " options, correct_index, is_true, explanation, video_url, video_title, difficulty, status, origin, pinned)"
-        " values ($1,$2,$3,$4,$5,$6,'recall',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'manual',$17) returning id",
-        quiz_id, document_id, body.sectionId, body.imageId, body.kind, "image" if body.imageId else "text",
+        "insert into questions (quiz_id, document_id, section_id, image_id, reveal_image_id, kind, source_type, skill,"
+        " title, question_text, options, correct_index, is_true, explanation, video_url, video_title, difficulty, status,"
+        " origin, pinned)"
+        " values ($1,$2,$3,$4,$5,$6,$7,'recall',$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'manual',$18) returning id",
+        qid, document_id, section_id, image_id, reveal_image_id, body.kind, "image" if image_id else "text",
         (body.title or "").strip() or None, body.text.strip(), shape["options"], shape["correct_index"],
         shape["is_true"], (body.explanation or "").strip() or None, video_url, video_title,
         body.difficulty, body.status, body.pinned)
-    bank.invalidate(quiz_id)
+    bank.invalidate(qid)
     return {"id": row["id"]}
 
 
 @router.patch("/questions/{question_id}")
-async def update_question(question_id: str, body: dict[str, Any], admin: dict = Depends(current_admin)) -> dict:
-    question = await db.fetchrow("select * from questions where id = $1", question_id)
+async def update_question(question_id: uuid.UUID, body: dict[str, Any], admin: dict = Depends(current_admin)) -> dict:
+    qid_str = str(question_id)
+    question = await db.fetchrow("select * from questions where id = $1", qid_str)
     if question is None:
         raise HTTPException(404, "Question not found.")
     changes: dict[str, Any] = {}
     content_changed = False
+    curated = False
     approving = body.get("status") == "approved"
     if "status" in body and body["status"] in ("pending", "approved", "rejected"):
         changes["status"] = body["status"]
+        if body["status"] == "rejected":
+            curated = True
         if approving:
             changes["flag_count"] = 0
             changes["quality"] = {k: v for k, v in (question["quality"] or {}).items() if k != "pulled"}
     if "pinned" in body:
         changes["pinned"] = bool(body["pinned"])
+        if changes["pinned"]:
+            curated = True
     if "difficulty" in body and body["difficulty"] in ("easy", "medium", "hard"):
         changes["difficulty"] = body["difficulty"]
+        curated = True
     if "sectionId" in body:
         section_id = _uuid_or_none(body["sectionId"], "section")
         if section_id:
@@ -606,6 +722,7 @@ async def update_question(question_id: str, body: dict[str, Any], admin: dict = 
                 raise HTTPException(422, "That section does not belong to this quiz.")
             changes["document_id"] = document_id
         changes["section_id"] = section_id
+        curated = True
     if "imageId" in body:
         image_id = _uuid_or_none(body["imageId"], "picture")
         if image_id and not await db.fetchval("select 1 from doc_images where id = $1 and quiz_id = $2",
@@ -613,17 +730,34 @@ async def update_question(question_id: str, body: dict[str, Any], admin: dict = 
             raise HTTPException(422, "That picture does not belong to this quiz.")
         changes["image_id"] = image_id
         changes["source_type"] = "image" if image_id else ("text" if question["source_type"] == "image" else question["source_type"])
+        if image_id:
+            changes["reveal_image_id"] = None
+            # Restoring a picture clears any stale "lost picture" pull reason.
+            if (question["quality"] or {}).get("pulled"):
+                changes["quality"] = {k: v for k, v in (question["quality"] or {}).items() if k != "pulled"}
+        curated = True
+    if "revealImageId" in body and "image_id" not in changes:
+        reveal_image_id = _uuid_or_none(body["revealImageId"], "reveal visual")
+        if reveal_image_id and not await db.fetchval("select 1 from doc_images where id = $1 and quiz_id = $2",
+                                                     reveal_image_id, question["quiz_id"]):
+            raise HTTPException(422, "That reveal visual does not belong to this quiz.")
+        changes["reveal_image_id"] = reveal_image_id
+        curated = True
     if "title" in body:
         changes["title"] = (str(body["title"] or "")).strip()[:60] or None
+        curated = True
     if "explanation" in body:
         changes["explanation"] = (str(body["explanation"] or "")).strip()[:500] or None
+        curated = True
     if "videoUrl" in body:
         try:
             changes["video_url"] = video.normalize_url(str(body["videoUrl"] or ""))
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+        curated = True
     if "videoTitle" in body:
         changes["video_title"] = (str(body["videoTitle"] or "")).strip()[:120] or None
+        curated = True
     if any(key in body for key in ("text", "options", "correctIndex", "isTrue")):
         try:
             merged = QuestionWrite(
@@ -639,23 +773,25 @@ async def update_question(question_id: str, body: dict[str, Any], admin: dict = 
         shape = _validated(merged)
         changes.update({"question_text": merged.text.strip(), **shape})
         content_changed = True
+        curated = True
     if not changes:
         return {"ok": True}
-    if content_changed:
+    if curated:
         changes["edited_at"] = datetime.now().astimezone()
         changes["edited_by"] = admin["id"]
+    if content_changed:
         changes["embedding"] = None
     columns = ", ".join(f"{name} = ${i}" for i, name in enumerate(changes, start=2))
-    await db.execute(f"update questions set {columns}, updated_at = now() where id = $1", question_id, *changes.values())
+    await db.execute(f"update questions set {columns}, updated_at = now() where id = $1", qid_str, *changes.values())
     if approving:
-        await db.execute("delete from question_flags where question_id = $1", question_id)   # dealt with: start clean
+        await db.execute("delete from question_flags where question_id = $1", qid_str)   # dealt with: start clean
     bank.invalidate(question["quiz_id"])
     return {"ok": True}
 
 
 @router.delete("/questions/{question_id}")
-async def delete_question(question_id: str, admin: dict = Depends(current_admin)) -> dict:
-    row = await db.fetchrow("delete from questions where id = $1 returning quiz_id", question_id)
+async def delete_question(question_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
+    row = await db.fetchrow("delete from questions where id = $1 returning quiz_id", str(question_id))
     if row:
         bank.invalidate(row["quiz_id"])
     return {"ok": True}
@@ -667,21 +803,29 @@ class BulkAction(BaseModel):
 
 
 @router.post("/quizzes/{quiz_id}/questions/bulk")
-async def bulk_questions(quiz_id: str, body: BulkAction, admin: dict = Depends(current_admin)) -> dict:
-    statement = {
-        "approve": "update questions set status = 'approved', flag_count = 0, updated_at = now(),"
-                   " quality = coalesce(quality, '{}'::jsonb) - 'pulled'",
-        "reject": "update questions set status = 'rejected', updated_at = now()",
-        "pin": "update questions set pinned = true",
-        "unpin": "update questions set pinned = false",
-        "delete": "delete from questions",
-    }[body.action]
+async def bulk_questions(quiz_id: uuid.UUID, body: BulkAction, admin: dict = Depends(current_admin)) -> dict:
+    qid = str(quiz_id)
     ids = [_uuid_or_none(value, "question") for value in body.ids]
-    result = await db.execute(f"{statement} where quiz_id = $1 and id = any($2::uuid[])", quiz_id, ids)
+    if body.action == "reject":
+        result = await db.execute(
+            "update questions set status = 'rejected', edited_at = now(), edited_by = $3, updated_at = now()"
+            " where quiz_id = $1 and id = any($2::uuid[])", qid, ids, admin["id"])
+    elif body.action == "pin":
+        result = await db.execute(
+            "update questions set pinned = true, edited_at = now(), edited_by = $3, updated_at = now()"
+            " where quiz_id = $1 and id = any($2::uuid[])", qid, ids, admin["id"])
+    else:
+        statement = {
+            "approve": "update questions set status = 'approved', flag_count = 0, updated_at = now(),"
+                       " quality = coalesce(quality, '{}'::jsonb) - 'pulled'",
+            "unpin": "update questions set pinned = false, updated_at = now()",
+            "delete": "delete from questions",
+        }[body.action]
+        result = await db.execute(f"{statement} where quiz_id = $1 and id = any($2::uuid[])", qid, ids)
     if body.action == "approve":
         await db.execute("delete from question_flags where question_id = any($1::uuid[])"
-                         " and question_id in (select id from questions where quiz_id = $2)", ids, quiz_id)
-    bank.invalidate(quiz_id)
+                         " and question_id in (select id from questions where quiz_id = $2)", ids, qid)
+    bank.invalidate(qid)
     return {"changed": int(result.split()[-1])}
 
 
@@ -699,13 +843,15 @@ class Suggestion(BaseModel):
 
 
 @router.post("/quizzes/{quiz_id}/questions/suggest")
-async def suggest(quiz_id: str, body: SuggestRequest, request: Request, admin: dict = Depends(current_admin)) -> dict:
+async def suggest(quiz_id: uuid.UUID, body: SuggestRequest, request: Request, admin: dict = Depends(current_admin)) -> dict:
     """Help with a hand-written question: propose wrong answers and sanity-check it against the report."""
     throttle(request, "suggest", 40)
-    await _quiz(quiz_id)
+    qid = str(quiz_id)
+    await _quiz(qid)
+    section_id = _uuid_or_none(body.sectionId, "section")
     passages = await db.fetch(
         "select chunk_text from doc_chunks where quiz_id = $1 and ($2::uuid is null or section_id = $2)"
-        " order by ordinal limit 14", quiz_id, body.sectionId)
+        " order by ordinal limit 14", qid, section_id)
     context = "\n\n".join(p["chunk_text"] for p in passages)[:9000] or "(no report text available)"
     try:
         result = await llm.parse(
@@ -717,18 +863,30 @@ async def suggest(quiz_id: str, body: SuggestRequest, request: Request, admin: d
                     "question is ambiguous, say so in 'concern'; otherwise leave 'concern' empty."),
             user=f"REPORT EXCERPTS\n{context}\n\nQUESTION: {body.text}\nCORRECT ANSWER: {body.correctAnswer}")
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"The AI service could not help just now ({exc}).") from exc
+        log.exception("question suggest failed for quiz=%s", qid)
+        raise HTTPException(502, "The AI service could not suggest answers right now. Please try again.") from exc
     return {"wrongAnswers": [w.strip() for w in result.wrong_answers][:3], "title": result.title.strip(),
             "explanation": result.explanation.strip(), "concern": result.concern.strip()}
 
 
 @router.post("/quizzes/{quiz_id}/questions/generate")
-async def generate_more(quiz_id: str, admin: dict = Depends(current_admin)) -> dict:
-    await _quiz(quiz_id)
-    documents = await db.fetch("select id from documents where quiz_id = $1 and status = 'ready'", quiz_id)
-    if not documents:
+async def generate_more(quiz_id: uuid.UUID, request: Request, admin: dict = Depends(current_admin)) -> dict:
+    throttle(request, "generate-more", 10)
+    qid = str(quiz_id)
+    await _quiz(qid)
+    claimed = await db.fetch(
+        "update documents set stage = 'writing', heartbeat_at = now()"
+        " where quiz_id = $1 and status = 'ready'"
+        " and (stage is null or coalesce(heartbeat_at, created_at) < now() - interval '10 minutes')"
+        " returning id",
+        qid,
+    )
+    if not claimed:
+        has_ready = await db.fetchval("select 1 from documents where quiz_id = $1 and status = 'ready'", qid)
+        if has_ready:
+            raise HTTPException(409, "Questions are already being written for this report.")
         raise HTTPException(409, "Upload a report first.")
-    for document in documents:
+    for document in claimed:
         pipeline.start_more_questions(document["id"])
     return {"ok": True, "message": "Writing more questions in the background."}
 
@@ -736,39 +894,47 @@ async def generate_more(quiz_id: str, admin: dict = Depends(current_admin)) -> d
 # --------------------------------------------------------------------------- results
 
 @router.get("/quizzes/{quiz_id}/results")
-async def results(quiz_id: str, admin: dict = Depends(current_admin)) -> dict:
-    quiz = await _quiz(quiz_id)
+async def results(quiz_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
+    qid = str(quiz_id)
+    quiz = await _quiz(qid)
     rules = await settings_store.quiz_rules(quiz)
     people = await stats.participants(quiz, rules)
-    boards = {mode: await stats.leaderboard(quiz_id, mode, limit=10) for mode in rules["modes"]}
-    feedback = await db.fetchrow("select round(avg(stars), 1) as average, count(*) as count from feedback where quiz_id = $1", quiz_id)
+    boards = {mode: await stats.leaderboard(qid, mode, limit=10) for mode in rules["modes"]}
+    feedback = await db.fetchrow("select round(avg(stars), 1) as average, count(*) as count from feedback where quiz_id = $1", qid)
     comments = await db.fetch("select stars, comment, created_at from feedback where quiz_id = $1 and comment is not null"
-                              " and comment <> '' order by created_at desc limit 20", quiz_id)
+                              " and comment <> '' order by created_at desc limit 20", qid)
     return {"participants": people, "ready": sum(1 for p in people if p["ready"]), "threshold": rules["ready_threshold"],
-            "leaderboards": boards, "insights": await stats.insights(quiz_id),
+            "leaderboards": boards, "insights": await stats.insights(qid),
             "feedback": {"average": float(feedback["average"]) if feedback["average"] is not None else None,
                          "count": feedback["count"], "comments": comments}}
 
 
 @router.get("/quizzes/{quiz_id}/results.csv")
-async def results_csv(quiz_id: str, admin: dict = Depends(current_admin)) -> Response:
-    quiz = await _quiz(quiz_id)
+async def results_csv(quiz_id: uuid.UUID, admin: dict = Depends(current_admin)) -> Response:
+    qid = str(quiz_id)
+    quiz = await _quiz(qid)
     body = await stats.participants_csv(quiz, await settings_store.quiz_rules(quiz))
     return Response(body, media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="{quiz["slug"]}-results.csv"'})
 
 
 @router.post("/quizzes/{quiz_id}/reset-results")
-async def reset_results(quiz_id: str, admin: dict = Depends(current_admin)) -> dict:
-    """Clear solo runs, live sessions, leaderboards and feedback for a quiz (e.g. after admin play-testing),
+async def reset_results(quiz_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
+    """Clear solo runs, live sessions, leaderboards, flags and feedback for a quiz (e.g. after admin play-testing),
     leaving the uploaded report, sections and questions untouched."""
-    await _quiz(quiz_id)
+    qid = str(quiz_id)
+    await _quiz(qid)
     async with db.transaction() as tx:
-        await tx.execute("delete from feedback where quiz_id = $1", quiz_id)
-        await tx.execute("delete from runs where quiz_id = $1", quiz_id)
-        await tx.execute("delete from live_sessions where quiz_id = $1", quiz_id)
-        await tx.execute("update questions set times_served = 0, times_correct = 0 where quiz_id = $1", quiz_id)
-    bank.invalidate(quiz_id)
+        await tx.execute("delete from feedback where quiz_id = $1", qid)
+        await tx.execute("delete from runs where quiz_id = $1", qid)
+        await tx.execute("delete from live_sessions where quiz_id = $1", qid)
+        await tx.execute("delete from question_flags where question_id in (select id from questions where quiz_id = $1)", qid)
+        await tx.execute(
+            "update questions set times_served = 0, times_correct = 0, flag_count = 0,"
+            " quality = coalesce(quality, '{}'::jsonb) - 'pulled' where quiz_id = $1",
+            qid,
+        )
+    bank.invalidate(qid)
     return {"ok": True}
 
 
@@ -779,8 +945,9 @@ class LiveCreate(BaseModel):
 
 
 @router.post("/quizzes/{quiz_id}/live")
-async def start_live(quiz_id: str, body: LiveCreate, admin: dict = Depends(current_admin)) -> dict:
-    quiz = await _quiz(quiz_id)
+async def start_live(quiz_id: uuid.UUID, body: LiveCreate, admin: dict = Depends(current_admin)) -> dict:
+    qid = str(quiz_id)
+    quiz = await _quiz(qid)
     try:
         return await live.create_session(quiz, await settings_store.quiz_rules(quiz), body.decade)
     except live.LiveError as exc:
@@ -788,26 +955,26 @@ async def start_live(quiz_id: str, body: LiveCreate, admin: dict = Depends(curre
 
 
 @router.get("/quizzes/{quiz_id}/live")
-async def list_live(quiz_id: str, admin: dict = Depends(current_admin)) -> dict:
+async def list_live(quiz_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
     sessions = await db.fetch(
         "select s.id, s.code, s.status, s.created_at, s.finished_at, jsonb_array_length(s.items) as questions,"
         " (select count(*) from live_participants p where p.session_id = s.id) as players from live_sessions s"
-        " where s.quiz_id = $1 order by s.created_at desc limit 20", quiz_id)
+        " where s.quiz_id = $1 order by s.created_at desc limit 20", str(quiz_id))
     return {"sessions": sessions}
 
 
 @router.post("/live/{session_id}/reclaim")
-async def reclaim_live(session_id: str, admin: dict = Depends(current_admin)) -> dict:
+async def reclaim_live(session_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
     try:
-        return await live.reclaim_session(session_id)
+        return await live.reclaim_session(str(session_id))
     except live.LiveError as exc:
         raise HTTPException(exc.status, str(exc)) from exc
 
 
 @router.get("/live/{session_id}/results")
-async def live_results(session_id: str, admin: dict = Depends(current_admin)) -> dict:
+async def live_results(session_id: uuid.UUID, admin: dict = Depends(current_admin)) -> dict:
     standings = await db.fetch(
         "select lp.display_name as name, p.email, lp.team, lp.score, lp.correct_count, lp.head_start"
         " from live_participants lp join players p on p.id = lp.player_id where lp.session_id = $1"
-        " order by lp.score desc", session_id)
+        " order by lp.score desc", str(session_id))
     return {"standings": standings}

@@ -131,11 +131,21 @@ def evaluate_report_accuracy(correct: int, answered: int) -> dict[str, Any]:
     }
 
 
-def evaluate_sudden_death(correct: int, answered: int, strikes: int, max_strikes: int) -> dict[str, Any]:
+def evaluate_sudden_death(
+    correct: int,
+    answered: int,
+    strikes: int,
+    max_strikes: int,
+    *,
+    cleared_bank: bool | None = None,
+) -> dict[str, Any]:
     """Survival-based rating for Sudden Death (avoids the 3-strike accuracy ceiling)."""
-    cleared_bank = answered >= 3 and strikes < max_strikes and (correct == answered or correct >= 10)
+    if cleared_bank is None:
+        cleared = answered >= 10 and strikes < max_strikes and correct >= 10
+    else:
+        cleared = bool(cleared_bank) and strikes < max_strikes and answered >= 3
     chosen_idx = len(SUDDEN_DEATH_TIERS) - 1
-    if cleared_bank:
+    if cleared:
         chosen_idx = 0
     else:
         for idx, (floor_correct, *_rest) in enumerate(SUDDEN_DEATH_TIERS):
@@ -219,10 +229,16 @@ def evaluate_jukebox(music_correct: int, music_answered: int) -> dict[str, Any]:
     }
 
 
-def evaluate_run(run: dict[str, Any], rules: dict[str, Any], *, status: str | None = None) -> dict[str, Any]:
+def evaluate_run(
+    run: dict[str, Any],
+    rules: dict[str, Any],
+    *,
+    status: str | None = None,
+    cleared_bank: bool | None = None,
+) -> dict[str, Any]:
     """Compute the full rating metadata for a finished (or finishing) run."""
     run_status = status or run.get("status") or "completed"
-    if run_status == "abandoned":
+    if run_status != "completed":
         return dict(WARMUP_ONLY)
     mode = run.get("mode", "show")
     if mode == "jukebox":
@@ -231,7 +247,9 @@ def evaluate_run(run: dict[str, Any], rules: dict[str, Any], *, status: str | No
     answered = int(run.get("report_answered") or 0)
     if mode == "sudden_death":
         max_strikes = int((rules.get("sudden_death") or {}).get("strikes", 3))
-        return evaluate_sudden_death(correct, answered, int(run.get("strikes") or 0), max_strikes)
+        return evaluate_sudden_death(
+            correct, answered, int(run.get("strikes") or 0), max_strikes, cleared_bank=cleared_bank,
+        )
     if mode == "speed":
         clock_sec = int((rules.get("speed") or {}).get("clock_sec", 90))
         return evaluate_speed(correct, answered, clock_sec)

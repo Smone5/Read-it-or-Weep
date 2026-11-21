@@ -53,6 +53,7 @@ class StatementDraft(BaseModel):
     is_true: bool
     source_quote: str
     explanation: str = Field(description="One sentence giving the true fact")
+    difficulty: Difficulty = "medium"
 
 
 class PassageDrafts(BaseModel):
@@ -203,10 +204,11 @@ If it is informative, describe it in one or two sentences (this becomes its alt 
 - source_quote: say where in the picture the answer is read from, e.g. "The Southwest bar is labelled 52.6".
 - explanation: one sentence stating the answer and what it means in the report.
 - skill: "understanding" when it needs comparing or interpreting, otherwise "recall".
+- difficulty: "easy" for the obvious headline/largest/smallest bar or single prominent label, "medium" for a clear comparison or trend, "hard" for multi-series synthesis or subtle contrast.
 
 If it is not informative, set informative to false and return no questions."""
 
-IMAGE_CHECKER_SYSTEM = """You are the quality checker for a picture round in a quiz about a report. You are shown the picture and candidate questions WITHOUT the answer key. Answer each from the picture alone.
+IMAGE_CHECKER_SYSTEM = """You are the quality checker for a picture round in a quiz about a report. You are shown the picture (plus its caption when available) and candidate questions WITHOUT the answer key. Answer each from the picture and caption alone.
 
 - answer_index: the 0-based index of the option the picture supports, or -1 if none is clearly supported.
 - problems: list any that apply
@@ -426,7 +428,7 @@ async def _questions_for_chunk(document: StructuredDocument, index: int, embeddi
             kind="fact_fake", source_type=source_type, chunk_index=index, section_index=chunk.section,
             question_text=statement.statement.strip(), is_true=statement.is_true,
             explanation=statement.explanation.strip(), source_quote=statement.source_quote.strip()[:400],
-            difficulty="medium", quality={"checked": True}))
+            difficulty=statement.difficulty, quality={"checked": True}))
     return ready
 
 
@@ -437,8 +439,10 @@ async def _questions_for_image(document: StructuredDocument, image: ImageItem, r
     drafts = await llm.parse(model=config.model_vision, system=IMAGE_WRITER_SYSTEM,
                              user=[llm.text_part(intro), picture], schema=ImageDrafts,
                              effort="low", max_output_tokens=4000)
-    if not drafts.informative or not drafts.questions:
+    if not drafts.informative:
         return [], (drafts.kind, drafts.description.strip(), False)
+    if not drafts.questions:
+        return [], (drafts.kind, drafts.description.strip(), True)
     report.drafted += len(drafts.questions)
     mcqs: list[tuple[MCQDraft, list[str], int]] = []
     for draft in drafts.questions[:3]:
@@ -448,9 +452,11 @@ async def _questions_for_image(document: StructuredDocument, image: ImageItem, r
         else:
             mcqs.append((draft, *_shuffle(draft)))
     if not mcqs:
-        return [], (drafts.kind, drafts.description.strip(), False)
+        # Still mark informative visuals usable=True so Answer Reveal matching can use them.
+        return [], (drafts.kind, drafts.description.strip(), True)
+    caption_prefix = f"Caption: {image.caption}\n\n" if image.caption else ""
     check = await llm.parse(model=config.model_vision, system=IMAGE_CHECKER_SYSTEM,
-                            user=[llm.text_part(_present(mcqs, [])), picture], schema=CheckResult,
+                            user=[llm.text_part(caption_prefix + _present(mcqs, [])), picture], schema=CheckResult,
                             effort="low", max_output_tokens=2000)
     ready = [ReadyQuestion(
         kind="mcq", source_type="image", image_index=image.ordinal, section_index=image.section,
@@ -459,7 +465,7 @@ async def _questions_for_image(document: StructuredDocument, image: ImageItem, r
         explanation=draft.explanation.strip(), source_quote=draft.source_quote.strip()[:400],
         skill=draft.skill, difficulty=draft.difficulty, quality=quality)
         for draft, quality in _accept_mcqs(mcqs, check.questions, report)]
-    return ready, (drafts.kind, drafts.description.strip(), bool(ready))
+    return ready, (drafts.kind, drafts.description.strip(), True)
 
 
 def _dedupe(questions: list[ReadyQuestion], existing: np.ndarray | None, report: GenerationReport,
@@ -573,18 +579,18 @@ _REVEAL_MATCH_SYSTEM = """You decide whether a visual (chart, map, or diagram) s
 
 Be VERY strict: showing a loosely related chart is confusing and much worse than showing NO image at all (0).
 Return an image_number (1..N) ONLY if that image DIRECTLY depicts, plots, labels, or proves the EXACT fact or concept asked in the question and its answer.
-Return 0 (NONE) if the image only shares a person's name, team, section, or broad topic without actually showing the answer.
+Return 0 (NONE) if the image only shares a person's name, entity, section, or broad topic without actually showing the answer.
 
 Examples:
-- Question: "What was Terrell Davis's famous touchdown celebration called?" Answer: "The Mile High Salute" | Image: "Bar chart of Super Bowl scores & MVPs (MVP: Terrell Davis)" -> 0 (the chart shows scores, NOT his celebration).
-- Question: "What does Thunder the mascot do after touchdowns?" Answer: "Gallops across the field" | Image: "Bar chart of Super Bowl scores" -> 0.
-- Question: "Where did Denver start 'The Drive'?" Answer: "Own 2-yard line" | Image: "Field diagram of The Drive showing START at Own 2-Yd Line -> 98 yards -> TD" -> MATCH.
-- Question: "How many points did Denver score in 2013?" Answer: "606 points" | Image: "Bar chart of Historic Denver Offenses showing 2013: 606 pts" -> MATCH.
+- Question: "What nickname did the CEO use for the annual retreat?" Answer: "Camp Northstar" | Image: "Bar chart of annual revenue by region" -> 0 (the chart plots revenue, NOT the retreat nickname).
+- Question: "Which safety rule applies near the loading dock?" Answer: "Wear high-visibility vests" | Image: "Timeline of factory openings" -> 0.
+- Question: "Which region led Q3 revenue?" Answer: "Southwest at $52.6M" | Image: "Bar chart of Q3 revenue by region showing Southwest: $52.6M" -> MATCH.
+- Question: "Where did the mission enter lunar orbit?" Answer: "Far side of the Moon" | Image: "Diagram of Earth-to-Moon trajectory labeling Lunar Orbit Insertion on the far side" -> MATCH.
 
 Evaluate every numbered question."""
 
 
-async def match_reveal_images(questions: list[dict], images: list[dict]) -> dict[str, str]:
+async def match_reveal_images(questions: list[dict], images: list[dict], *, batch_size: int = 18) -> dict[str, str]:
     """Return {question_id: image_id} for text/table MCQs whose answer is directly illustrated by an image."""
     if not questions or not images:
         return {}
@@ -592,27 +598,98 @@ async def match_reveal_images(questions: list[dict], images: list[dict]) -> dict
     for idx, img in enumerate(images, start=1):
         label = " — ".join(filter(None, [img.get("caption"), img.get("description")]))
         img_lines.append(f"IMAGE {idx}: {label[:350]}")
-    q_lines = []
-    for idx, q in enumerate(questions, start=1):
-        ans = q["options"][q["correct_index"]] if q.get("options") and q.get("correct_index") is not None else ""
-        q_lines.append(f"Q{idx}: {q['question_text']} | Answer: {ans}")
+    visuals_block = "AVAILABLE VISUALS:\n" + "\n".join(img_lines)
 
-    user_prompt = "AVAILABLE VISUALS:\n" + "\n".join(img_lines) + "\n\nQUESTIONS:\n" + "\n".join(q_lines)
+    matched: dict[str, str] = {}
+    for start in range(0, len(questions), batch_size):
+        batch = questions[start:start + batch_size]
+        q_lines = []
+        for idx, q in enumerate(batch, start=1):
+            ans = q["options"][q["correct_index"]] if q.get("options") and q.get("correct_index") is not None else ""
+            parts = [f"Q{idx}: {q['question_text']} | Answer: {ans}"]
+            if q.get("heading"):
+                parts.append(f"Section: {q['heading']}")
+            if q.get("explanation"):
+                parts.append(f"Note: {str(q['explanation'])[:160]}")
+            elif q.get("source_quote"):
+                parts.append(f"Quote: {str(q['source_quote'])[:160]}")
+            q_lines.append(" | ".join(parts))
+
+        user_prompt = visuals_block + "\n\nQUESTIONS:\n" + "\n".join(q_lines)
+        try:
+            result = await llm.parse(
+                model=config.model_fast,
+                system=_REVEAL_MATCH_SYSTEM,
+                user=user_prompt,
+                schema=RevealImageBatch,
+                effort="low",
+                max_output_tokens=2000,
+            )
+        except Exception as exc:
+            log.warning("could not match reveal images (batch %d): %s", start // batch_size + 1, exc)
+            continue
+
+        for pick in result.picks:
+            if 1 <= pick.question_number <= len(batch) and 1 <= pick.image_number <= len(images):
+                matched[batch[pick.question_number - 1]["id"]] = images[pick.image_number - 1]["id"]
+    return matched
+
+
+class VideoMatchPick(BaseModel):
+    clip_number: int
+    question_numbers: list[int] = Field(description="Up to 2 1-based question numbers that best match this video clip (empty list if none fit).")
+
+
+class VideoMatchBatch(BaseModel):
+    picks: list[VideoMatchPick]
+
+
+_VIDEO_MATCH_SYSTEM = """You match YouTube video clips found in a document section to the 1 or 2 multiple-choice questions from that section that the video clip best illustrates as an Answer Reveal bonus.
+
+Rules:
+- Prefer questions whose exact event, moment, person, or concept matches the video title.
+- Assign at most 2 questions per clip, and do not assign the same question to multiple clips.
+- If a clip does not match any question well, return an empty list for that clip."""
+
+
+async def match_section_videos(questions: list[dict], clips: list[dict]) -> dict[str, dict]:
+    """Return {question_id: clip_dict} pairing each section's YouTube clips to its most relevant MCQs."""
+    if not questions or not clips:
+        return {}
+    clip_lines = [f"CLIP {i}: {c['title']}" for i, c in enumerate(clips, start=1)]
+    q_lines = []
+    for i, q in enumerate(questions, start=1):
+        ans = q["options"][q["correct_index"]] if q.get("options") and q.get("correct_index") is not None else ""
+        q_lines.append(f"Q{i}: {q['question_text']} | Answer: {ans}")
     try:
         result = await llm.parse(
             model=config.model_fast,
-            system=_REVEAL_MATCH_SYSTEM,
-            user=user_prompt,
-            schema=RevealImageBatch,
+            system=_VIDEO_MATCH_SYSTEM,
+            user="CLIPS:\n" + "\n".join(clip_lines) + "\n\nQUESTIONS:\n" + "\n".join(q_lines),
+            schema=VideoMatchBatch,
             effort="low",
-            max_output_tokens=800,
+            max_output_tokens=1000,
         )
     except Exception as exc:
-        log.warning("could not match reveal images: %s", exc)
-        return {}
+        log.warning("video semantic matching failed (%s); falling back to order", exc)
+        out: dict[str, dict] = {}
+        idx = 0
+        for clip in clips:
+            for q in questions[idx:idx + 2]:
+                out[q["id"]] = clip
+            idx += 2
+        return out
 
-    matched: dict[str, str] = {}
+    matched: dict[str, dict] = {}
     for pick in result.picks:
-        if 1 <= pick.question_number <= len(questions) and 1 <= pick.image_number <= len(images):
-            matched[questions[pick.question_number - 1]["id"]] = images[pick.image_number - 1]["id"]
+        if not (1 <= pick.clip_number <= len(clips)):
+            continue
+        clip = clips[pick.clip_number - 1]
+        assigned = 0
+        for q_num in pick.question_numbers:
+            if 1 <= q_num <= len(questions) and assigned < 2:
+                qid = questions[q_num - 1]["id"]
+                if qid not in matched:
+                    matched[qid] = clip
+                    assigned += 1
     return matched

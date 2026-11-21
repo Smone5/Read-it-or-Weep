@@ -23,7 +23,7 @@ from typing import Any
 import db
 from config import config
 from security import hash_key, key_matches, new_host_key, new_join_code, sign_media
-from services import bank, music_service, stats
+from services import bank, music_service, stats, video
 
 OPEN_BEAT_SEC = 1.0        # between "open" and the phones unlocking: long enough for every phone to hear of it
 MAX_LEAD_IN_SEC = 26       # however long the question, it opens by itself after this
@@ -53,7 +53,7 @@ def _image_url(image_id: str) -> str:
 # --------------------------------------------------------------------------- creating
 
 async def _line_up(quiz: dict, rules: dict, count: int, music_rounds: int, decade: str | None) -> list[dict]:
-    """Choose the questions: must-asks first, then what the group found hardest in the pre-read, then fresh ones."""
+    """Choose a balanced easy -> medium -> hard deck: must-asks first, stratified by difficulty."""
     questions = [q for q in await bank.approved(quiz["id"], rules["question_sources"]) if q["kind"] == "mcq"]
     if len(questions) < 3:
         raise LiveError("This quiz needs at least three approved questions before a live game can start.", 409)
@@ -66,21 +66,60 @@ async def _line_up(quiz: dict, rules: dict, count: int, music_rounds: int, decad
         return (not question["pinned"], accuracy + random.random() * 0.25)
 
     chosen: list[dict] = []
+    chosen_ids: set[str] = set()
     per_section: dict[str, int] = {}
     pictures = 0
-    for question in sorted(questions, key=priority):
-        if len(chosen) >= count:
-            break
-        if per_section.get(question["section_id"], 0) >= max(2, count // 4) and not question["pinned"]:
-            continue
+
+    def _can_take(question: dict, relax_section: bool = False) -> bool:
+        if question["id"] in chosen_ids:
+            return False
+        if not relax_section and per_section.get(question["section_id"], 0) >= max(2, count // 4) and not question["pinned"]:
+            return False
         if not question["pinned"] and any(bank.same_fact(bank.key_terms(question), bank.key_terms(other)) for other in chosen):
-            continue                                # the room has already been asked this, in other words
+            return False
+        if question["source_type"] == "image" and pictures >= 4:
+            return False
+        return True
+
+    def _take(question: dict) -> None:
+        nonlocal pictures
         if question["source_type"] == "image":
-            if pictures >= 4:
-                continue
             pictures += 1
         per_section[question["section_id"]] = per_section.get(question["section_id"], 0) + 1
+        chosen_ids.add(question["id"])
         chosen.append(question)
+
+    # 1) Pinned must-asks always make the deck first.
+    for q in sorted([q for q in questions if q["pinned"]], key=priority):
+        if len(chosen) >= count:
+            break
+        if _can_take(q):
+            _take(q)
+
+    # 2) Stratified easy (~30%) / medium (~50%) / hard (~20%) quotas so live rooms ramp smoothly instead of picking the 10 hardest Qs.
+    remaining = max(0, count - len(chosen))
+    quotas = {
+        "easy": max(1, round(remaining * 0.30)) if remaining >= 3 else remaining,
+        "medium": max(1, round(remaining * 0.50)) if remaining >= 3 else 0,
+        "hard": max(0, remaining - max(1, round(remaining * 0.30)) - max(1, round(remaining * 0.50))) if remaining >= 3 else 0,
+    }
+    for diff, quota in quotas.items():
+        taken = 0
+        for q in sorted([q for q in questions if q["difficulty"] == diff], key=priority):
+            if taken >= quota or len(chosen) >= count:
+                break
+            if _can_take(q):
+                _take(q)
+                taken += 1
+
+    # 3) Fill any leftover slots from any difficulty (relaxing section cap only if needed).
+    for relax in (False, True):
+        for q in sorted(questions, key=priority):
+            if len(chosen) >= count:
+                break
+            if _can_take(q, relax_section=relax):
+                _take(q)
+
     random.shuffle(chosen)
     chosen.sort(key=lambda q: {"easy": 0, "medium": 1, "hard": 2}[q["difficulty"]])
 
@@ -88,12 +127,16 @@ async def _line_up(quiz: dict, rules: dict, count: int, music_rounds: int, decad
     timer = int(rules["live"]["timer_sec"])
     items: list[dict] = []
     for question in chosen:
-        order = list(range(4))
+        order = list(range(len(question["options"])))
         random.shuffle(order)
         items.append({
             "kind": "mcq", "question_id": question["id"], "title": question["title"], "text": question["question_text"],
             "options": [question["options"][i] for i in order], "correct_index": order.index(question["correct_index"]),
-            "image_id": question["image_id"], "explanation": question["explanation"],
+            "image_id": question["image_id"],
+            "reveal_image_id": question.get("reveal_image_id"),
+            "video_url": question.get("video_url"),
+            "video_title": question.get("video_title"),
+            "explanation": question["explanation"],
             "source_quote": question["source_quote"] if question["source_type"] != "image" else None,
             "section": headings.get(question["section_id"]), "limit": timer + (10 if question["image_id"] else 0),
         })
@@ -133,8 +176,15 @@ async def create_session(quiz: dict, rules: dict, decade: str | None = None) -> 
     session = await db.fetchrow(
         "insert into live_sessions (quiz_id, code, host_key_hash, settings, items) values ($1,$2,$3,$4,$5) returning *",
         quiz["id"], code, hash_key(host_key),
-        {"timer_sec": int(cfg["timer_sec"]), "head_start": int(cfg["head_start"]), "decade": decade,
-         "ready_threshold": int(rules["ready_threshold"]), "after_party": after_party and bool(decade)}, items)
+        {
+            "timer_sec": int(cfg["timer_sec"]),
+            "head_start": int(cfg["head_start"]),
+            "decade": decade,
+            "ready_threshold": int(rules["ready_threshold"]),
+            "after_party": after_party and bool(decade),
+            "unlisted": bool(rules.get("unlisted", False)),
+            "leaderboard": bool(rules.get("leaderboard", True)),
+        }, items)
     base = config.web_base_url or config.public_base_url
     return {"code": session["code"], "hostKey": host_key, "questions": len(items),
             "hostUrl": f"{base}/host/{session['code']}#k={host_key}", "joinUrl": f"{base}/live/{session['code']}"}
@@ -150,6 +200,7 @@ async def reclaim_session(session_id: str) -> dict:
     host_key = new_host_key()
     await db.execute("update live_sessions set host_key_hash = $2 where id = $1", session["id"], hash_key(host_key))
     _recent.pop(session["code"], None)
+    _public_snap.pop(session["id"], None)
     base = config.web_base_url or config.public_base_url
     return {"code": session["code"], "hostKey": host_key,
             "hostUrl": f"{base}/host/{session['code']}#k={host_key}", "joinUrl": f"{base}/live/{session['code']}"}
@@ -158,22 +209,31 @@ async def reclaim_session(session_id: str) -> dict:
 # --------------------------------------------------------------------------- loading + transitions
 
 _recent: dict[str, tuple[float, dict]] = {}
+_public_snap: dict[str, tuple[int, float, dict[str, Any]]] = {}
 
 
 async def load(code: str, fresh: bool = False) -> dict:
     code = (code or "").strip().upper()
     cached = _recent.get(code)
-    if not fresh and cached and time.monotonic() - cached[0] < 0.4:
+    if not fresh and cached and time.monotonic() - cached[0] < 0.8:
         return cached[1]
     session = await db.fetchrow("select * from live_sessions where code = $1", code)
     if session is None:
         raise LiveError("No live game with that code.", 404)
     _recent[code] = (time.monotonic(), session)
+    while len(_recent) > 500:
+        _recent.pop(next(iter(_recent)))
     return session
 
 
 def is_host(session: dict, key: str | None) -> bool:
     return bool(key) and key_matches(key, session["host_key_hash"])
+
+
+async def is_participant(session_id: str, player_id: str) -> bool:
+    return bool(await db.fetchval(
+        "select 1 from live_participants where session_id = $1 and player_id = $2", session_id, player_id,
+    ))
 
 
 async def _move(session: dict, **changes: Any) -> dict:
@@ -183,7 +243,23 @@ async def _move(session: dict, **changes: Any) -> dict:
         f"update live_sessions set {columns}, version = version + 1 where id = $1 and version = $2 returning *",
         session["id"], session["version"], *changes.values())
     _recent.pop(session["code"], None)
+    _public_snap.pop(session["id"], None)
     return row or await load(session["code"], fresh=True)
+
+
+async def _reveal_question(session: dict) -> dict:
+    """Move a question to reveal and reset streaks for anyone who sat the question out."""
+    prior_version = session["version"]
+    q_index = session["current_index"]
+    updated = await _move(session, status="reveal", phase_started_at=_now(), phase_ends_at=None)
+    if updated["version"] > prior_version and updated["status"] == "reveal" and q_index >= 0:
+        await db.execute(
+            "update live_participants set streak = 0 where session_id = $1"
+            " and id not in (select participant_id from live_answers where session_id = $1 and question_index = $2)",
+            session["id"], q_index,
+        )
+        _public_snap.pop(session["id"], None)
+    return updated
 
 
 def _lead_in(item: dict) -> float:
@@ -215,11 +291,11 @@ async def tick(session: dict) -> dict:
     if session["status"] != "question":
         return session
     if _now() >= session["phase_ends_at"]:
-        return await _move(session, status="reveal", phase_started_at=_now(), phase_ends_at=None)
+        return await _reveal_question(session)
     if _now() >= session["phase_started_at"]:
         answered, joined = await _answer_counts(session)
         if joined and answered >= joined:
-            return await _move(session, status="reveal", phase_started_at=_now(), phase_ends_at=None)
+            return await _reveal_question(session)
     return session
 
 
@@ -233,7 +309,7 @@ async def _answer_counts(session: dict) -> tuple[int, int]:
     shared for a moment rather than counted afresh for each of them.
     """
     cached = _counts.get(session["id"])
-    if cached and cached[1] == session["current_index"] and time.monotonic() - cached[0] < 0.3:
+    if cached and cached[1] == session["current_index"] and time.monotonic() - cached[0] < 0.8:
         return cached[2]
     counts = await _count_answers(session)
     _counts[session["id"]] = (time.monotonic(), session["current_index"], counts)
@@ -261,7 +337,7 @@ async def control(session: dict, action: str) -> dict:
         if status == "lobby":
             return await _start_question(session, 0)
         if status == "question":
-            return await _move(session, status="reveal", phase_started_at=_now(), phase_ends_at=None)
+            return await _reveal_question(session)
         if status == "reveal":
             return await _move(session, status="scoreboard", phase_started_at=_now(), phase_ends_at=None)
         if status == "scoreboard":
@@ -292,6 +368,7 @@ async def join(session: dict, player: dict) -> dict:
     await db.execute("update live_sessions set version = version + 1 where id = $1", session["id"])
     _recent.pop(session["code"], None)
     _counts.pop(session["id"], None)
+    _public_snap.pop(session["id"], None)
     return participant
 
 
@@ -301,11 +378,7 @@ async def answer(session: dict, player: dict, choice: int) -> dict:
         raise LiveError("Too late – that question has closed.", 409)
     now = _now()
     if now < session["phase_started_at"]:
-        raise LiveError("Not open yet.", 409)
-    participant = await db.fetchrow("select * from live_participants where session_id = $1 and player_id = $2",
-                                    session["id"], player["id"])
-    if participant is None:
-        raise LiveError("Join the game first.", 403)
+        raise LiveError("Not open yet.", 425)
     index = session["current_index"]
     item = session["items"][index]
     if not (0 <= choice < len(item["options"])):
@@ -314,17 +387,25 @@ async def answer(session: dict, player: dict, choice: int) -> dict:
     fraction = max(0.0, min(1.0, 1 - elapsed / max(1, int(item["limit"]))))
     correct = choice == item["correct_index"]
     mult = 2 if is_double_points(index, len(session["items"])) else 1
-    points = (500 + round(500 * fraction) + 100 * min(participant["streak"], 5)) * mult if correct else 0
-    inserted = await db.fetchrow(
-        "insert into live_answers (session_id, participant_id, question_index, selected_index, is_correct, time_ms, points)"
-        " values ($1,$2,$3,$4,$5,$6,$7) on conflict (session_id, participant_id, question_index) do nothing returning id",
-        session["id"], participant["id"], index, choice, correct, int(elapsed * 1000), points)
+    async with db.transaction() as tx:
+        participant = await tx.fetchrow(
+            "select * from live_participants where session_id = $1 and player_id = $2 for update",
+            session["id"], player["id"],
+        )
+        if participant is None:
+            raise LiveError("Join the game first.", 403)
+        points = (500 + round(500 * fraction) + 100 * min(participant["streak"], 5)) * mult if correct else 0
+        inserted = await tx.fetchrow(
+            "insert into live_answers (session_id, participant_id, question_index, selected_index, is_correct, time_ms, points)"
+            " values ($1,$2,$3,$4,$5,$6,$7) on conflict (session_id, participant_id, question_index) do nothing returning id",
+            session["id"], participant["id"], index, choice, correct, int(elapsed * 1000), points)
+        if inserted:
+            await tx.execute(
+                "update live_participants set score = score + $2, correct_count = correct_count + $3,"
+                " streak = case when $4 then streak + 1 else 0 end where id = $1",
+                participant["id"], points, int(correct), correct)
     if inserted:
-        _counts.pop(session["id"], None)                    # the shared count is out of date as of now
-        await db.execute(
-            "update live_participants set score = score + $2, correct_count = correct_count + $3,"
-            " streak = case when $4 then streak + 1 else 0 end where id = $1",
-            participant["id"], points, int(correct), correct)
+        _counts.pop(session["id"], None)
     return {"locked": True, "selectedIndex": choice}
 
 
@@ -349,16 +430,98 @@ def _teams(standings: list[dict]) -> list[dict]:
     return sorted(ranked, key=lambda t: -t["average"]) if len(ranked) >= 2 else []
 
 
+async def _shared_snapshot(session: dict) -> dict[str, Any]:
+    """Build the version-scoped shared view once per phase change so 500 SSE clients don't stampede DB."""
+    sid, version = session["id"], session["version"]
+    cached = _public_snap.get(sid)
+    if cached and cached[0] == version and time.monotonic() - cached[1] < 2.0:
+        return cached[2]
+
+    status, index, items = session["status"], session["current_index"], session["items"]
+    item = items[index] if 0 <= index < len(items) else None
+    quiz = await db.fetchrow("select title, slug from quizzes where id = $1", session["quiz_id"])
+    standings = await _standings(sid)
+    snap: dict[str, Any] = {"quiz": quiz, "standings": standings}
+
+    if item and status == "reveal":
+        distribution = await db.fetch(
+            "select selected_index, count(*) as n from live_answers where session_id = $1 and question_index = $2"
+            " group by selected_index", sid, index)
+        counts = [0] * len(item["options"])
+        for row in distribution:
+            if row["selected_index"] is not None:
+                counts[row["selected_index"]] = row["n"]
+        fastest_row = await db.fetchrow(
+            "select lp.display_name, la.time_ms from live_answers la"
+            " join live_participants lp on lp.id = la.participant_id"
+            " where la.session_id = $1 and la.question_index = $2 and la.is_correct"
+            " order by la.time_ms asc limit 1", sid, index)
+        snap["counts"] = counts
+        snap["fastest"] = (
+            {"name": fastest_row["display_name"], "timeMs": int(fastest_row["time_ms"])} if fastest_row else None
+        )
+
+    if status == "scoreboard" and index >= 0:
+        round_rows = await db.fetch(
+            "select participant_id, points from live_answers where session_id = $1 and question_index = $2",
+            sid, index)
+        round_points_by_id = {r["participant_id"]: int(r["points"]) for r in round_rows}
+        prev_order = sorted(standings, key=lambda s: (-(s["score"] - round_points_by_id.get(s["id"], 0)), s["rank"]))
+        prev_rank = {s["id"]: i for i, s in enumerate(prev_order, start=1)}
+        rank_delta_by_id: dict[str, int] = {}
+        biggest_mover: dict[str, Any] | None = None
+        for s in standings:
+            delta = prev_rank[s["id"]] - s["rank"]
+            rank_delta_by_id[s["id"]] = delta
+            if delta > 0 and (biggest_mover is None or delta > biggest_mover["delta"]
+                              or (delta == biggest_mover["delta"] and round_points_by_id.get(s["id"], 0) > biggest_mover["points"])):
+                biggest_mover = {"name": s["display_name"], "delta": delta, "rank": s["rank"],
+                                 "points": round_points_by_id.get(s["id"], 0)}
+        snap["roundPoints"] = round_points_by_id
+        snap["rankDelta"] = rank_delta_by_id
+        snap["biggestMover"] = biggest_mover
+
+    if status == "finished":
+        totals = await db.fetch(
+            "select question_index, count(*) as answered, count(*) filter (where is_correct) as correct"
+            " from live_answers where session_id = $1 group by question_index", sid)
+        missed = []
+        for row in totals:
+            source = items[row["question_index"]]
+            if source["kind"] != "mcq" or not row["answered"]:
+                continue
+            pct = round(100 * row["correct"] / row["answered"])
+            if pct < 75:
+                missed.append({"text": source["text"], "correctAnswer": source["options"][source["correct_index"]],
+                               "section": source.get("section"), "explanation": source.get("explanation"),
+                               "percentCorrect": pct})
+        snap["roomMissed"] = sorted(missed, key=lambda m: m["percentCorrect"])[:3]
+        if session["settings"].get("after_party") and session["settings"].get("decade"):
+            decade = session["settings"]["decade"]
+            tracks = await music_service.after_party(decade, seed=sid)
+            if tracks:
+                snap["afterParty"] = {"decade": decade, "tracks": tracks}
+
+    _public_snap[sid] = (version, time.monotonic(), snap)
+    while len(_public_snap) > 300:
+        _public_snap.pop(next(iter(_public_snap)))
+    return snap
+
+
 async def state(session: dict, *, host: bool, player: dict | None) -> dict:
     session = await tick(session)
     status, index, items = session["status"], session["current_index"], session["items"]
     item = items[index] if 0 <= index < len(items) else None
-    quiz = await db.fetchrow("select title, slug from quizzes where id = $1", session["quiz_id"])
-    standings = await _standings(session["id"])
+    snap = await _shared_snapshot(session)
+    quiz = snap["quiz"]
+    standings = snap["standings"]
     me = next((s for s in standings if player and s["player_id"] == player["id"]), None)
+    unlisted = bool(session["settings"].get("unlisted"))
     view: dict[str, Any] = {
         "code": session["code"], "status": status, "version": session["version"], "index": index,
-        "total": len(items), "quizTitle": quiz["title"], "quizSlug": quiz["slug"], "players": len(standings),
+        "total": len(items), "quizTitle": quiz["title"],
+        "quizSlug": quiz["slug"] if (host or not unlisted) else None,
+        "players": len(standings),
         "serverNow": _now().isoformat(), "role": "host" if host else "player",
         "decade": session["settings"].get("decade"),
     }
@@ -405,48 +568,28 @@ async def state(session: dict, *, host: bool, player: dict | None) -> dict:
             elif mine:
                 view["yourAnswer"] = {"selectedIndex": mine["selected_index"]}
         else:
-            distribution = await db.fetch(
-                "select selected_index, count(*) as n from live_answers where session_id = $1 and question_index = $2"
-                " group by selected_index", session["id"], index)
-            counts = [0] * len(item["options"])
-            for row in distribution:
-                if row["selected_index"] is not None:
-                    counts[row["selected_index"]] = row["n"]
-            fastest_row = await db.fetchrow(
-                "select lp.display_name, la.time_ms from live_answers la"
-                " join live_participants lp on lp.id = la.participant_id"
-                " where la.session_id = $1 and la.question_index = $2 and la.is_correct"
-                " order by la.time_ms asc limit 1", session["id"], index)
-            view["reveal"] = {
-                "correctIndex": item["correct_index"], "counts": counts,
+            reveal_obj: dict[str, Any] = {
+                "correctIndex": item["correct_index"], "counts": snap.get("counts", [0] * len(item["options"])),
                 "explanation": item.get("explanation"), "sourceQuote": item.get("source_quote"),
-                "fastest": {"name": fastest_row["display_name"], "timeMs": int(fastest_row["time_ms"])} if fastest_row else None,
+                "fastest": snap.get("fastest"),
             }
+            if not item.get("image_id") and item.get("reveal_image_id"):
+                reveal_obj["imageUrl"] = _image_url(item["reveal_image_id"])
+            clip = video.parse_youtube(item.get("video_url"), item.get("video_title"))
+            if clip:
+                reveal_obj["video"] = clip
             if item["kind"] == "music":
-                view["reveal"]["music"] = {"artist": item["music"]["artist"], "title": item["music"]["title"],
-                                           "artworkUrl": item["music"]["artwork_url"]}
+                reveal_obj["music"] = {"artist": item["music"]["artist"], "title": item["music"]["title"],
+                                       "artworkUrl": item["music"]["artwork_url"]}
+            view["reveal"] = reveal_obj
             if not host:
                 view["yourAnswer"] = ({"selectedIndex": mine["selected_index"], "correct": mine["is_correct"],
                                        "points": mine["points"]} if mine else {"selectedIndex": None, "correct": False, "points": 0})
         return view
 
-    round_points_by_id: dict[str, int] = {}
-    rank_delta_by_id: dict[str, int] = {}
-    biggest_mover: dict[str, Any] | None = None
-    if status == "scoreboard" and index >= 0:
-        round_rows = await db.fetch(
-            "select participant_id, points from live_answers where session_id = $1 and question_index = $2",
-            session["id"], index)
-        round_points_by_id = {r["participant_id"]: int(r["points"]) for r in round_rows}
-        prev_order = sorted(standings, key=lambda s: (-(s["score"] - round_points_by_id.get(s["id"], 0)), s["rank"]))
-        prev_rank = {s["id"]: i for i, s in enumerate(prev_order, start=1)}
-        for s in standings:
-            delta = prev_rank[s["id"]] - s["rank"]
-            rank_delta_by_id[s["id"]] = delta
-            if delta > 0 and (biggest_mover is None or delta > biggest_mover["delta"]
-                              or (delta == biggest_mover["delta"] and round_points_by_id.get(s["id"], 0) > biggest_mover["points"])):
-                biggest_mover = {"name": s["display_name"], "delta": delta, "rank": s["rank"],
-                                 "points": round_points_by_id.get(s["id"], 0)}
+    round_points_by_id: dict[str, int] = snap.get("roundPoints", {})
+    rank_delta_by_id: dict[str, int] = snap.get("rankDelta", {})
+    biggest_mover: dict[str, Any] | None = snap.get("biggestMover")
 
     def _standing_row(s: dict) -> dict[str, Any]:
         row: dict[str, Any] = {"rank": s["rank"], "name": s["display_name"], "team": s["team"], "score": s["score"],
@@ -470,24 +613,7 @@ async def state(session: dict, *, host: bool, player: dict | None) -> dict:
         view["aroundYou"] = [_standing_row(s) for s in standings[start:idx + 2]]
     view["teams"] = _teams(standings)
     if status == "finished":
-        totals = await db.fetch(
-            "select question_index, count(*) as answered, count(*) filter (where is_correct) as correct"
-            " from live_answers where session_id = $1 group by question_index", session["id"])
-        missed = []
-        for row in totals:
-            source = items[row["question_index"]]
-            if source["kind"] != "mcq" or not row["answered"]:
-                continue
-            pct = round(100 * row["correct"] / row["answered"])
-            if pct < 75:
-                missed.append({"text": source["text"], "correctAnswer": source["options"][source["correct_index"]],
-                               "section": source.get("section"), "explanation": source.get("explanation"),
-                               "percentCorrect": pct})
-        view["roomMissed"] = sorted(missed, key=lambda m: m["percentCorrect"])[:3]
-        if host and session["settings"].get("after_party") and session["settings"].get("decade"):
-            # Music for the room while the results are up (the same list every time this is asked for).
-            decade = session["settings"]["decade"]
-            tracks = await music_service.after_party(decade, seed=session["id"])
-            if tracks:
-                view["afterParty"] = {"decade": decade, "tracks": tracks}
+        view["roomMissed"] = snap.get("roomMissed", [])
+        if host and snap.get("afterParty"):
+            view["afterParty"] = snap["afterParty"]
     return view

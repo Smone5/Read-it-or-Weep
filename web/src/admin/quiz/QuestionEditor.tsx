@@ -25,6 +25,7 @@ type Form = {
   isTrue: boolean | null
   sectionId: string
   imageId: string
+  revealImageId: string
   difficulty: Difficulty
   pinned: boolean
   /** New questions only: go live straight away, or wait for review. */
@@ -45,6 +46,7 @@ function initialForm(question: Question | null): Form {
       isTrue: null,
       sectionId: '',
       imageId: '',
+      revealImageId: '',
       difficulty: 'medium',
       pinned: false,
       live: true,
@@ -64,6 +66,7 @@ function initialForm(question: Question | null): Form {
     isTrue: question.isTrue,
     sectionId: question.sectionId ?? '',
     imageId: question.imageId ?? '',
+    revealImageId: question.revealImageId ?? '',
     difficulty: question.difficulty,
     pinned: question.pinned,
     live: question.status === 'approved',
@@ -109,6 +112,11 @@ function patchFrom(question: Question, form: Form): QuestionPatch {
   if (form.videoTitle.trim() !== (question.videoTitle ?? '')) patch.videoTitle = form.videoTitle.trim()
   if (form.difficulty !== question.difficulty) patch.difficulty = form.difficulty
   if ((form.sectionId || null) !== question.sectionId) patch.sectionId = form.sectionId || null
+  if (question.kind === 'mcq') {
+    if ((form.imageId || null) !== question.imageId) patch.imageId = form.imageId || null
+    const nextReveal = form.imageId ? null : form.revealImageId || null
+    if (nextReveal !== (question.revealImageId ?? null)) patch.revealImageId = nextReveal
+  }
   return patch
 }
 
@@ -172,6 +180,7 @@ export default function QuestionEditor({
   const busy = saving || suggesting
   const dirty = JSON.stringify(form) !== JSON.stringify(start)
   const picture = images.find((image) => image.id === form.imageId) ?? null
+  const revealPicture = images.find((image) => image.id === form.revealImageId) ?? null
   const correctAnswer = form.options[form.correctIndex]?.trim() ?? ''
   const canSuggest = form.text.trim().length >= TEXT_MIN && correctAnswer.length > 0
   // The AI's verdict is about one particular question and answer; once either is reworded it no longer applies.
@@ -261,6 +270,7 @@ export default function QuestionEditor({
           difficulty: form.difficulty,
           sectionId: form.sectionId || null,
           imageId: mcq ? form.imageId || null : null, // the game never shows a picture with a Fact-or-Fake statement
+          revealImageId: mcq && !form.imageId ? form.revealImageId || null : null,
           pinned: form.pinned,
           status: form.live ? 'approved' : 'pending',
         }
@@ -418,9 +428,12 @@ export default function QuestionEditor({
           </div>
         </div>
 
-        {adding && form.kind === 'mcq' && images.length > 0 && (
+        {form.kind === 'mcq' && images.length > 0 && (
           <fieldset>
-            <legend className="label">Picture from the report (optional)</legend>
+            <legend className="label">Question picture from the report (optional)</legend>
+            <p className="mb-2 text-xs text-muted">
+              Shown <strong>while players answer</strong> (turns this into a Picture question).
+            </p>
             <div className="flex flex-wrap gap-2">
               <button type="button" className="ad-thumb h-[72px] w-24" aria-pressed={form.imageId === ''} onClick={() => set({ imageId: '' })}>
                 <span className="grid h-full place-items-center text-xs text-muted">No picture</span>
@@ -433,7 +446,7 @@ export default function QuestionEditor({
                   aria-pressed={form.imageId === image.id}
                   aria-label={image.label}
                   title={image.label}
-                  onClick={() => set({ imageId: image.id })}
+                  onClick={() => set({ imageId: image.id, revealImageId: '' })}
                 >
                   <img src={image.url} alt="" loading="lazy" />
                 </button>
@@ -447,11 +460,36 @@ export default function QuestionEditor({
           </fieldset>
         )}
 
-        {!adding && question?.imageUrl && (
-          <div className="flex items-center gap-3">
-            <img src={question.imageUrl} alt="" className="h-16 w-24 flex-none rounded-lg border border-line object-cover" />
-            <p className="text-xs text-muted">This question is asked with this picture. The picture cannot be changed here.</p>
-          </div>
+        {form.kind === 'mcq' && !form.imageId && images.length > 0 && (
+          <fieldset>
+            <legend className="label">Answer reveal exhibit (optional)</legend>
+            <p className="mb-2 text-xs text-muted">
+              Shown <strong>only after answering</strong> to prove or illustrate the answer (leave as None if no chart directly backs up this fact).
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className="ad-thumb h-[64px] w-24" aria-pressed={form.revealImageId === ''} onClick={() => set({ revealImageId: '' })}>
+                <span className="grid h-full place-items-center text-xs text-muted">None</span>
+              </button>
+              {images.map((image) => (
+                <button
+                  key={image.id}
+                  type="button"
+                  className="ad-thumb h-[64px] w-24"
+                  aria-pressed={form.revealImageId === image.id}
+                  aria-label={image.label}
+                  title={image.label}
+                  onClick={() => set({ revealImageId: image.id })}
+                >
+                  <img src={image.url} alt="" loading="lazy" />
+                </button>
+              ))}
+            </div>
+            {revealPicture && (
+              <p className="mt-2 text-xs text-muted">
+                <span className="font-semibold text-ink">{revealPicture.label}</span> — revealed alongside the explanation after players answer.
+              </p>
+            )}
+          </fieldset>
         )}
 
         <div className="grid gap-4 sm:grid-cols-2">

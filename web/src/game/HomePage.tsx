@@ -144,7 +144,7 @@ export default function HomePage() {
             <div className="mt-3 flex flex-col gap-2 sm:flex-row">
               <input
                 type="search"
-                className="field min-w-0 flex-1 text-sm"
+                className="field min-w-0 flex-1 text-base sm:text-sm"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search reports or topics…"
@@ -152,7 +152,7 @@ export default function HomePage() {
               />
               {allTeams.length > 1 && (
                 <select
-                  className="field text-sm sm:w-44"
+                  className="field text-base sm:w-44 sm:text-sm"
                   value={team}
                   onChange={(e) => setTeam(e.target.value)}
                   aria-label="Filter by team"
@@ -178,11 +178,11 @@ export default function HomePage() {
               </div>
               <div>
                 <p className="pixel mb-2 text-[9px] text-muted">All open reports</p>
-                <div className="scroll-thin flex max-h-[38dvh] flex-col gap-2.5 overflow-y-auto pr-0.5">{other.map(renderQuizButton)}</div>
+                <div className="scroll-thin flex flex-col gap-2.5 sm:max-h-[42dvh] sm:overflow-y-auto sm:pr-0.5">{other.map(renderQuizButton)}</div>
               </div>
             </div>
           ) : (
-            <div className="scroll-thin mt-4 flex max-h-[56dvh] flex-col gap-3 overflow-y-auto pr-0.5">
+            <div className="scroll-thin mt-4 flex flex-col gap-3 sm:max-h-[56dvh] sm:overflow-y-auto sm:pr-0.5">
               {filtered.map(renderQuizButton)}
             </div>
           )}
@@ -201,7 +201,7 @@ export default function HomePage() {
           <div className="flex w-full items-center gap-2 sm:w-auto">
             <input
               id="live-code"
-              className="field pixel w-28 flex-1 text-center text-xs tracking-widest sm:flex-none"
+              className="field pixel w-32 flex-1 text-center text-base tracking-widest sm:flex-none sm:text-xs"
               value={code}
               onChange={(e) => setCode(e.target.value.toUpperCase())}
               maxLength={6}

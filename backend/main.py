@@ -79,8 +79,8 @@ app = FastAPI(title="Read It or Weep", version="1.0.0", lifespan=lifespan,
 _CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob: https://*.mzstatic.com https://i.ytimg.com https://img.youtube.com; "
         "media-src 'self' data: blob: https://*.itunes.apple.com https://*.mzstatic.com; "
-        "frame-src 'self' https://www.youtube-nocookie.com https://www.youtube.com; "
-        "font-src 'self' data:; connect-src 'self' ws: wss: https://*.itunes.apple.com https://*.mzstatic.com; worker-src 'self' blob:; "
+        "frame-src 'self' https://www.youtube-nocookie.com; "
+        "font-src 'self' data:; connect-src 'self' https://*.itunes.apple.com https://*.mzstatic.com; worker-src 'self' blob:; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'")
 _SECURITY_HEADERS = {
     b"x-content-type-options": b"nosniff",
@@ -101,13 +101,22 @@ class SecurityHeaders:
         if scope["type"] != "http":
             await self.inner(scope, receive, send)
             return
-        secure = scope.get("scheme") == "https"
+        req_headers = {k.lower(): v for k, v in scope.get("headers", [])}
+        forwarded_proto = req_headers.get(b"x-forwarded-proto", b"").decode("latin-1").split(",")[0].strip().lower()
+        secure = scope.get("scheme") == "https" or forwarded_proto == "https"
+        raw_host = req_headers.get(b"host", b"").decode("latin-1").strip()
+        ws_origin = ""
+        if raw_host and all(c.isalnum() or c in ".:-[]" for c in raw_host):
+            ws_origin = f" {'wss' if secure else 'ws'}://{raw_host}"
+        csp_bytes = _CSP.replace("connect-src 'self'", f"connect-src 'self'{ws_origin}", 1).encode()
 
         async def send_with_headers(message):
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
                 present = {name.lower() for name, _ in headers}
-                headers += [(name, value) for name, value in _SECURITY_HEADERS.items() if name not in present]
+                for name, value in _SECURITY_HEADERS.items():
+                    if name not in present:
+                        headers.append((name, csp_bytes if name == b"content-security-policy" else value))
                 if secure and b"strict-transport-security" not in present:
                     headers.append((b"strict-transport-security", b"max-age=31536000"))
                 message = {**message, "headers": headers}

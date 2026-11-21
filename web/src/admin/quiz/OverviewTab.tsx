@@ -503,11 +503,17 @@ function DetailsForm() {
               type="checkbox"
               className="mt-1"
               checked={form.allowDownload}
-              onChange={(event) => set({ allowDownload: event.target.checked })}
+              onChange={(event) => {
+                const checked = event.target.checked
+                set({ allowDownload: checked, ...(checked ? { purgeSource: false } : {}) })
+              }}
             />
             <span>
               <strong className="block">Allow signed-in players to open/download the uploaded report</strong>
-              <span className="text-muted">Off by default. Streams the uploaded PDF/Word file via short-lived signed links in the lobby and results screen.</span>
+              <span className="text-muted">
+                Off by default. Streams the uploaded PDF/Word file via short-lived signed links in the lobby and results screen.
+                {form.purgeSource && ' Turning this on automatically turns off source-file purging below.'}
+              </span>
             </span>
           </label>
 
@@ -542,11 +548,17 @@ function DetailsForm() {
               type="checkbox"
               className="mt-1"
               checked={form.purgeSource}
-              onChange={(event) => set({ purgeSource: event.target.checked })}
+              onChange={(event) => {
+                const checked = event.target.checked
+                set({ purgeSource: checked, ...(checked ? { allowDownload: false } : {}) })
+              }}
             />
             <span>
               <strong className="block">Purge source file after processing</strong>
-              <span className="text-muted">Automatically deletes the raw uploaded report file from storage once questions are generated (keeps questions and charts).</span>
+              <span className="text-muted">
+                Automatically deletes the raw uploaded report file from storage once questions are generated (keeps questions and charts).
+                {form.allowDownload && ' Turning this on disables player file downloads above.'}
+              </span>
             </span>
           </label>
         </div>

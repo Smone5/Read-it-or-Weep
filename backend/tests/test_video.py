@@ -94,6 +94,7 @@ def test_docx_parser_extracts_both_hyperlinked_and_pasted_youtube_urls():
 
 def test_csp_allows_youtube_thumbnails_and_embeds():
     import main
-    assert "frame-src 'self' https://www.youtube-nocookie.com https://www.youtube.com" in main._CSP
+    assert "frame-src 'self' https://www.youtube-nocookie.com" in main._CSP
+    assert "https://www.youtube.com" not in main._CSP
     assert "https://i.ytimg.com" in main._CSP
     assert "frame-ancestors 'none'" in main._CSP

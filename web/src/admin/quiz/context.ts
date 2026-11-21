@@ -30,15 +30,15 @@ export function useQuiz(): QuizContextValue {
 }
 
 const POLL_MS = 2000
-const STALL_MS = 5 * 60_000
+const STALL_MS = 10 * 60_000
 
 /**
  * Keeps the quiz's documents up to date while the server is working on one of them, by
  * asking every two seconds, and only then. `expectWork` keeps it asking for a moment after
  * a job has been requested but before the server reports it has started.
  *
- * If nothing at all changes for five minutes the job has probably died (for example the
- * server was restarted), so it stops asking and reports `stalled`.
+ * If nothing at all changes for ten minutes (matching the server's stale-job window) the job
+ * has probably died, so it stops asking and reports `stalled`.
  */
 export function useDocumentWatch(expectWork = false): { working: boolean; stalled: boolean; resume: () => void } {
   const { detail, setDocuments } = useQuiz()

@@ -51,6 +51,7 @@ export type QuizView = {
   questions: number
   ready: boolean
   leaderboard: boolean
+  shareable?: boolean
   reportUrl?: string | null
   reportFiles?: { id: string; filename: string; url: string }[]
   modes: ModeInfo[]
@@ -157,6 +158,8 @@ export type PartyTrack = {
   trackUrl: string | null
   /** Set when the song is here because the player named a favourite artist ("Chicago"). */
   because?: string | null
+  /** Set when the song was chosen to match a moment or report section ("Lightning energy"). */
+  cueReason?: string | null
 }
 export type AfterParty = { decade: string; tracks: PartyTrack[] }
 export type JukeboxCues = {
@@ -284,7 +287,7 @@ export type LiveState = {
   index: number
   total: number
   quizTitle: string
-  quizSlug: string
+  quizSlug: string | null
   players: number
   serverNow: string
   role: 'host' | 'player'
@@ -300,6 +303,8 @@ export type LiveState = {
     counts: number[]
     explanation: string | null
     sourceQuote: string | null
+    imageUrl?: string
+    video?: VideoClip | null
     fastest?: { name: string; timeMs: number } | null
     music?: { artist: string; title: string; artworkUrl: string | null }
   }

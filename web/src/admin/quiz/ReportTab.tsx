@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type DragEvent } from 'react'
+import { Link } from 'react-router-dom'
 import { ErrorNote } from '../../components/ui'
 import { call, errorText } from '../api'
-import { Badge, Bar, ConfirmDialog, Dialog, DialogActions, EmptyState, Field, Note, Panel } from '../components'
+import { Badge, Bar, ConfirmDialog, Dialog, DialogActions, EmptyState, Field, Note, Panel, Switch } from '../components'
 import { useNotify } from '../context'
 import { describeRejections, formatBytes, formatDateTime, isWorking, plural, splitSummary, type Tone } from '../format'
+import { paths } from '../paths'
 import type { QuizDocument, Section } from '../types'
 import { useDocumentWatch, useQuiz } from './context'
 import { YouTubePicker } from './YouTubePicker'
@@ -87,7 +89,7 @@ export default function ReportTab() {
       {watch.stalled && (
         <Note tone="warn" role="status">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <span>Nothing has changed for five minutes, so the work has probably stopped. Check again, or use “Process again” on the document.</span>
+            <span>Nothing has changed for ten minutes, so the work has probably stopped. Check again, or use “Process again” on the document.</span>
             <button type="button" className="btn btn-ghost btn-sm" onClick={watch.resume}>
               Check again
             </button>
@@ -102,6 +104,7 @@ export default function ReportTab() {
           {documents.map((doc) => (
             <li key={doc.id}>
               <DocumentCard
+                quizId={quiz.id}
                 doc={doc}
                 stalled={watch.stalled}
                 sections={sections.filter((section) => section.document_id === doc.id)}
@@ -282,6 +285,7 @@ function statusOf(doc: QuizDocument, stalled: boolean): { label: string; tone: T
 }
 
 function DocumentCard({
+  quizId,
   doc,
   stalled,
   sections,
@@ -289,6 +293,7 @@ function DocumentCard({
   onDelete,
   onEditVideo,
 }: {
+  quizId: string
   doc: QuizDocument
   /** Nothing has moved for a while: the job has probably died, so let the person start it again. */
   stalled: boolean
@@ -412,7 +417,12 @@ function DocumentCard({
                   return (
                     <li key={section.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-surface-2 px-3 py-2">
                       <div className="min-w-0 flex-1">
-                        <span className="font-medium [overflow-wrap:anywhere]">{section.heading}</span>
+                        <Link
+                          to={`${paths.quiz(quizId, 'questions')}?section=${encodeURIComponent(section.id)}`}
+                          className="font-medium hover:underline [overflow-wrap:anywhere]"
+                        >
+                          {section.heading}
+                        </Link>
                         {vids > 0 && (
                           <span className="ml-2 inline-flex items-center rounded bg-accent/15 px-1.5 py-0.5 text-xs font-semibold text-accent">
                             {plural(vids, 'video clip')}
@@ -420,16 +430,20 @@ function DocumentCard({
                         )}
                       </div>
                       <div className="flex flex-none items-center gap-3">
-                        <span className="tabular-nums text-muted" style={section.questions === 0 ? { color: 'var(--warn)', fontWeight: 600 } : undefined}>
+                        <Link
+                          to={`${paths.quiz(quizId, 'questions')}?section=${encodeURIComponent(section.id)}`}
+                          className="tabular-nums text-muted hover:underline"
+                          style={section.questions === 0 ? { color: 'var(--warn)', fontWeight: 600 } : undefined}
+                        >
                           {section.questions === 0 ? 'no questions' : plural(section.questions, 'question')}
-                        </span>
+                        </Link>
                         {section.questions > 0 && (
                           <button
                             type="button"
                             className="btn btn-ghost btn-sm"
                             onClick={() => onEditVideo(section)}
                           >
-                            {vids > 0 ? 'Edit video' : 'Add video'}
+                            {vids > 0 ? 'Manage videos' : 'Add video'}
                           </button>
                         )}
                       </div>
@@ -455,13 +469,20 @@ function DocumentCard({
         </div>
       )}
 
-      <div className="mt-4 flex flex-wrap gap-2">
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onReprocess} disabled={working && !stalled}>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={onReprocess}
+          disabled={(working && !stalled) || Boolean(doc.sourcePurged)}
+          title={doc.sourcePurged ? 'The source file was purged after processing. Upload the report again to reprocess it.' : undefined}
+        >
           Process again
         </button>
         <button type="button" className="btn btn-danger btn-sm" onClick={onDelete}>
           Delete
         </button>
+        {doc.sourcePurged && <span className="text-xs text-muted">Source file purged after processing</span>}
       </div>
     </article>
   )
@@ -479,36 +500,53 @@ function SectionVideoDialog({
   const [videoUrl, setVideoUrl] = useState('')
   const [videoTitle, setVideoTitle] = useState('')
   const [maxQuestions, setMaxQuestions] = useState(2)
+  const [replaceExisting, setReplaceExisting] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const clips = section?.video_clips ?? (section?.video_url ? [{ url: section.video_url, title: section.video_title ?? null, count: section.videos ?? 1 }] : [])
+
   useEffect(() => {
     if (!section) return
-    setVideoUrl(section.video_url ?? '')
-    setVideoTitle(section.video_title ?? '')
-    setMaxQuestions(Math.min(3, Math.max(1, section.videos || 2)))
+    setVideoUrl('')
+    setVideoTitle('')
+    setMaxQuestions(2)
+    setReplaceExisting(false)
     setError(null)
     setSaving(false)
   }, [section])
 
+  const removeClip = async (clipUrl: string, clipTitle: string | null) => {
+    if (!section || saving) return
+    setSaving(true)
+    setError(null)
+    try {
+      await call(`/sections/${section.id}/video`, {
+        method: 'POST',
+        body: { mode: 'remove', removeUrl: clipUrl },
+      })
+      onSaved(`Removed “${clipTitle || 'YouTube clip'}” from “${section.heading}”.`)
+    } catch (reason) {
+      setError(errorText(reason))
+      setSaving(false)
+    }
+  }
+
   const save = async () => {
-    if (!section) return
+    if (!section || !videoUrl.trim()) return
     setSaving(true)
     setError(null)
     try {
       const result = await call<{ updated: number }>(`/sections/${section.id}/video`, {
         method: 'POST',
         body: {
-          videoUrl: videoUrl.trim() || null,
+          videoUrl: videoUrl.trim(),
           videoTitle: videoTitle.trim() || null,
           maxQuestions,
+          mode: replaceExisting ? 'replace' : 'add',
         },
       })
-      onSaved(
-        result.updated > 0
-          ? `Attached YouTube clip to ${plural(result.updated, 'question')} in “${section.heading}”.`
-          : `Removed YouTube clip from “${section.heading}”.`,
-      )
+      onSaved(`Attached YouTube clip to ${plural(result.updated, 'question')} in “${section.heading}”.`)
     } catch (reason) {
       setError(errorText(reason))
       setSaving(false)
@@ -516,11 +554,35 @@ function SectionVideoDialog({
   }
 
   return (
-    <Dialog open={section !== null} title={section ? `YouTube clip · ${section.heading}` : ''} onClose={saving ? () => {} : onClose} wide>
+    <Dialog open={section !== null} title={section ? `YouTube clips · ${section.heading}` : ''} onClose={saving ? () => {} : onClose} wide>
       <div className="grid gap-4">
         <p className="text-sm text-muted">
-          Attach one YouTube clip to this section — players will see the replay card right after answering questions from this part of the report.
+          Attach YouTube clips to this section — players see the replay card right after answering questions from this part of the report. Adding a clip keeps existing clips on other questions intact.
         </p>
+
+        {clips.length > 0 && (
+          <div className="grid gap-2">
+            <p className="text-xs font-bold uppercase tracking-wide text-muted">Attached clips ({clips.length})</p>
+            <ul className="grid gap-1.5">
+              {clips.map((clip) => (
+                <li key={clip.url} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line bg-surface-2 px-3 py-2 text-sm">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-semibold">{clip.title || clip.url}</p>
+                    <p className="text-xs text-muted">
+                      On {plural(clip.count, 'question')} ·{' '}
+                      <a href={clip.url.replace(/#external$/i, '')} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+                        Open on YouTube
+                      </a>
+                    </p>
+                  </div>
+                  <button type="button" className="btn btn-ghost btn-sm" disabled={saving} onClick={() => void removeClip(clip.url, clip.title)}>
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         <YouTubePicker
           value={videoUrl}
@@ -533,35 +595,46 @@ function SectionVideoDialog({
         />
 
         {videoUrl.trim() && (
-          <Field
-            label="Attach to how many questions in this section?"
-            hint="Attaching to 2–3 multiple-choice questions keeps the replay feeling fresh instead of repeating on every turn."
-          >
-            {(props) => (
-              <select
-                className="field max-w-xs"
-                {...props}
-                value={maxQuestions}
+          <div className="grid gap-3">
+            <Field
+              label="Attach to how many questions in this section?"
+              hint="Attaching to 2–3 multiple-choice questions keeps the replay feeling fresh instead of repeating on every turn."
+            >
+              {(props) => (
+                <select
+                  className="field max-w-xs"
+                  {...props}
+                  value={maxQuestions}
+                  disabled={saving}
+                  onChange={(e) => setMaxQuestions(Number(e.target.value))}
+                >
+                  <option value={1}>Up to 1 question</option>
+                  <option value={2}>Up to 2 questions (recommended)</option>
+                  <option value={3}>Up to 3 questions</option>
+                  <option value={10}>Up to 10 questions in section</option>
+                </select>
+              )}
+            </Field>
+            {clips.length > 0 && (
+              <Switch
+                checked={replaceExisting}
+                onChange={setReplaceExisting}
+                label="Replace existing clips in this section"
+                description="Leave off to keep other clips in this section and pair this clip with questions that do not have a video yet."
                 disabled={saving}
-                onChange={(e) => setMaxQuestions(Number(e.target.value))}
-              >
-                <option value={1}>Top 1 question</option>
-                <option value={2}>Top 2 questions (recommended)</option>
-                <option value={3}>Top 3 questions</option>
-                <option value={10}>Up to 10 questions in section</option>
-              </select>
+              />
             )}
-          </Field>
+          </div>
         )}
 
         {error && <ErrorNote>{error}</ErrorNote>}
 
         <DialogActions>
           <button type="button" className="btn btn-ghost" onClick={onClose} disabled={saving}>
-            Cancel
+            Close
           </button>
-          <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={saving}>
-            {saving ? 'Saving…' : videoUrl.trim() ? 'Save clip to section' : 'Remove clip from section'}
+          <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={saving || !videoUrl.trim()}>
+            {saving ? 'Saving…' : replaceExisting ? 'Replace section clips' : 'Add clip to section'}
           </button>
         </DialogActions>
       </div>

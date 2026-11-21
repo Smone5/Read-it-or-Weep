@@ -3,7 +3,7 @@
 // embed when permitted, and always provides a direct "Watch on YouTube" link
 // (essential for official NFL highlights that restrict third-party iframe embeds).
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { IconClose, IconExternal, IconPlay } from '../components/Icons'
 import { setJukeboxVideoPlaying } from '../lib/jukebox'
 import type { VideoClip } from '../lib/types'
@@ -14,54 +14,111 @@ type Props = {
   onPlayStart?: () => void
 }
 
+const YT_ORIGINS = new Set(['https://www.youtube-nocookie.com', 'https://www.youtube.com'])
+
 export function VideoClipCard({ video, compact = false, onPlayStart }: Props) {
   const [playing, setPlaying] = useState(false)
+  const iframeRef = useRef<HTMLIFrameElement | null>(null)
+  const lockedRef = useRef(false)
+
+  const setLock = (want: boolean) => {
+    if (want === lockedRef.current) return
+    lockedRef.current = want
+    setJukeboxVideoPlaying(want)
+  }
 
   useEffect(() => {
     setPlaying(false)
   }, [video.videoId, video.startSec])
 
   useEffect(() => {
-    if (!playing) return
+    if (!playing) {
+      setLock(false)
+      return
+    }
     onPlayStart?.()
-    setJukeboxVideoPlaying(true)
-    return () => setJukeboxVideoPlaying(false)
+    setLock(true)
+
+    const onMessage = (event: MessageEvent) => {
+      if (!YT_ORIGINS.has(event.origin)) return
+      if (iframeRef.current && event.source !== iframeRef.current.contentWindow) return
+      let data: unknown = event.data
+      if (typeof data === 'string') {
+        try {
+          data = JSON.parse(data)
+        } catch {
+          return
+        }
+      }
+      if (!data || typeof data !== 'object') return
+      const payload = data as { event?: string; info?: { playerState?: number } | number }
+      const state =
+        payload.event === 'onStateChange' && typeof payload.info === 'number'
+          ? payload.info
+          : payload.event === 'infoDelivery' && payload.info && typeof payload.info === 'object'
+            ? payload.info.playerState
+            : undefined
+      if (state === 0 || state === 2) setLock(false) // ended or paused -> resume soundtrack
+      else if (state === 1 || state === 3) {
+        onPlayStart?.()
+        setLock(true)
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => {
+      window.removeEventListener('message', onMessage)
+      setLock(false)
+    }
   }, [playing]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const canEmbed = Boolean(video.embedUrl)
 
   if (playing && video.embedUrl) {
     return (
-      <div className="mt-3 overflow-hidden rounded-[6px] border border-line bg-black">
-        <div className="flex items-center justify-between gap-2 border-b border-line bg-surface-2 px-3 py-1.5 text-xs">
+      <div className="relative z-[41] mt-3 overflow-hidden rounded-[6px] border border-line bg-black">
+        <div className="flex items-center justify-between gap-2 border-b border-line bg-surface-2 px-3 py-1 text-xs">
           <span className="truncate font-semibold">{video.title}</span>
-          <div className="flex flex-none items-center gap-2">
+          <div className="flex flex-none items-center gap-1.5">
             <a
               href={video.watchUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+              onClick={() => onPlayStart?.()}
+              className="inline-flex min-h-[36px] items-center gap-1 rounded px-2 text-xs font-semibold hover:underline"
+              style={{ color: 'var(--accent-text)' }}
             >
               YouTube <IconExternal size={12} />
             </a>
             <button
               type="button"
               onClick={() => setPlaying(false)}
-              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-muted hover:text-ink"
+              className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded border border-line bg-surface text-muted hover:text-ink"
               aria-label="Close video player"
+              title="Close video and resume music"
             >
-              <IconClose size={12} />
+              <IconClose size={14} />
             </button>
           </div>
         </div>
         <div className="relative aspect-video w-full bg-black">
           <iframe
+            ref={iframeRef}
             src={video.embedUrl}
             title={video.title}
             className="absolute inset-0 h-full w-full"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
             allowFullScreen
             referrerPolicy="strict-origin-when-cross-origin"
+            onLoad={() => {
+              try {
+                iframeRef.current?.contentWindow?.postMessage(
+                  JSON.stringify({ event: 'listening' }),
+                  'https://www.youtube-nocookie.com',
+                )
+              } catch {
+                /* cross-origin handshake optional */
+              }
+            }}
           />
         </div>
       </div>
@@ -70,7 +127,7 @@ export function VideoClipCard({ video, compact = false, onPlayStart }: Props) {
 
   return (
     <div
-      className={`mt-3 flex items-center gap-3 rounded-[6px] border border-line bg-surface-2 ${compact ? 'p-2' : 'p-2.5'}`}
+      className={`relative z-[41] mt-3 flex items-center gap-3 rounded-[6px] border border-line bg-surface-2 ${compact ? 'p-2' : 'p-2.5'}`}
     >
       {canEmbed ? (
         <button
@@ -92,6 +149,7 @@ export function VideoClipCard({ video, compact = false, onPlayStart }: Props) {
           href={video.watchUrl}
           target="_blank"
           rel="noopener noreferrer"
+          onClick={() => onPlayStart?.()}
           className="group relative flex-none overflow-hidden rounded-[4px] border border-line bg-black"
           style={{ width: compact ? 88 : 112, height: compact ? 50 : 63 }}
           aria-label={`Watch ${video.title} on YouTube`}
@@ -107,12 +165,12 @@ export function VideoClipCard({ video, compact = false, onPlayStart }: Props) {
       <div className="min-w-0 flex-1">
         <p className="pixel text-[9px] text-muted">VIDEO REPLAY · YOUTUBE</p>
         <p className="mt-0.5 truncate text-sm font-semibold">{video.title}</p>
-        <div className="mt-1 flex flex-wrap items-center gap-3 text-xs">
+        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
           {canEmbed && (
             <button
               type="button"
               onClick={() => setPlaying(true)}
-              className="inline-flex items-center gap-1 font-semibold hover:underline"
+              className="inline-flex min-h-[36px] items-center gap-1 py-1 font-semibold hover:underline"
               style={{ color: 'var(--accent-text)' }}
             >
               <IconPlay size={11} /> Play clip here
@@ -122,7 +180,8 @@ export function VideoClipCard({ video, compact = false, onPlayStart }: Props) {
             href={video.watchUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 font-medium text-muted hover:text-ink hover:underline"
+            onClick={() => onPlayStart?.()}
+            className="inline-flex min-h-[36px] items-center gap-1 py-1 font-medium text-muted hover:text-ink hover:underline"
           >
             {canEmbed ? 'Open on YouTube' : 'Watch official clip on YouTube'} <IconExternal size={12} />
           </a>

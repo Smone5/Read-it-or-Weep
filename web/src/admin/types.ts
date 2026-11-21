@@ -260,8 +260,15 @@ export type QuizDocument = {
   chunk_count: number | null
   question_count: number | null
   size_bytes: number | null
+  sourcePurged?: boolean
   created_at: string
   processed_at: string | null
+}
+
+export type SectionVideoClip = {
+  url: string
+  title: string | null
+  count: number
 }
 
 /** `questions` counts the live (approved) questions filed under the section. */
@@ -274,6 +281,7 @@ export type Section = {
   videos?: number
   video_url?: string | null
   video_title?: string | null
+  video_clips?: SectionVideoClip[]
 }
 
 export type VideoInspectResult = {
@@ -335,6 +343,8 @@ export type Question = {
   section: string | null
   imageId: string | null
   imageUrl: string | null
+  revealImageId?: string | null
+  revealImageUrl?: string | null
   flagReasons: string[]
 }
 
@@ -356,11 +366,12 @@ export type QuestionWrite = {
   difficulty: Difficulty
   sectionId: string | null
   imageId: string | null
+  revealImageId?: string | null
   pinned: boolean
   status: QuestionStatus
 }
 
-/** Body of PATCH /questions/{id}: any subset. Sending text/options/correctIndex/isTrue marks it "edited". */
+/** Body of PATCH /questions/{id}: any subset. */
 export type QuestionPatch = Partial<{
   status: QuestionStatus
   pinned: boolean
@@ -374,6 +385,8 @@ export type QuestionPatch = Partial<{
   videoTitle: string
   difficulty: Difficulty
   sectionId: string | null
+  imageId: string | null
+  revealImageId: string | null
 }>
 
 export type BulkAction = 'approve' | 'reject' | 'delete' | 'pin' | 'unpin'

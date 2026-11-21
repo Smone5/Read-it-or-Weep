@@ -498,7 +498,11 @@ async def main() -> None:
                   "only the host screen can control a live game")
             for headers in players.values():
                 assert (await client.post(f"/api/live/{code}/join", json={}, headers=headers)).status_code == 200
-            r = await client.post(f"/api/live/{code}/join", json={"name": "Walk In", "email": f"walkin.{tag}@example.com", "team": "Sales"})
+            walk_in_body = {"name": "Walk In", "email": f"walkin.{tag}@example.com", "team": "Sales"}
+            if access:
+                refused = await client.post(f"/api/live/{code}/join", json=walk_in_body)
+                check(refused.status_code == 403, f"a live room for a quiz with an access code refuses a walk-in without it ({refused.status_code})")
+            r = await client.post(f"/api/live/{code}/join", json={**walk_in_body, **entry})
             check(r.status_code == 200 and r.json()["token"], "someone who never did the pre-read can join live with name + email")
             walk_in = {"Authorization": f"Bearer {r.json()['token']}"}
             lobby = (await client.get(f"/api/live/{code}/state", headers=host)).json()
@@ -507,7 +511,7 @@ async def main() -> None:
             state = (await client.post(f"/api/live/{code}/control", json={"action": "next"}, headers=host)).json()
             check(state["status"] == "question" and "correctIndex" not in json.dumps(state), "question phase hides the answer")
             early = await client.post(f"/api/live/{code}/answer", json={"choiceIndex": 0}, headers=players["Dana Reyes"])
-            check(early.status_code == 409, "answers are refused while the host is still reading the question")
+            check(early.status_code == 425, f"answers are refused while the host is still reading the question ({early.status_code})")
             lead = state["question"]["opensAt"]
             check((await client.post(f"/api/live/{code}/control", json={"action": "open"})).status_code == 403,
                   "only the host screen can open a question")

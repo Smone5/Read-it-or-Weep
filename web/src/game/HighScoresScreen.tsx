@@ -13,9 +13,9 @@ import { formatScore } from './parts'
 const PAGE_SIZE = 100
 
 function rankTone(rank: number): { color: string; border: string } {
-  if (rank === 1) return { color: '#ffd60a', border: 'color-mix(in oklab, #ffd60a 65%, transparent)' }
-  if (rank === 2) return { color: '#e2e8f0', border: 'color-mix(in oklab, #cbd5e1 55%, transparent)' }
-  if (rank === 3) return { color: '#f59e0b', border: 'color-mix(in oklab, #f59e0b 60%, transparent)' }
+  if (rank === 1) return { color: 'var(--rank-1)', border: 'color-mix(in oklab, var(--rank-1) 65%, transparent)' }
+  if (rank === 2) return { color: 'var(--rank-2)', border: 'color-mix(in oklab, var(--rank-2) 55%, transparent)' }
+  if (rank === 3) return { color: 'var(--rank-3)', border: 'color-mix(in oklab, var(--rank-3) 60%, transparent)' }
   return { color: 'var(--muted)', border: 'color-mix(in oklab, var(--ink) 16%, transparent)' }
 }
 
@@ -164,7 +164,7 @@ export function HighScoresScreen({
           {metaText && <p className="mt-0.5 truncate text-xs text-muted sm:hidden">{metaText}</p>}
         </div>
         {entry.team && (
-          <span className="hidden max-w-[140px] truncate rounded-[3px] border border-line bg-black/30 px-2 py-0.5 text-xs text-muted sm:inline-block">
+          <span className="hidden max-w-[140px] truncate rounded-[3px] border border-line bg-surface-2 px-2 py-0.5 text-xs text-muted sm:inline-block">
             {entry.team}
           </span>
         )}
@@ -178,7 +178,7 @@ export function HighScoresScreen({
         )}
         <span
           className="sb-score sm:!text-xl"
-          style={{ color: entry.you ? 'var(--accent)' : entry.rank === 1 ? '#ffd60a' : 'var(--ink)' }}
+          style={{ color: entry.you ? 'var(--accent-text)' : entry.rank === 1 ? 'var(--rank-1)' : 'var(--ink)' }}
         >
           {formatScore(entry.score)}
         </span>
@@ -231,7 +231,7 @@ export function HighScoresScreen({
               >
                 <span>{m.name}</span>
                 {bestByMode?.[m.id] !== undefined && (
-                  <span className="rounded-sm bg-black/45 px-1.5 py-0.5 text-xs tabular-nums" style={{ color: 'var(--accent)' }}>
+                  <span className="rounded-sm px-1.5 py-0.5 text-xs tabular-nums" style={{ background: 'var(--pill-bg)', color: 'var(--accent-text)' }}>
                     {formatScore(bestByMode[m.id]!)}
                   </span>
                 )}
@@ -291,8 +291,8 @@ export function HighScoresScreen({
                   className="pixel grid h-12 min-w-[56px] place-items-center rounded-[4px] border-2 px-2.5 text-base tabular-nums"
                   style={{
                     borderColor: 'var(--accent)',
-                    background: 'rgb(0 0 0 / 0.5)',
-                    color: board.you.rank === 1 ? '#ffd60a' : 'var(--accent)',
+                    background: 'var(--pill-bg)',
+                    color: board.you.rank === 1 ? 'var(--rank-1)' : 'var(--accent-text)',
                   }}
                 >
                   #{board.you.rank}
@@ -303,12 +303,12 @@ export function HighScoresScreen({
                   </p>
                   <p className="mt-1 text-base text-ink">
                     {board.you.rank === 1 ? (
-                      <span className="inline-flex items-center gap-1.5 font-bold" style={{ color: '#ffd60a' }}>
+                      <span className="inline-flex items-center gap-1.5 font-bold" style={{ color: 'var(--rank-1)' }}>
                         <IconCrown size={15} /> You hold the #1 spot!
                       </span>
                     ) : board.you.gapToNext !== undefined ? (
                       <>
-                        <b style={{ color: 'var(--accent)' }}>{formatScore(board.you.gapToNext)}</b> pts behind{' '}
+                        <b style={{ color: 'var(--accent-text)' }}>{formatScore(board.you.gapToNext)}</b> pts behind{' '}
                         {board.you.aheadName ?? `#${board.you.rank - 1}`} (#{board.you.rank - 1})
                       </>
                     ) : (
@@ -319,7 +319,7 @@ export function HighScoresScreen({
               </div>
               <div className="text-right">
                 <p className="pixel text-[9px] text-muted">Personal best</p>
-                <p className="sb-score !text-2xl sm:!text-3xl" style={{ color: 'var(--accent)' }}>
+                <p className="sb-score !text-2xl sm:!text-3xl" style={{ color: 'var(--accent-text)' }}>
                   {formatScore(board.you.score)}
                 </p>
               </div>
@@ -353,8 +353,8 @@ export function HighScoresScreen({
                     className="inline-flex items-center gap-1.5 rounded-[4px] border px-3 py-1.5 text-sm tabular-nums"
                     style={{
                       borderColor: run.isBest ? 'var(--accent)' : 'var(--line)',
-                      background: run.isBest ? 'color-mix(in oklab, var(--accent) 16%, transparent)' : 'rgb(0 0 0 / 0.32)',
-                      color: run.isBest ? 'var(--accent)' : 'var(--ink)',
+                      background: run.isBest ? 'color-mix(in oklab, var(--accent) 16%, transparent)' : 'var(--pill-bg)',
+                      color: run.isBest ? 'var(--accent-text)' : 'var(--ink)',
                     }}
                   >
                     {run.isBest && <IconStar size={12} />}
@@ -362,7 +362,7 @@ export function HighScoresScreen({
                     {run.answered > 0 && (
                       <span className="text-xs text-muted">{Math.round((100 * run.correct) / run.answered)}%</span>
                     )}
-                    {index === 0 && <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-muted">latest</span>}
+                    {index === 0 && <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted">latest</span>}
                   </span>
                 ))}
               </div>
@@ -405,7 +405,7 @@ export function HighScoresScreen({
                       {person.team && <p className="mt-0.5 w-full truncate text-xs text-muted">{person.team}</p>}
                       <p
                         className="sb-score mt-2 !text-2xl"
-                        style={{ color: isFirst ? '#ffd60a' : person.you ? 'var(--accent)' : 'var(--ink)' }}
+                        style={{ color: isFirst ? 'var(--rank-1)' : person.you ? 'var(--accent-text)' : 'var(--ink)' }}
                       >
                         {formatScore(person.score)}
                       </p>
@@ -490,7 +490,7 @@ export function HighScoresScreen({
                         <span className="block truncate font-bold text-ink hover:underline">{t.team}</span>
                         <span className="block text-xs text-muted">{t.players} player{t.players === 1 ? '' : 's'}</span>
                       </button>
-                      <span className="sb-score" style={{ color: index === 0 ? '#ffd60a' : 'var(--ink)' }}>
+                      <span className="sb-score" style={{ color: index === 0 ? 'var(--rank-1)' : 'var(--ink)' }}>
                         {formatScore(t.average)}
                       </span>
                     </li>

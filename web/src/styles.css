@@ -68,6 +68,10 @@
   --ink: #f6f4ff;
   --muted: #a9a4cc;
   --accent-text: var(--accent);
+  --rank-1: #ffd60a;
+  --rank-2: #e2e8f0;
+  --rank-3: #f59e0b;
+  --pill-bg: rgb(0 0 0 / 0.35);
   color-scheme: dark;
 }
 
@@ -77,10 +81,14 @@
   --surface-2: #ece9f8;
   --line: rgb(20 16 60 / 0.14);
   --ink: #17132f;
-  --muted: #5d5880;
+  --muted: #524d73;
   --good: #15803d;
   --bad: #c0263b;
-  --accent-text: color-mix(in oklab, var(--accent) 52%, #1c1300);
+  --accent-text: color-mix(in oklab, var(--accent) 44%, #1c1300);
+  --rank-1: #8a5600;
+  --rank-2: #475569;
+  --rank-3: #9a3412;
+  --pill-bg: color-mix(in oklab, var(--ink) 7%, var(--surface));
   color-scheme: light;
 }
 
@@ -598,7 +606,7 @@ button:disabled {
     border-radius: 4px;
     border-width: 2px;
     min-height: 50px;
-    padding: 0 16px;
+    padding: 8px 16px;
     font-family: var(--font-display);
     font-size: 0.6875rem;
     font-weight: 400;
@@ -636,7 +644,7 @@ button:disabled {
 
   .arcade .btn-sm {
     min-height: 38px;
-    padding: 0 11px;
+    padding: 6px 11px;
     font-size: 0.625rem;
     border-radius: 3px;
   }
@@ -645,7 +653,7 @@ button:disabled {
     .arcade .btn-sm {
       min-height: 44px;
       min-width: 44px;
-      padding: 0 12px;
+      padding: 8px 12px;
     }
   }
 
@@ -1040,6 +1048,20 @@ button:disabled {
   .medal-badge[data-tone='muted'] {
     --medal: var(--muted);
     box-shadow: 3px 3px 0 #000;
+  }
+
+  :root[data-theme='light'] .medal-badge {
+    color: var(--ink);
+    background: color-mix(in oklab, var(--medal) 16%, var(--surface));
+  }
+  :root[data-theme='light'] .medal-badge[data-tone='legend'] {
+    --medal: #0e7490;
+    color: var(--ink);
+  }
+  :root[data-theme='light'] .medal-badge[data-tone='gold'],
+  :root[data-theme='light'] .medal-badge[data-tone='warn'] {
+    --medal: #b45309;
+    color: #1c1300;
   }
 
   /* --- report exhibit bezel ------------------------------------------------- */

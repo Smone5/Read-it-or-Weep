@@ -118,7 +118,7 @@ def parse_pdf(data: bytes, filename: str = "") -> ParsedDocument:
     pages = []
     page_count = len(document)
     for page_idx, page in enumerate(document):
-        layout = page.get_text("dict")
+        layout = page.get_text("dict", sort=True)
         rect = page.rect
         pages.append((page_idx, page, layout, rect.height))
         seen_margin: set[str] = set()
@@ -167,18 +167,24 @@ def parse_pdf(data: bytes, filename: str = "") -> ParsedDocument:
         except Exception:
             page_tables = []
 
+        page_block_positions: list[tuple[float, int]] = []
+
+        def _emit(block_obj: Block, y_pos: float) -> None:
+            parsed.blocks.append(block_obj)
+            page_block_positions.append((y_pos, len(parsed.blocks) - 1))
+
         for block in layout.get("blocks", []):
+            bbox = tuple(block.get("bbox") or (0.0, 0.0, 0.0, 0.0))
             if block.get("type") == 1:
                 image = block.get("image")
                 if image:
-                    parsed.blocks.append(Block(kind="image", image=image, mime=f"image/{block.get('ext', 'png')}"))
+                    _emit(Block(kind="image", image=image, mime=f"image/{block.get('ext', 'png')}"), bbox[1])
                 continue
-            bbox = tuple(block.get("bbox") or (0.0, 0.0, 0.0, 0.0))
             in_table = False
             for t_idx, (tbbox, md, emitted) in enumerate(page_tables):
                 if _overlap_ratio(bbox, tbbox) >= 0.55:
                     if not emitted:
-                        parsed.blocks.append(Block(kind="table", text=md))
+                        _emit(Block(kind="table", text=md), tbbox[1])
                         page_tables[t_idx] = (tbbox, md, True)
                     in_table = True
                     break
@@ -203,37 +209,75 @@ def parse_pdf(data: bytes, filename: str = "") -> ParsedDocument:
                 continue
 
             if norm in toc_levels and _looks_like_heading(text):
-                parsed.blocks.append(Block(kind="heading", text=text, level=toc_levels[norm]))
+                _emit(Block(kind="heading", text=text, level=toc_levels[norm]), bbox[1])
             elif block_size in larger and _looks_like_heading(text) and not text.endswith("."):
-                parsed.blocks.append(Block(kind="heading", text=text, level=larger.index(block_size) + 1))
+                _emit(Block(kind="heading", text=text, level=larger.index(block_size) + 1), bbox[1])
             elif bold and len(text) <= 80 and _looks_like_heading(text) and not text.endswith("."):
-                parsed.blocks.append(Block(kind="heading", text=text, level=len(larger) + 1))
+                _emit(Block(kind="heading", text=text, level=len(larger) + 1), bbox[1])
             else:
-                parsed.blocks.append(Block(kind="paragraph", text=text))
+                _emit(Block(kind="paragraph", text=text), bbox[1])
 
         # Emit any table that didn't overlap a text block (rare, e.g., image-backed table).
-        for _, md, emitted in page_tables:
+        for tbbox, md, emitted in page_tables:
             if not emitted:
-                parsed.blocks.append(Block(kind="table", text=md))
+                _emit(Block(kind="table", text=md), tbbox[1])
 
-        # Capture clickable PDF link annotations (e.g. hyperlinked YouTube URLs on this page).
+        # Attach clickable PDF link annotations to the closest block vertically so links above a mid-page heading
+        # stay in their own section instead of drifting to the bottom of the page.
         try:
-            page_uris = [
-                str(link["uri"]).strip()
-                for link in (page.get_links() or [])
-                if isinstance(link.get("uri"), str) and str(link["uri"]).strip().startswith(("http://", "https://"))
-            ]
+            raw_links = page.get_links() or []
         except Exception:
-            page_uris = []
-        if page_uris and parsed.blocks:
-            parsed.blocks[-1].links.extend(page_uris)
+            raw_links = []
+        for link in raw_links:
+            uri = link.get("uri")
+            if not (isinstance(uri, str) and uri.strip().startswith(("http://", "https://"))):
+                continue
+            uri = uri.strip()
+            if page_block_positions:
+                rect = link.get("from")
+                ly = float(rect.y0) if rect is not None and hasattr(rect, "y0") else page_h
+                _, target_idx = min(page_block_positions, key=lambda pair: abs(pair[0] - ly))
+                parsed.blocks[target_idx].links.append(uri)
+            elif parsed.blocks:
+                parsed.blocks[-1].links.append(uri)
     document.close()
     return parsed
 
 
+def _pptx_chart_markdown(chart) -> tuple[str | None, str]:
+    """Extract a native PowerPoint chart's title and series/category values into markdown."""
+    title = None
+    try:
+        if chart.has_title and chart.chart_title.has_text_frame:
+            title = chart.chart_title.text_frame.text.strip() or None
+    except Exception:
+        pass
+    try:
+        plots = list(chart.plots)
+        if not plots:
+            return title, ""
+        plot = plots[0]
+        categories = [str(c.label).strip() for c in (plot.categories or [])]
+        series_list = list(plot.series or [])
+        if not series_list:
+            return title, ""
+        header = ["Category", *[str(s.name or f"Series {i + 1}").strip() for i, s in enumerate(series_list)]]
+        rows = [header]
+        n_rows = max(len(categories), max((len(s.values or []) for s in series_list), default=0))
+        for r_idx in range(n_rows):
+            cat = categories[r_idx] if r_idx < len(categories) else f"Item {r_idx + 1}"
+            vals = [
+                ("" if r_idx >= len(s.values or []) or s.values[r_idx] is None else str(s.values[r_idx]))
+                for s in series_list
+            ]
+            rows.append([cat, *vals])
+        return title, rows_to_markdown(rows)
+    except Exception:
+        return title, ""
+
+
 def parse_pptx(data: bytes, filename: str = "") -> ParsedDocument:
     from pptx import Presentation
-    from pptx.util import Emu
 
     try:
         deck = Presentation(io.BytesIO(data))
@@ -241,22 +285,31 @@ def parse_pptx(data: bytes, filename: str = "") -> ParsedDocument:
         raise UnreadableDocument("This PowerPoint file could not be opened (use .pptx).") from exc
     parsed = ParsedDocument(title=(deck.core_properties.title or "").strip() or None)
 
-    def walk(shapes, title_shape) -> None:
+    def walk(shapes, title_shape) -> int:
+        content_blocks = 0
         for shape in shapes:
             if shape is title_shape:
                 continue
             if shape.shape_type == 6:  # group
-                walk(shape.shapes, title_shape)
+                content_blocks += walk(shape.shapes, title_shape)
                 continue
             if getattr(shape, "has_table", False) and shape.has_table:
                 rows = [[cell.text.strip() for cell in row.cells] for row in shape.table.rows]
                 rows = [r for r in rows if any(r)]
                 if len(rows) >= 2:
                     parsed.blocks.append(Block(kind="table", text=rows_to_markdown(rows)))
+                    content_blocks += 1
+                continue
+            if getattr(shape, "has_chart", False) and shape.has_chart:
+                c_title, md = _pptx_chart_markdown(shape.chart)
+                if md.strip():
+                    parsed.blocks.append(Block(kind="chart", text=md, caption=c_title))
+                    content_blocks += 1
                 continue
             if shape.shape_type == 13 and hasattr(shape, "image"):  # picture
                 try:
                     parsed.blocks.append(Block(kind="image", image=shape.image.blob, mime=shape.image.content_type))
+                    content_blocks += 1
                 except Exception:
                     pass
                 continue
@@ -284,18 +337,33 @@ def parse_pptx(data: bytes, filename: str = "") -> ParsedDocument:
                             text=text,
                             links=run_links,
                         ))
+                        content_blocks += 1
                     elif run_links and parsed.blocks:
                         parsed.blocks[-1].links.extend(run_links)
+        return content_blocks
 
+    slide_entries: list[tuple[int, int]] = []  # (heading_block_idx, content_blocks)
     for number, slide in enumerate(deck.slides, start=1):
         title_shape = slide.shapes.title
         title = (title_shape.text.strip() if title_shape is not None and title_shape.has_text_frame else "") or f"Slide {number}"
+        heading_idx = len(parsed.blocks)
         parsed.blocks.append(Block(kind="heading", text=title, level=1))
-        walk(slide.shapes, title_shape)
+        body_count = walk(slide.shapes, title_shape)
         if slide.has_notes_slide and slide.notes_slide.notes_text_frame is not None:
             notes = slide.notes_slide.notes_text_frame.text.strip()
             if notes:
                 parsed.blocks.append(Block(kind="paragraph", text=f"Speaker notes: {notes}"))
-    if not any(b.kind in ("paragraph", "list_item", "table") for b in parsed.blocks):
+                body_count += 1
+        slide_entries.append((heading_idx, body_count))
+
+    # If the deck uses section-divider slides (title-only slides with 0 body blocks) alongside content slides,
+    # demote content slides to level=2 so sections group naturally instead of merging arbitrarily past 14 slides.
+    dividers = [idx for idx, body in slide_entries if body == 0]
+    if len(dividers) >= 2 and len(slide_entries) > len(dividers) + 2:
+        for idx, body in slide_entries:
+            if body > 0:
+                parsed.blocks[idx].level = 2
+
+    if not any(b.kind in ("paragraph", "list_item", "table", "chart") for b in parsed.blocks):
         raise UnreadableDocument("No readable text was found in this presentation.")
     return parsed

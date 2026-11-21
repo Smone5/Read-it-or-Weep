@@ -20,6 +20,7 @@ import random
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 import jwt
@@ -318,11 +319,13 @@ async def build_question(decade: str, avoid_track_ids: set[str], asks: str | Non
             "asks": "title" if ask_title else "artist"}
 
 
-def _track_view(track: dict, *, because: str | None = None) -> dict:
+def _track_view(track: dict, *, because: str | None = None, cue_reason: str | None = None) -> dict:
     view = {"title": track["title"], "artist": track["artist"], "previewUrl": track["preview_url"],
             "artworkUrl": track["artwork_url"], "trackUrl": track["track_url"]}
     if because:
         view["because"] = because
+    if cue_reason:
+        view["cueReason"] = cue_reason
     return view
 
 
@@ -417,7 +420,7 @@ def build_cues(tracks: list[dict], sections: list[dict] | None = None,
             for t in by_mood.get(mood, []):
                 if t["preview_url"] not in used_urls:
                     used_urls.add(t["preview_url"])
-                    return _track_view(t, because=reason)
+                    return _track_view(t, cue_reason=reason)
         return None
 
     cues: dict = {}
@@ -457,7 +460,7 @@ def build_cues(tracks: list[dict], sections: list[dict] | None = None,
                 break
         if match:
             section_used.add(match["preview_url"])
-            by_section[section["id"]] = _track_view(match, because=f"Matched to: {section['heading']}")
+            by_section[section["id"]] = _track_view(match, cue_reason=f"Matched to: {section['heading']}")
     if by_section:
         cues["bySection"] = by_section
 
@@ -571,6 +574,17 @@ async def after_party(decade: str, heard_ids: list[str] | None = None, count: in
     return chosen
 
 
+_ALLOWED_PREVIEW_SUFFIXES = (".mzstatic.com", ".itunes.apple.com")
+
+
+def _allowed_preview_url(url: str) -> bool:
+    parsed = urlparse((url or "").strip())
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    return any(host == s.lstrip(".") or host.endswith(s) for s in _ALLOWED_PREVIEW_SUFFIXES)
+
+
 async def preview_is_dead(url: str) -> bool:
     """Ask the music host directly whether a clip still exists. True only on a clear "gone".
 
@@ -578,8 +592,10 @@ async def preview_is_dead(url: str) -> bool:
     the music host fails every one of them. Without this check, one such player would retire the
     whole catalogue, a track at a time.
     """
+    if not _allowed_preview_url(url):
+        return False
     try:
-        async with httpx.AsyncClient(timeout=5, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
             response = await client.get(url, headers={"Range": "bytes=0-1"})
     except httpx.HTTPError:
         return False                      # we could not tell, so the clip keeps the benefit of the doubt

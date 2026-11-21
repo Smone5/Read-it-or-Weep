@@ -266,8 +266,13 @@ function goal(): number {
   const moment = level === 'intro' ? mixStep(mix.opening) : level === 'think' ? mixStep(mix.questions) : level === 'party' ? 1 : mixStep(mix.between)
   const scale = playerScale()
   if (!voiceIsOver()) return Math.min(MAX_GAIN, base * moment * scale)
+  // Scale duck ceiling relative to the chosen soundtrack volume so "quiet" still noticeably dips under the host.
+  const volRatio = Math.min(1.15, levels.gap / LEVELS.medium.gap)
   const duck =
-    (level === 'intro' ? UNDER_HOST_INTRO : level === 'swell' || level === 'title' ? UNDER_HOST_BIG : UNDER_HOST) * mixStep(mix.under_host) * UNDER_HOST_TOUCH
+    (level === 'intro' ? UNDER_HOST_INTRO : level === 'swell' || level === 'title' ? UNDER_HOST_BIG : UNDER_HOST) *
+    volRatio *
+    mixStep(mix.under_host) *
+    UNDER_HOST_TOUCH
   return Math.min(MAX_GAIN, base * moment * scale, duck * Math.min(scale, UNDER_HOST_PLAYER_MAX))
 }
 
@@ -713,10 +718,17 @@ export function startParty(list: PartyTrack[]) {
   sync()
 }
 
-/** Pause or resume (the button on the "now playing" strip). Resuming begins the next song. */
+/** Pause or resume (the button on the "now playing" strip). Resuming clears any lingering video mute lock. */
 export function toggleJukebox() {
   if (!on) return
   void audioContext().resume().catch(() => undefined) // inside the tap, where a browser will allow it
+  if (videoLock > 0) {
+    videoLock = 0
+    needsTap = false
+    paused = false
+    sync()
+    return
+  }
   if (needsTap) {
     needsTap = false // this call is the tap
     paused = false
@@ -729,6 +741,7 @@ export function nextJukeboxSong() {
   if (!on || busy) return
   void audioContext().resume().catch(() => undefined)
   if (!wanted()) {
+    videoLock = 0
     paused = false
     needsTap = false
     sync()

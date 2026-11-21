@@ -54,6 +54,21 @@ def _count_line(game: str) -> None:
         _said.pop(next(iter(_said)))
 
 
+async def _live_question_line(session: dict) -> str | None:
+    """Fast verbatim read for non-music live questions (skips LLM latency and avoids paraphrasing)."""
+    index, items = session["current_index"], session["items"]
+    item = items[index] if 0 <= index < len(items) else None
+    if not item or session["status"] != "question" or item["kind"] == "music":
+        return None
+    if live.is_double_points(index, len(items)):
+        lead = f"Question {index + 1}, double points!"
+    elif index == 0:
+        lead = "First question!"
+    else:
+        lead = f"Question {index + 1}."
+    return f"{lead} {item['text']}"
+
+
 async def _live_direction(session: dict, cue: str) -> str | None:
     """Stage directions for the big-screen host, built from the live session's own data."""
     index, items = session["current_index"], session["items"]
@@ -61,16 +76,15 @@ async def _live_direction(session: dict, cue: str) -> str | None:
     if cue == "live_welcome":
         players = await db.fetchval("select count(*) from live_participants where session_id = $1", session["id"])
         return (f"Open the live show. {players} players are in the room with their phones out. Welcome the room in "
-                "two short sentences, under 25 words, and tell them to keep their phones ready.")
+                "two short sentences and tell them to keep their phones ready. Word limit: 25.")
     if cue == "live_question" and item and session["status"] == "question":
-        # The phones stay locked until this line has been said, so it must end on the question itself.
         double = " This is a DOUBLE POINTS question!" if live.is_double_points(index, len(items)) else ""
         if item["kind"] == "music":
-            return (f"Announce a music break.{double} Its name first, as a headline - \"Music Break!\" - then one quick joke of "
-                    "ten words or fewer. Do not name the song or artist. The clip starts as you finish.")
+            return (f"Announce a music break.{double} Its name first, as a headline - \"Music Break!\" - then one quick "
+                    "quip. Do not name the song or artist. The clip starts as you finish. Word limit: 15.")
         return (f"Read question {index + 1} to the room, clearly and at an easy pace, exactly as written, after a lead-in "
                 f"of at most four words{(' (mention DOUBLE POINTS in the lead-in)' if double else '')}. Do not read the options "
-                f"and do not add a joke or a comment afterwards: the clock starts as you finish. The question: \"{item['text']}\"")
+                f"and do not add a comment afterwards. The question: \"{item['text']}\"")
     if cue == "live_reveal" and item and session["status"] == "reveal":
         totals = await db.fetchrow(
             "select count(*) as answered, count(*) filter (where is_correct) as correct from live_answers"
@@ -87,18 +101,25 @@ async def _live_direction(session: dict, cue: str) -> str | None:
         fast_note = (f" Fastest finger: {fastest['display_name']} in {fastest['time_ms'] / 1000:.1f} seconds."
                      if fastest else "")
         return (f"Reveal the answer to the room: {answer}. {percent}% of the room got it right.{fast_note} Start with the answer "
-                "itself - no verdict call such as \"Correct!\", because the room gave many answers - then ONE quick joke "
-                "about how the room did. Under 18 words.")
+                "itself - no verdict call such as \"Correct!\", because the room gave many answers - then ONE quick line "
+                "about how the room did. Word limit: 18.")
     if cue in ("live_scoreboard", "live_final") and session["status"] in ("scoreboard", "finished"):
-        top = await db.fetch("select display_name, score, team from live_participants where session_id = $1"
-                             " order by score desc limit 3", session["id"])
-        if not top:
+        snap = await live.state(session, host=True, player=None)
+        standings = snap.get("standings") or []
+        if not standings:
             return None
-        names = ", ".join(f"{t['display_name']} on {t['score']}" for t in top)
+        names = ", ".join(f"{t['name']} on {t['score']}" for t in standings[:3])
+        mover = snap.get("biggestMover")
+        teams = snap.get("teams") or []
+        mover_note = (f" Biggest mover: {mover['name']} jumped {mover['delta']} spots to #{mover['rank']}."
+                      if mover else "")
+        team_note = (f" Leading team: {teams[0]['team']} (avg {teams[0]['average']})."
+                     if len(teams) >= 2 else "")
         if cue == "live_final":
-            return (f"The live game is over. Final top three: {names}. Crown the winner and sign off in two short "
-                    "sentences, under 25 words.")
-        return f"Scoreboard check. Current top three: {names}. One quick line about the race, under 15 words."
+            return (f"The live game is over. Final top three: {names}.{team_note} Crown the winner and sign off in two short "
+                    "sentences. Word limit: 25.")
+        return (f"Scoreboard check. Current top three: {names}.{mover_note}{team_note} "
+                "One quick line about the race. Word limit: 18.")
     return None
 
 
@@ -143,7 +164,7 @@ async def host_socket(websocket: WebSocket) -> None:
     _open[game] = _open.get(game, 0) + 1
     try:
         await _serve(websocket, game=game, quiz=quiz, player=player, run_row=run_row, session=session,
-                     live_code=live_code, host_id=host_id, voice=voice)
+                     live_code=live_code, live_key=key, host_id=host_id, voice=voice)
     finally:
         if _open.get(game, 0) <= 1:
             _open.pop(game, None)
@@ -152,7 +173,7 @@ async def host_socket(websocket: WebSocket) -> None:
 
 
 async def _serve(websocket: WebSocket, *, game: str, quiz: dict, player: dict | None, run_row: dict | None,
-                 session: dict | None, live_code: str, host_id: str, voice: int) -> None:
+                 session: dict | None, live_code: str, live_key: str, host_id: str, voice: int) -> None:
     """One voice channel, from the model's first breath to the socket closing."""
 
     instructions, host = await host_service.persona(quiz, straight=bool(run_row and run_row["mode"] == "straight"),
@@ -256,14 +277,25 @@ async def _serve(websocket: WebSocket, *, game: str, quiz: dict, player: dict | 
                     else:
                         cue = str(message.get("cue", ""))
                         if session is not None:
-                            direction = await _live_direction(await live.load(live_code, fresh=True), cue)
+                            fresh_session = await live.load(live_code, fresh=True)
+                            if not live.is_host(fresh_session, live_key):
+                                break
+                            q_line = await _live_question_line(fresh_session) if cue == "live_question" else None
+                            if q_line and not unwanted(number):
+                                stream = voice_session.recite(q_line, note="Read the live question verbatim.", keep=False)
+                                direction = None
+                            else:
+                                direction = await _live_direction(fresh_session, cue)
                         elif cue == "read":
-                            # The final question, read out word for word (no writer): see final_question_line.
+                            # The final question, read out word for word (never cached globally so confidential
+                            # quiz text does not persist after quiz deletion).
                             current = await db.fetchrow("select * from runs where id = $1", run_row["id"])
-                            line = await host_service.final_question_line(current, message.get("itemId"))
+                            line = await host_service.final_question_line(
+                                current, message.get("itemId"), manner=host.get("manner"),
+                            )
                             direction = None
                             if line and not unwanted(number):
-                                stream = voice_session.recite(line)
+                                stream = voice_session.recite(line, keep=False)
                         else:
                             current = await db.fetchrow("select * from runs where id = $1", run_row["id"])
                             direction = await host_service.describe_cue(cue, run=current, player=player,

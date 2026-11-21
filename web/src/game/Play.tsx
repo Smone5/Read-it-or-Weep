@@ -88,7 +88,7 @@ const CLIP_GAP_MS = 150
 // click next.")
 const WAIT_NOT_BEFORE_MS = 1200
 const LINGER_AFTER_MS = 6000
-const HOST_LATE_MS = 3200 // if he has not started speaking by now, the game goes on without the introduction
+const HOST_LATE_MS = 6500 // allow round intros time to generate without tripping host rest mode
 // The opening allows for him still connecting, and for a long line to write (measured up to 7.4 s through the tester
 // link). The music is up during the wait, so it plays as the show's intro rather than dead air.
 const HOST_LATE_OPENING_MS = 12000
@@ -146,10 +146,10 @@ function RoundEmblem({ title }: { title: string }) {
   return <IconSparkle {...props} />
 }
 
-const LIFELINES: { kind: 'fifty' | 'peek' | 'hint'; label: string; cost: string; help: string }[] = [
-  { kind: 'fifty', label: '50/50', cost: '-25%', help: 'Remove two wrong answers (-25% pts)' },
-  { kind: 'peek', label: 'Peek', cost: '-50%', help: 'See the passage +10s (-50% pts)' },
-  { kind: 'hint', label: 'Hint', cost: '-20%', help: 'Ask the host (-20% pts; free if fallback)' },
+const LIFELINES: { kind: 'fifty' | 'peek' | 'hint'; label: string; cost: string; short: string; help: string }[] = [
+  { kind: 'fifty', label: '50/50', cost: '-25%', short: 'Cut 2 wrong', help: 'Remove two wrong answers (-25% pts)' },
+  { kind: 'peek', label: 'Peek', cost: '-50%', short: 'See source', help: 'See the report passage +10s (-50% pts)' },
+  { kind: 'hint', label: 'Hint', cost: '-20%', short: 'Host clue', help: 'Ask the host for a clue (-20% pts)' },
 ]
 
 const FLAG_REASONS = ['The marked answer is wrong', 'More than one answer fits', 'The question is unclear', 'Something else']
@@ -320,6 +320,8 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
     setReveal(null)
     setPicked(null)
     setFlagged(false)
+    setFlagging(false)
+    setQuitting(false)
     setError('')
     setClipStarted(false)
     setClipOver(false)
@@ -381,6 +383,8 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       setClipOver(false)
       setReveal(null)
       setPicked(null)
+      setFlagging(false)
+      setQuitting(false)
       setError('')
       setCard(opening ? openingCard(state, next) : roundCard(next, mode))
       setOpening(opening)
@@ -474,10 +478,11 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         if (!resumed) {
           play('levelup')
           const tapped = Date.now()
-          const welcome = host?.cue('welcome', undefined, { notBefore: tapped + openingThemeMs() }) ?? 0
+          const expectMusic = musicOn() && mode !== 'straight'
+          const welcome = host?.cue('welcome', undefined, { notBefore: expectMusic ? tapped + openingThemeMs() : 0 }) ?? 0
           welcomeRef.current = welcome
           trace('opening')
-          if (welcome && host) {
+          if (welcome && host && expectMusic) {
             // His first word waits for the theme: openingThemeMs() after its first note, if that is later than
             // planned. With no music coming, he need not wait at all.
             let anchored = false
@@ -566,7 +571,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
             void confetti({ particleCount: 55, spread: 62, origin: { y: 0.25 }, colors, shapes: ['square'], scalar: 0.8 })
           }
         }
-        if (hostReacts && item.slot !== 'fact_fake' && item.slot !== 'song_or_jargon') host?.cue('result', item.id)
+        if (hostReacts && item.slot !== 'fact_fake') host?.cue('result', item.id)
       } catch (caught) {
         if (caught instanceof ApiError && caught.status === 409) await finish()
         else {
@@ -618,7 +623,9 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   }, [mode, phase, speedSecLeft])
 
   // Trigger pre-resolved contextual soundtrack cues (tension for Final Wager / 1-life Sudden Death,
-  // hype for Lightning / Speed Run / hot streaks, and thematic tracks matched to report sections).
+  // hype for Lightning / Speed Run / hot streaks, and thematic section tracks only on round transitions
+  // with a 20s minimum cooldown so opening/round music never thrashes every question).
+  const lastSectionCueRef = useRef<{ round: number; at: number }>({ round: 1, at: Date.now() })
   useEffect(() => {
     if (mode === 'straight' || hasClip) return
     const lastLife = mode === 'sudden_death' && (state.maxStrikes ?? 3) - (state.strikes ?? 0) === 1
@@ -627,14 +634,25 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
     } else if (item?.slot === 'fact_fake' || mode === 'speed' || state.streak >= 5) {
       cueJukebox('hype')
     } else if (phase === 'question' && item?.section?.id && item.slot !== 'music' && item.slot !== 'jargon') {
-      cueJukebox('section', item.section.id)
+      const roundNo = item.round.number
+      const now = Date.now()
+      if (roundNo > lastSectionCueRef.current.round && now - lastSectionCueRef.current.at >= 20000) {
+        lastSectionCueRef.current = { round: roundNo, at: now }
+        cueJukebox('section', item.section.id)
+      }
     }
-  }, [phase, item?.slot, item?.section?.id, mode, state.streak, state.strikes, state.maxStrikes, hasClip])
+  }, [phase, item?.slot, item?.section?.id, item?.round.number, mode, state.streak, state.strikes, state.maxStrikes, hasClip])
 
   // Keyboard: A-D or 1-4 to answer, Enter / Space to continue or to skip a title card.
   useEffect(() => {
+    const isInteractive = (el: EventTarget | null) => {
+      if (!(el instanceof Element)) return false
+      return Boolean(el.closest('button, a, input, textarea, select, iframe, [role="button"], [contenteditable="true"]'))
+    }
     const onKey = (event: KeyboardEvent) => {
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      if (quitting || flagging || document.querySelector('[role="dialog"]')) return
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return
       const go = event.key === 'Enter' || event.key === ' '
       if (phase === 'question' && item?.options) {
         const index = 'abcd'.indexOf(event.key.toLowerCase())
@@ -642,16 +660,18 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         const choice = index >= 0 ? index : number
         if (choice >= 0 && choice < item.options.length && !item.removed.includes(choice)) void submit(choice)
       } else if (phase === 'reveal' && !quick && go) {
+        // Don't hijack Enter/Space when the user is focused on Flag, VideoClipCard, Music/Sound toggles, etc.
+        if (isInteractive(event.target) || isInteractive(document.activeElement)) return
         event.preventDefault()
         advance()
-      } else if (phase === 'card' && go && skipRef.current && !(event.target instanceof HTMLButtonElement)) {
+      } else if (phase === 'card' && go && skipRef.current && !isInteractive(event.target)) {
         event.preventDefault()
         skipRef.current()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [phase, item, submit, advance, quick])
+  }, [phase, item, submit, advance, quick, quitting, flagging])
 
   const useLifeline = async (kind: string) => {
     if (!item || busy) return
@@ -878,9 +898,9 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
                       <span>{all.length === 3 ? ['Safe', 'Bold', 'Go big'][index] : 'Bet'}</span>
                       <span className="tabular-nums">{amount.toLocaleString()} pts</span>
                     </div>
-                    <div className="flex w-full items-center justify-between text-[11px] font-normal tracking-normal normal-case opacity-85" style={{ fontFamily: 'var(--font-sans)' }}>
-                      <span style={{ color: isBig ? '#0d3b1e' : 'var(--good)' }}>Win → {winTotal.toLocaleString()}</span>
-                      <span style={{ color: isBig ? '#5c1118' : 'var(--bad)' }}>Miss → {loseTotal.toLocaleString()}</span>
+                    <div className="flex w-full items-center justify-between text-[11px] font-semibold tracking-normal normal-case" style={{ fontFamily: 'var(--font-sans)' }}>
+                      <span style={{ color: isBig ? 'var(--accent-ink)' : 'var(--good)' }}>Win → {winTotal.toLocaleString()}</span>
+                      <span style={{ color: isBig ? 'var(--accent-ink)' : 'var(--bad)', opacity: isBig ? 0.85 : 1 }}>Miss → {loseTotal.toLocaleString()}</span>
                     </div>
                   </button>
                 )
@@ -979,10 +999,18 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
                     const left = state.lifelines[lifeline.kind] ?? 0
                     const used = item.lifelinesUsed.includes(lifeline.kind)
                     return (
-                      <button key={lifeline.kind} className="btn btn-ghost btn-sm" disabled={busy || left <= 0 || used} onClick={() => void useLifeline(lifeline.kind)} title={lifeline.help}>
+                      <button
+                        key={lifeline.kind}
+                        className="btn btn-ghost btn-sm"
+                        disabled={busy || left <= 0 || used}
+                        onClick={() => void useLifeline(lifeline.kind)}
+                        title={lifeline.help}
+                        aria-label={`${lifeline.label}: ${lifeline.help} (${left} left)`}
+                      >
                         {lifeline.kind === 'fifty' ? <IconSplit size={13} /> : lifeline.kind === 'peek' ? <IconBook size={13} /> : <IconBulb size={13} />}
                         <span>{lifeline.label}</span>
-                        <span className="text-[11px] opacity-70">{lifeline.cost}</span>
+                        <span className="hidden text-[11px] text-muted sm:inline">· {lifeline.short}</span>
+                        <span className="text-[11px] opacity-75">{lifeline.cost}</span>
                         <span className="text-muted">×{left}</span>
                       </button>
                     )

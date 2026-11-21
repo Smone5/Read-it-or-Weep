@@ -12,7 +12,7 @@ import { applyBranding, applyDecade } from '../lib/theme'
 import type { Branding, LiveState } from '../lib/types'
 import { useLive, useTicker } from './useLive'
 
-type Info = { code: string; status: string; quizTitle: string; teams: string[]; branding: Branding }
+type Info = { code: string; status: string; quizTitle: string; teams: string[]; requiresCode?: boolean; branding: Branding }
 
 export default function LivePlayer() {
   const { code: rawCode } = useParams()
@@ -69,6 +69,7 @@ function JoinLive({ info, onJoined }: { info: Info; onJoined: () => void }) {
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [team, setTeam] = useState('')
+  const [accessCode, setAccessCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -77,7 +78,10 @@ function JoinLive({ info, onJoined }: { info: Info; onJoined: () => void }) {
     setBusy(true)
     setError('')
     try {
-      const result = await api<{ token: string | null }>(`/api/live/${info.code}/join`, { as: 'none', body: { name, email, team: team || null } })
+      const result = await api<{ token: string | null }>(`/api/live/${info.code}/join`, {
+        as: 'none',
+        body: { name, email, team: team || null, accessCode: accessCode || null },
+      })
       if (result.token) session.setPlayerToken(result.token)
       buzz(25)
       onJoined()
@@ -111,6 +115,12 @@ function JoinLive({ info, onJoined }: { info: Info; onJoined: () => void }) {
               <option value="" disabled>Pick your team</option>
               {info.teams.map((t) => <option key={t}>{t}</option>)}
             </select>
+          </div>
+        )}
+        {info.requiresCode && (
+          <div>
+            <label className="label" htmlFor="live-access-code">Access code</label>
+            <input id="live-access-code" className="field" value={accessCode} onChange={(e) => setAccessCode(e.target.value)} required maxLength={40} autoComplete="off" />
           </div>
         )}
         <ErrorNote>{error}</ErrorNote>
@@ -171,10 +181,20 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
     buzz(20)
     try {
       // Sending the same answer twice changes nothing, so a dropped connection is simply tried again.
-      await api(`/api/live/${code}/answer`, { body: { choiceIndex: index }, retry: 3 })
+      try {
+        await api(`/api/live/${code}/answer`, { body: { choiceIndex: index }, retry: 3 })
+      } catch (firstErr) {
+        // 425 = phone clock was slightly ahead of server's unlock timestamp; retry once after a short beat.
+        if (firstErr instanceof ApiError && firstErr.status === 425) {
+          await new Promise((r) => window.setTimeout(r, 280))
+          await api(`/api/live/${code}/answer`, { body: { choiceIndex: index }, retry: 1 })
+        } else {
+          throw firstErr
+        }
+      }
       setNotSent(false)
     } catch (caught) {
-      // "Too late" stands. Anything else means the answer never arrived: unlock so they can tap again.
+      // 409 ("Too late") stands. Anything else (including 425 still early) means the answer was not recorded: unlock!
       if (!(caught instanceof ApiError) || caught.status !== 409) {
         setPicked(null)
         setNotSent(true)

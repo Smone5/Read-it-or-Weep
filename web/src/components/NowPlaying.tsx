@@ -77,11 +77,15 @@ export function MusicToggle({ showSong = true }: { showSong?: boolean }) {
                 <p className="pixel text-[10px] text-muted">Now playing</p>
                 <p className="mt-0.5 truncate text-[15px] font-bold">{track.title}</p>
                 <p className="truncate text-[13px] text-muted">{track.artist}</p>
-                {track.because && (
+                {track.because ? (
                   <p className="truncate text-[12px]" style={{ color: 'var(--accent-text)' }}>
                     Because you like {track.because}
                   </p>
-                )}
+                ) : track.cueReason ? (
+                  <p className="truncate text-[12px]" style={{ color: 'var(--accent-text)' }}>
+                    {track.cueReason}
+                  </p>
+                ) : null}
               </div>
             </div>
           )}
@@ -144,9 +148,11 @@ export function NowPlaying({ decade, large }: { decade?: string | null; large?: 
     ? 'Tap play for music'
     : track.because
       ? track.because
-      : decade
-        ? `${decade} hits`
-        : 'Now playing'
+      : track.cueReason
+        ? track.cueReason
+        : decade
+          ? `${decade} hits`
+          : 'Now playing'
   return (
     <section className={`card card-accent rise np-shell relative z-[46] ${large ? 'p-4' : 'p-3'}`} aria-label="Music">
       <div className={`np-grid ${large ? 'lg:gap-4' : ''}`}>
@@ -154,7 +160,7 @@ export function NowPlaying({ decade, large }: { decade?: string | null; large?: 
         <div className="min-w-0 flex-1">
           <p className={`pixel neon-accent flex items-center gap-2 ${large ? 'text-[10px] lg:text-xs' : 'text-[10px]'}`}>
             <span className="eq eq-mini" data-on={playing} aria-hidden><i /><i /><i /><i /><i /></span>
-            <span className="inline-flex min-w-0 items-center gap-1.5 truncate" title={track.because ? `Because you like ${track.because}` : undefined}>
+            <span className="inline-flex min-w-0 items-center gap-1.5 truncate" title={track.because ? `Because you like ${track.because}` : (track.cueReason ?? undefined)}>
               {track.because && <IconHeart size={11} />}
               <span className="truncate">{track.because ? <span aria-label={`Because you like ${track.because}`}>{label}</span> : label}</span>
             </span>
