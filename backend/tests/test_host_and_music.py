@@ -79,6 +79,10 @@ def test_default_hosts_cover_all_manners_and_distinct_crt_registers():
     assert all(h["style"].strip() for h in hosts)
     registers = [eleven.BY_ID[h["voice"]].register for h in hosts]
     assert len(set(registers)) == len(hosts)
+    assert eleven.model_for(eleven.BY_ID["eleven:southern"]) == "eleven_v3"
+    assert eleven.match_account_voices([{"voice_id": "v1", "name": "Southern charmer", "sharing": {}}]) == {
+        "eleven:southern": "v1"
+    }
 
 
 def test_live_final_two_questions_are_double_points():

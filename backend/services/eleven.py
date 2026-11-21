@@ -59,6 +59,9 @@ class Voice:
     fallback: str     # the OpenAI voice that stands in when ElevenLabs cannot be used
     name: str         # its name on the ElevenLabs page, which it keeps when added to an account
     register: str = "middle"  # visual/vocal register for the retro CRT phosphor tint
+    # Optional per-voice model override when v4 flattens a voice's accent (e.g. The Southern Charmer loses its
+    # Southern drawl on eleven_v4 / eleven_v4_turbo, whereas eleven_v3 preserves the full Voice Library accent).
+    model: str | None = None
 
     @property
     def share_link(self) -> str:
@@ -77,7 +80,8 @@ VOICES: tuple[Voice, ...] = (
     Voice("eleven:british", "Sophisticated British host", "Smooth and witty, early 30s, a slight British accent.",
           "British wit", "whydKScabPmVENfyGF8q", _LIBRARY, "coral", "The Sophisticated British Host", "brighter"),
     Voice("eleven:southern", "Southern charmer", "Rich and sassy, mid-40s, a vibrant Southern American accent.",
-          "Southern sass", "jphAGjEkmAlXu5DE3FmO", _LIBRARY, "marin", "The Southern Charmer", "middle"),
+          "Southern sass", "jphAGjEkmAlXu5DE3FmO", _LIBRARY, "marin", "The Southern Charmer", "middle",
+          model="eleven_v3"),
     Voice("eleven:hype", "Modern hype master", "Fast and hyped, late 20s, American with an urban flair.",
           "Hype master", "DhaeydPYLLVPtHkt04Qp", _LIBRARY, "verse", "The Modern Hype Master", "hype"),
 )
@@ -119,6 +123,15 @@ def model() -> str:
     return config.elevenlabs_model or DEFAULT_MODEL[engine()]
 
 
+def model_for(voice: Voice | None = None) -> str:
+    """Model to perform ``voice`` with: explicit env override wins, then a per-voice override, then engine default."""
+    if config.elevenlabs_model:
+        return config.elevenlabs_model
+    if voice and voice.model:
+        return voice.model
+    return DEFAULT_MODEL[engine()]
+
+
 def _headers() -> dict[str, str]:
     return {"xi-api-key": config.elevenlabs_api_key}
 
@@ -146,7 +159,8 @@ def match_account_voices(items: list[dict]) -> dict[str, str]:
                 found[voice.id] = item["voice_id"]
                 break
         else:
-            named = [item for item in items if _plain(voice.name) in _plain(item.get("name", ""))]
+            wanted = (_plain(voice.name), _plain(voice.label))
+            named = [item for item in items if any(w and w in _plain(item.get("name", "")) for w in wanted)]
             if named:
                 found[voice.id] = named[0]["voice_id"]
     return found
@@ -225,13 +239,14 @@ async def perform(text: str, voice: Voice, *, output_format: str = OUTPUT_FORMAT
         raise ElevenError("no ElevenLabs key is set", permanent=True)
     path = engine()
     voice_id = await account_voice_id(voice)
+    model_id = model_for(voice)
     # Several games at once: the plan takes only so many lines at the same moment. The rest queue here for a free
     # slot, and a "busy" answer is tried again after a short pause rather than handed to the backup voice at once.
     for attempt in range(BUSY_RETRIES + 1):
         started = False
         async with _slot():
-            pieces = (_socket(text, voice_id, output_format) if path == "socket"
-                      else _http(text, voice_id, path, output_format))
+            pieces = (_socket(text, voice_id, output_format, model_id=model_id) if path == "socket"
+                      else _http(text, voice_id, path, output_format, model_id=model_id))
             try:
                 async with contextlib.aclosing(pieces) as audio:
                     async for chunk in audio:
@@ -245,9 +260,10 @@ async def perform(text: str, voice: Voice, *, output_format: str = OUTPUT_FORMAT
         await asyncio.sleep(0.4 * (attempt + 1) + random.random() * 0.3)
 
 
-async def _socket(text: str, voice_id: str, output_format: str = OUTPUT_FORMAT) -> AsyncIterator[bytes]:
-    """Eleven v4 Turbo over the text-to-dialogue WebSocket: send the line, then ask for the rest at once."""
-    query = urlencode({"model_id": model(), "output_format": output_format})
+async def _socket(text: str, voice_id: str, output_format: str = OUTPUT_FORMAT, *,
+                  model_id: str | None = None) -> AsyncIterator[bytes]:
+    """ElevenLabs text-to-dialogue WebSocket: send the line, then ask for the rest at once."""
+    query = urlencode({"model_id": model_id or model(), "output_format": output_format})
     try:
         connection = await asyncio.wait_for(
             websockets.connect(f"{SOCKET}?{query}", additional_headers=_headers(), max_size=2 ** 22, open_timeout=6),
@@ -298,13 +314,15 @@ async def _socket(text: str, voice_id: str, output_format: str = OUTPUT_FORMAT) 
             await connection.close()
 
 
-async def _http(text: str, voice_id: str, path: str, output_format: str = OUTPUT_FORMAT) -> AsyncIterator[bytes]:
-    """Eleven v4 (or another model) over HTTP, streamed."""
+async def _http(text: str, voice_id: str, path: str, output_format: str = OUTPUT_FORMAT, *,
+                model_id: str | None = None) -> AsyncIterator[bytes]:
+    """Eleven v4 / v3 (or another model) over HTTP, streamed."""
+    chosen = model_id or model()
     if path == "dialogue":
         url, body = f"{API}/v1/text-to-dialogue/stream", {"inputs": [{"text": text, "voice_id": voice_id}],
-                                                          "model_id": model()}
+                                                          "model_id": chosen}
     else:
-        url, body = f"{API}/v1/text-to-speech/{voice_id}/stream", {"text": text, "model_id": model()}
+        url, body = f"{API}/v1/text-to-speech/{voice_id}/stream", {"text": text, "model_id": chosen}
     timeout = httpx.Timeout(connect=6.0, read=CHUNK_TIMEOUT_SEC, write=6.0, pool=6.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:

@@ -736,7 +736,7 @@ KEEP_UP_TO_SEC = 30
 
 
 def _audio_key(voice: "eleven.Voice", line: str, pause_cap: float | None) -> str:
-    return hashlib.sha256(f"{voice.voice_id}|{eleven.model()}|{pause_cap}|{line}".encode()).hexdigest()
+    return hashlib.sha256(f"{voice.voice_id}|{eleven.model_for(voice)}|{pause_cap}|{line}".encode()).hexdigest()
 
 
 async def _recorded(key: str) -> bytes | None:
