@@ -153,7 +153,7 @@ export function SoundToggle() {
   )
 }
 
-export function Meter({ value, max, tone = 'var(--brand)' }: { value: number; max: number; tone?: string }) {
+export function Meter({ value, max, tone = 'var(--brand)', label = 'Progress' }: { value: number; max: number; tone?: string; label?: string }) {
   const fraction = max > 0 ? Math.min(1, Math.max(0, value / max)) : 0
   const percent = Math.round(fraction * 100)
   return (
@@ -161,12 +161,13 @@ export function Meter({ value, max, tone = 'var(--brand)' }: { value: number; ma
       className="h-2.5 w-full overflow-hidden rounded-[3px] border"
       style={{ background: 'color-mix(in oklab, var(--ink) 10%, transparent)', borderColor: 'var(--line)' }}
       role="progressbar"
+      aria-label={label}
       aria-valuenow={percent}
       aria-valuemin={0}
       aria-valuemax={100}
     >
       <div
-        className="h-full w-full origin-left transition-transform duration-700"
+        className="h-full w-full origin-left transition-transform duration-700 motion-reduce:transition-none"
         style={{ transform: `scaleX(${fraction})`, background: tone }}
       />
     </div>

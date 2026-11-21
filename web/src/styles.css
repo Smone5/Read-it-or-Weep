@@ -72,6 +72,7 @@
   --rank-2: #e2e8f0;
   --rank-3: #f59e0b;
   --pill-bg: rgb(0 0 0 / 0.35);
+  --good-ink: #111111;
   color-scheme: dark;
 }
 
@@ -83,6 +84,7 @@
   --ink: #17132f;
   --muted: #524d73;
   --good: #15803d;
+  --good-ink: #ffffff;
   --bad: #c0263b;
   --accent-text: color-mix(in oklab, var(--accent) 44%, #1c1300);
   --rank-1: #8a5600;
@@ -565,7 +567,7 @@ button:disabled {
 
   :root[data-theme='light'] .arcade .neon-accent {
     color: var(--accent-text);
-    text-shadow: 2px 2px 0 color-mix(in oklab, var(--brand) 25%, transparent);
+    text-shadow: none;
   }
 
   /* --- panels --------------------------------------------------------------- */
@@ -577,17 +579,31 @@ button:disabled {
     backdrop-filter: blur(6px);
   }
 
+  :root[data-theme='light'] .arcade .card {
+    background: var(--surface);
+    border-color: color-mix(in oklab, var(--brand) 38%, var(--line));
+    box-shadow: 0 2px 0 rgb(20 16 60 / 0.12), 0 8px 20px -10px rgb(20 16 60 / 0.16);
+  }
+
   @media (pointer: coarse) {
     /* Drop stacked backdrop blur on touch devices for smooth 60fps scrolling and lower battery draw. */
     .arcade .card {
       backdrop-filter: none;
       background: color-mix(in oklab, var(--page) 94%, var(--surface));
     }
+    :root[data-theme='light'] .arcade .card {
+      background: var(--surface);
+    }
   }
 
   .arcade .card-accent {
     border-color: color-mix(in oklab, var(--accent) 82%, var(--ink) 10%);
     box-shadow: 0 0 0 2px #000, 0 0 22px -4px color-mix(in oklab, var(--accent) 70%, transparent);
+  }
+
+  :root[data-theme='light'] .arcade .card-accent {
+    border-color: color-mix(in oklab, var(--accent-text) 55%, var(--line));
+    box-shadow: 0 2px 0 rgb(20 16 60 / 0.14);
   }
 
   .arcade .chip {
@@ -1144,14 +1160,14 @@ button:disabled {
     gap: 10px;
   }
 
-  @container (max-width: 24rem) {
+  @container (max-width: 19rem) {
     .np-grid {
       flex-wrap: wrap;
     }
     .np-actions {
       width: 100%;
       justify-content: flex-end;
-      padding-top: 2px;
+      padding-top: 4px;
       border-top: 1px solid var(--line);
     }
   }
@@ -1221,11 +1237,34 @@ button:disabled {
     height: 28px;
     padding: 0 6px;
     border-radius: 3px;
-    background: rgb(0 0 0 / 0.42);
+    background: var(--pill-bg);
     border: 1px solid color-mix(in oklab, var(--ink) 16%, transparent);
     font-family: var(--font-display);
     font-size: 0.625rem;
     font-variant-numeric: tabular-nums;
+  }
+
+  .sb-list-flat .sb-row {
+    border-width: 0 0 1px 0;
+    border-color: var(--line);
+    border-radius: 0;
+    box-shadow: none;
+    background: transparent;
+    padding: 9px 6px 10px;
+  }
+
+  .sb-list-flat .sb-row:last-child {
+    border-bottom-width: 0;
+  }
+
+  .sb-list-flat .sb-row[data-you='true'] {
+    border: 0;
+    border-left: 4px solid var(--accent);
+    border-bottom: 1px solid color-mix(in oklab, var(--accent) 42%, var(--line));
+    border-radius: 3px;
+    background: color-mix(in oklab, var(--accent) 13%, var(--surface));
+    box-shadow: none;
+    padding-left: 10px;
   }
 
   .sb-you-pill {
@@ -1270,11 +1309,116 @@ button:disabled {
     transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
   }
 
-  .sb-tab[aria-pressed='true'] {
+  .sb-tab:is([aria-pressed='true'], [aria-selected='true']) {
     border-color: var(--accent);
     background: color-mix(in oklab, var(--accent) 18%, var(--surface));
     color: var(--ink);
     box-shadow: 2px 2px 0 #000;
+  }
+
+  :root[data-theme='light'] .sb-tab:is([aria-pressed='true'], [aria-selected='true']) {
+    box-shadow: 0 2px 0 rgb(20 16 60 / 0.14);
+  }
+
+  /* --- summary debrief tabs (single-row scrollable, shape-based underline) --- */
+  .summary-tabs {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    border-bottom: 1px solid var(--line);
+    scroll-snap-type: inline proximity;
+  }
+
+  .summary-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .summary-tab {
+    position: relative;
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 44px;
+    padding: 8px 12px;
+    color: var(--muted);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    font-weight: 700;
+    white-space: nowrap;
+    scroll-snap-align: start;
+    transition: color 0.15s ease;
+  }
+
+  .summary-tab:hover {
+    color: var(--ink);
+  }
+
+  .summary-tab[aria-selected='true'] {
+    color: var(--ink);
+  }
+
+  .summary-tab[aria-selected='true']::after {
+    content: "";
+    position: absolute;
+    inset: auto 0 0;
+    border-block-end: 3px solid var(--accent);
+  }
+
+  /* --- native <details> disclosure (marker directly before label, progressive slide) --- */
+  .summary-disclosure summary {
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    min-height: 44px;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 0.8125rem;
+    font-weight: 600;
+  }
+
+  .summary-disclosure summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .summary-disclosure summary:hover {
+    color: var(--ink);
+  }
+
+  .summary-disclosure summary::before {
+    content: "";
+    inline-size: 0.55em;
+    block-size: 0.55em;
+    flex-shrink: 0;
+    border-inline-end: 2px solid currentColor;
+    border-block-end: 2px solid currentColor;
+    rotate: -45deg;
+  }
+
+  .summary-disclosure[open] > summary::before {
+    rotate: 45deg;
+  }
+
+  .summary-disclosure::details-content {
+    interpolate-size: allow-keywords;
+    overflow: clip;
+    contain: layout;
+  }
+
+  .summary-disclosure:not([open])::details-content {
+    block-size: 0;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .summary-disclosure summary::before {
+      transition: rotate 0.2s ease;
+    }
+    .summary-disclosure::details-content {
+      transition: block-size 0.25s ease-in-out, content-visibility 0.25s ease-in-out;
+      transition-behavior: allow-discrete;
+    }
   }
 
   @media (pointer: coarse) {
@@ -1391,7 +1535,7 @@ button:disabled {
 
 @media (prefers-reduced-motion: reduce) {
   .spin-slow {
-    animation-duration: 4s !important;
+    animation: none !important;
   }
 }
 

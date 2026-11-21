@@ -56,6 +56,7 @@ export function MusicToggle({ showSong = true }: { showSong?: boolean }) {
   return (
     <div ref={box} className="relative z-[55] flex-none">
       <button
+        type="button"
         className="btn btn-ghost btn-sm"
         aria-expanded={open}
         aria-label={`Background music volume: ${words}`}
@@ -108,7 +109,7 @@ export function MusicToggle({ showSong = true }: { showSong?: boolean }) {
             <span>Off</span>
             <span>Loud</span>
           </div>
-          <button className="btn btn-ghost btn-sm mt-3 w-full" onClick={() => setMusicOn(!on)}>
+          <button type="button" className="btn btn-ghost btn-sm mt-3 w-full" onClick={() => setMusicOn(!on)}>
             {on ? 'Turn music off' : 'Turn music on'}
           </button>
         </div>
@@ -118,8 +119,8 @@ export function MusicToggle({ showSong = true }: { showSong?: boolean }) {
 }
 
 /** The record sleeve. On a player's own screen it is also the way to the full song. */
-function Cover({ track, large }: { track: PartyTrack; large?: boolean }) {
-  const px = large ? 64 : 48
+function Cover({ track, large, small }: { track: PartyTrack; large?: boolean; small?: boolean }) {
+  const px = large ? 64 : small ? 38 : 48
   const image = (
     <img
       src={track.artworkUrl ?? ''}
@@ -127,21 +128,23 @@ function Cover({ track, large }: { track: PartyTrack; large?: boolean }) {
       width={px}
       height={px}
       decoding="async"
-      className={`rounded-sm border-2 border-black object-cover ${large ? 'h-14 w-14 lg:h-16 lg:w-16' : 'h-12 w-12'}`}
+      className={`rounded-sm border border-black/60 object-cover ${large ? 'h-14 w-14 border-2 lg:h-16 lg:w-16' : small ? 'h-9 w-9' : 'h-12 w-12 border-2'}`}
     />
   )
   if (!track.trackUrl || large) return <span className="flex-none">{image}</span>
   return (
     <a className="relative flex-none" href={track.trackUrl} target="_blank" rel="noreferrer" title="Listen on Apple Music" aria-label={`Listen to ${track.title} on Apple Music`}>
       {image}
-      <span className="absolute -bottom-1 -right-1 grid h-5 w-5 place-items-center rounded-sm bg-black text-[10px] leading-none text-white" aria-hidden>
-        <IconExternal size={11} />
-      </span>
+      {!small && (
+        <span className="absolute -bottom-1 -right-1 grid h-5 w-5 place-items-center rounded-sm bg-black text-[10px] leading-none text-white" aria-hidden>
+          <IconExternal size={11} />
+        </span>
+      )}
     </a>
   )
 }
 
-export function NowPlaying({ decade, large }: { decade?: string | null; large?: boolean }) {
+export function NowPlaying({ decade, large, subtle }: { decade?: string | null; large?: boolean; subtle?: boolean }) {
   const { track, playing, needsTap } = useJukebox()
   if (!track) return null
   const label = needsTap
@@ -153,6 +156,42 @@ export function NowPlaying({ decade, large }: { decade?: string | null; large?: 
         : decade
           ? `${decade} hits`
           : 'Now playing'
+  if (subtle) {
+    return (
+      <section className="np-shell relative z-[46] rounded-lg border border-line bg-surface-2/80 px-3 py-2" aria-label="Music player">
+        <div className="np-grid">
+          {track.artworkUrl && <Cover track={track} small />}
+          <div className="min-w-0 flex-1">
+            <p className="flex items-center gap-2 text-sm font-semibold">
+              <span className="eq eq-mini flex-none" data-on={playing} aria-hidden><i /><i /><i /><i /><i /></span>
+              <span className="truncate">{track.title}</span>
+            </p>
+            <p className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-muted">
+              <span className="truncate">{track.artist}</span>
+              {(track.because || track.cueReason || needsTap) && (
+                <>
+                  <span aria-hidden>·</span>
+                  <span className="inline-flex min-w-0 items-center gap-1 truncate" style={{ color: 'var(--accent-text)' }}>
+                    {track.because && <IconHeart size={10} />}
+                    <span className="truncate">{label}</span>
+                  </span>
+                </>
+              )}
+            </p>
+          </div>
+          <div className="np-actions flex flex-none items-center gap-1">
+            <button type="button" className="btn btn-ghost btn-sm flex-none" onClick={toggleJukebox} aria-label={playing ? 'Pause the music' : 'Play the music'}>
+              {playing ? <IconPause size={14} /> : <IconPlay size={14} />}
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm flex-none" onClick={nextJukeboxSong} aria-label="Next song">
+              <IconSkip size={14} />
+            </button>
+            <MusicToggle showSong={false} />
+          </div>
+        </div>
+      </section>
+    )
+  }
   return (
     <section className={`card card-accent rise np-shell relative z-[46] ${large ? 'p-4' : 'p-3'}`} aria-label="Music">
       <div className={`np-grid ${large ? 'lg:gap-4' : ''}`}>
@@ -165,14 +204,14 @@ export function NowPlaying({ decade, large }: { decade?: string | null; large?: 
               <span className="truncate">{track.because ? <span aria-label={`Because you like ${track.because}`}>{label}</span> : label}</span>
             </span>
           </p>
-          <p className={`mt-1 truncate font-bold ${large ? 'text-lg lg:text-xl' : ''}`} aria-live="polite">{track.title}</p>
+          <p className={`mt-1 truncate font-bold ${large ? 'text-lg lg:text-xl' : ''}`}>{track.title}</p>
           <p className={`truncate text-muted ${large ? 'lg:text-lg' : 'text-[15px]'}`}>{track.artist}</p>
         </div>
         <div className="np-actions flex flex-none items-center gap-1.5">
-          <button className="btn btn-ghost btn-sm flex-none" onClick={toggleJukebox} aria-label={playing ? 'Pause the music' : 'Play the music'}>
+          <button type="button" className="btn btn-ghost btn-sm flex-none" onClick={toggleJukebox} aria-label={playing ? 'Pause the music' : 'Play the music'}>
             {playing ? <IconPause size={14} /> : <IconPlay size={14} />}
           </button>
-          <button className="btn btn-ghost btn-sm flex-none" onClick={nextJukeboxSong} aria-label="Next song">
+          <button type="button" className="btn btn-ghost btn-sm flex-none" onClick={nextJukeboxSong} aria-label="Next song">
             <IconSkip size={14} />
           </button>
           <MusicToggle showSong={false} />

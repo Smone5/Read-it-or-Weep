@@ -526,9 +526,22 @@ export function MusicPlayer({ src, active, onBroken, onPlaying, onClipOver }: Mu
 // --------------------------------------------------------------------------- HUD
 
 /** Smooth arcade odometer that rolls toward the latest score (instant when reduced motion is enabled). */
-export function RollingScore({ value, pad = 6, durationMs = 420 }: { value: number; pad?: number; durationMs?: number }) {
-  const [shown, setShown] = useState(value)
-  const fromRef = useRef(value)
+export function RollingScore({
+  value,
+  from,
+  pad = 6,
+  format = 'pad',
+  durationMs = 420,
+}: {
+  value: number
+  from?: number
+  pad?: number
+  format?: 'pad' | 'comma'
+  durationMs?: number
+}) {
+  const initial = from !== undefined ? from : value
+  const [shown, setShown] = useState(initial)
+  const fromRef = useRef(initial)
 
   useEffect(() => {
     const startVal = fromRef.current
@@ -552,7 +565,8 @@ export function RollingScore({ value, pad = 6, durationMs = 420 }: { value: numb
     return () => cancelAnimationFrame(frame)
   }, [value, durationMs])
 
-  return <>{String(Math.max(0, shown)).padStart(pad, '0')}</>
+  const safe = Math.max(0, shown)
+  return <>{format === 'comma' ? safe.toLocaleString() : String(safe).padStart(pad, '0')}</>
 }
 
 export function Hud({ state, clockMs, position }: { state: RunState; clockMs?: number; position?: string }) {
@@ -612,7 +626,7 @@ export function ReadinessMap({ readiness, compact, listOnly }: { readiness: Read
               {readiness.cleared}/{readiness.total} sections {readiness.ready ? '· ready!' : ''}
             </p>
           </div>
-          <Meter value={readiness.cleared} max={readiness.total} tone={readiness.ready ? 'var(--good)' : 'var(--accent)'} />
+          <Meter value={readiness.cleared} max={readiness.total} tone={readiness.ready ? 'var(--good)' : 'var(--accent)'} label="Report readiness" />
         </>
       )}
       {!compact && (
@@ -624,7 +638,7 @@ export function ReadinessMap({ readiness, compact, listOnly }: { readiness: Read
                 className="grid h-5 w-5 flex-none place-items-center rounded-sm text-[11px] font-bold"
                 style={{
                   background: section.state === 'cleared' ? 'var(--good)' : section.state === 'tried' ? 'var(--accent)' : 'color-mix(in oklab, var(--ink) 16%, transparent)',
-                  color: section.state === 'new' ? 'var(--muted)' : '#111',
+                  color: section.state === 'cleared' ? 'var(--good-ink)' : section.state === 'tried' ? 'var(--accent-ink)' : 'var(--muted)',
                 }}
               >
                 {section.state === 'cleared' ? <IconCheck size={12} /> : section.state === 'tried' ? '!' : '·'}
@@ -698,20 +712,23 @@ function ScoreRow({
 
 type HighScoresProps = {
   board: Leaderboard
-  /** Inline summary mode: caps visible rows at 8 (+ your row if ranked lower) and offers a button to expand. */
+  /** Inline summary mode: caps visible rows and offers a button to open the full board. */
   compact?: boolean
+  /** Calm embedded mode (used inside Summary's Standings tab): flat top-5 list + 1-line standing, no nested cards. */
+  minimal?: boolean
   onOpenFull?: () => void
   onLoadMore?: () => void
   loadingMore?: boolean
 }
 
-export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loadingMore = false }: HighScoresProps) {
+export function HighScores({ board, compact = false, minimal = false, onOpenFull, onLoadMore, loadingMore = false }: HighScoresProps) {
   const yourRowRef = useRef<HTMLLIElement | null>(null)
   const [runsOpen, setRunsOpen] = useState(false)
 
   const totalPlayers = board.players
   const topScore = Math.max(1, board.entries[0]?.score ?? 0, board.you?.score ?? 0)
-  const visibleLimit = compact ? 8 : board.entries.length
+  const isCompact = compact || minimal
+  const visibleLimit = minimal ? 5 : compact ? 8 : board.entries.length
   const visibleEntries = board.entries.slice(0, visibleLimit)
   const youInVisible = visibleEntries.some((entry) => entry.you)
 
@@ -731,74 +748,99 @@ export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loa
 
   const hiddenCount = Math.max(0, totalPlayers - visibleEntries.length)
   const jumpToMe = () => {
-    yourRowRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const reduced = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    yourRowRef.current?.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'center' })
   }
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Pinned personal standing card: impossible to miss your own rank & score. */}
+      {/* Personal standing: 1-line strip in minimal mode, prominent card in full views */}
       {board.you ? (
-        <div className="sb-you-card flex flex-wrap items-center justify-between gap-3 px-3.5 py-3">
-          <div className="flex items-center gap-3">
-            <span
-              className="pixel grid h-11 min-w-[48px] place-items-center rounded-[4px] border-2 px-2 text-sm tabular-nums"
-              style={{
-                borderColor: 'var(--accent)',
-                background: 'var(--pill-bg)',
-                color: board.you.rank === 1 ? 'var(--rank-1)' : 'var(--accent-text)',
-              }}
-            >
-              #{board.you.rank}
+        minimal ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface-2/70 px-3 py-2 text-sm">
+            <span className="min-w-0">
+              <b style={{ color: board.you.rank === 1 ? 'var(--rank-1)' : 'var(--accent-text)' }}>
+                #{board.you.rank}
+              </b>
+              <span className="text-muted"> of {totalPlayers}</span>
+              {' · '}
+              {board.you.rank === 1 ? (
+                <span className="font-semibold" style={{ color: 'var(--rank-1)' }}>Leading the board!</span>
+              ) : board.you.gapToNext !== undefined ? (
+                <span className="text-muted">
+                  <b className="text-ink">{formatScore(board.you.gapToNext)}</b> behind {board.you.aheadName ?? `#${board.you.rank - 1}`}
+                </span>
+              ) : (
+                <span className="text-muted">Best {formatScore(board.you.score)}</span>
+              )}
             </span>
-            <div className="min-w-0">
-              <p className="pixel text-[9px] text-muted">
-                Your standing · of {totalPlayers}
-              </p>
-              <p className="mt-0.5 text-sm text-ink">
-                {board.you.rank === 1 ? (
-                  <span className="inline-flex items-center gap-1.5 font-semibold" style={{ color: 'var(--rank-1)' }}>
-                    <IconCrown size={13} /> Leading the board!
-                  </span>
-                ) : board.you.gapToNext !== undefined ? (
-                  <>
-                    <b style={{ color: 'var(--accent-text)' }}>{formatScore(board.you.gapToNext)}</b> pts behind{' '}
-                    {board.you.aheadName ?? `#${board.you.rank - 1}`} (#{board.you.rank - 1})
-                  </>
-                ) : (
-                  `Rank #${board.you.rank} of ${totalPlayers}`
-                )}
-              </p>
+            <span className="text-xs font-bold tabular-nums" style={{ color: 'var(--accent-text)' }}>
+              Best {formatScore(board.you.score)}
+            </span>
+          </div>
+        ) : (
+          <div className="sb-you-card flex flex-wrap items-center justify-between gap-3 px-3.5 py-3">
+            <div className="flex items-center gap-3">
+              <span
+                className="pixel grid h-11 min-w-[48px] place-items-center rounded-[4px] border-2 px-2 text-sm tabular-nums"
+                style={{
+                  borderColor: 'var(--accent)',
+                  background: 'var(--pill-bg)',
+                  color: board.you.rank === 1 ? 'var(--rank-1)' : 'var(--accent-text)',
+                }}
+              >
+                #{board.you.rank}
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-bold tracking-wider uppercase text-muted">
+                  Your standing · of {totalPlayers}
+                </p>
+                <p className="mt-0.5 text-sm text-ink">
+                  {board.you.rank === 1 ? (
+                    <span className="inline-flex items-center gap-1.5 font-semibold" style={{ color: 'var(--rank-1)' }}>
+                      <IconCrown size={13} /> Leading the board!
+                    </span>
+                  ) : board.you.gapToNext !== undefined ? (
+                    <>
+                      <b style={{ color: 'var(--accent-text)' }}>{formatScore(board.you.gapToNext)}</b> pts behind{' '}
+                      {board.you.aheadName ?? `#${board.you.rank - 1}`} (#{board.you.rank - 1})
+                    </>
+                  ) : (
+                    `Rank #${board.you.rank} of ${totalPlayers}`
+                  )}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2.5">
+              <div className="text-right">
+                <p className="text-xs font-bold tracking-wider uppercase text-muted">Best</p>
+                <p className="sb-score !text-xl" style={{ color: 'var(--accent-text)' }}>
+                  {formatScore(board.you.score)}
+                </p>
+              </div>
+              {!isCompact && visibleEntries.length > 8 && (
+                <button type="button" className="btn btn-ghost btn-sm" onClick={jumpToMe} title="Scroll to your row">
+                  Find me
+                </button>
+              )}
             </div>
           </div>
-          <div className="flex items-center gap-2.5">
-            <div className="text-right">
-              <p className="pixel text-[9px] text-muted">Best</p>
-              <p className="sb-score !text-xl" style={{ color: 'var(--accent-text)' }}>
-                {formatScore(board.you.score)}
-              </p>
-            </div>
-            {!compact && visibleEntries.length > 8 && (
-              <button type="button" className="btn btn-ghost btn-sm" onClick={jumpToMe} title="Scroll to your row">
-                Find me
-              </button>
-            )}
-          </div>
-        </div>
+        )
       ) : (
         <p className="rounded-[4px] border border-line bg-surface-2 px-3 py-2 text-sm text-muted">
           Finish a {board.modeName} game to put your score on this board.
         </p>
       )}
 
-      {/* Player's own recent completed games in this mode (shows ALL of your recent scores, not just 1). */}
-      {board.yourRuns && board.yourRuns.length > 0 && (
+      {/* Player's own recent completed games in this mode (omitted in minimal embedded mode; full history lives on HighScoresScreen). */}
+      {!minimal && board.yourRuns && board.yourRuns.length > 0 && (
         <div className="rounded-[4px] border border-line bg-surface-2 px-3 py-2.5">
           <div className="flex items-center justify-between gap-2">
-            <p className="pixel text-[9px] text-muted">Your scores ({board.yourRuns.length})</p>
+            <p className="text-xs font-bold tracking-wider uppercase text-muted">Your scores ({board.yourRuns.length})</p>
             {board.yourRuns.length > 4 && (
               <button
                 type="button"
-                className="text-xs font-bold underline text-muted hover:text-ink"
+                className="inline-flex min-h-[44px] items-center px-2 -my-2 text-xs font-bold underline text-muted hover:text-ink"
                 onClick={() => setRunsOpen((open) => !open)}
               >
                 {runsOpen ? 'Show fewer' : `Show all ${board.yourRuns.length}`}
@@ -833,15 +875,15 @@ export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loa
 
       {/* Ranked list */}
       {board.entries.length === 0 ? (
-        <p className="py-6 text-center text-muted">No scores yet. Be the first on the board.</p>
+        <p className="py-5 text-center text-sm text-muted">No scores yet. Be the first on the board.</p>
       ) : (
         <div
-          className={!compact ? 'scroll-thin max-h-[46dvh] overflow-y-auto pr-1' : undefined}
-          role={!compact ? 'region' : undefined}
-          aria-label={!compact ? `${board.modeName} rankings` : undefined}
-          tabIndex={!compact ? 0 : undefined}
+          className={!isCompact ? 'scroll-thin max-h-[46dvh] overflow-y-auto pr-1' : undefined}
+          role={!isCompact ? 'region' : undefined}
+          aria-label={!isCompact ? `${board.modeName} rankings` : undefined}
+          tabIndex={!isCompact ? 0 : undefined}
         >
-          <ol className="grid gap-1.5">
+          <ol className={minimal ? 'sb-list-flat grid' : 'grid gap-1.5'}>
             {visibleEntries.map((entry) => (
               <ScoreRow
                 key={`${entry.rank}-${entry.name}`}
@@ -856,10 +898,10 @@ export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loa
             <div className="mt-2">
               <div className="my-1.5 flex items-center gap-2 text-xs text-muted" aria-hidden>
                 <span className="h-px flex-1 bg-line" />
-                <span className="pixel text-[9px]">Around you</span>
+                <span className="text-[11px] font-bold tracking-wider uppercase">Around you</span>
                 <span className="h-px flex-1 bg-line" />
               </div>
-              <ol className="grid gap-1.5">
+              <ol className={minimal ? 'sb-list-flat grid' : 'grid gap-1.5'}>
                 {neighborhood.map((entry) => (
                   <ScoreRow
                     key={`near-${entry.rank}-${entry.name}`}
@@ -875,16 +917,16 @@ export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loa
       )}
 
       {/* Show more / open full-page high scores button */}
-      {compact && onOpenFull && (totalPlayers > 0) && (
+      {isCompact && onOpenFull && totalPlayers > 0 && (
         <button type="button" className="btn btn-ghost btn-sm w-full" onClick={onOpenFull}>
           <IconTrophy size={13} />
           <span>
-            {hiddenCount > 0 ? `View full high scores (${totalPlayers} players)` : 'Full high scores & search'}
+            {hiddenCount > 0 ? `Full high scores & history (${totalPlayers} players)` : 'Full high scores, teams & history'}
           </span>
         </button>
       )}
 
-      {!compact && totalPlayers > 0 && (
+      {!isCompact && totalPlayers > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
           <span>
             Showing {visibleEntries.length} of {totalPlayers} player{totalPlayers === 1 ? '' : 's'}
@@ -898,8 +940,8 @@ export function HighScores({ board, compact = false, onOpenFull, onLoadMore, loa
         </div>
       )}
 
-      {/* Team averages */}
-      {board.teams.length >= 2 && (
+      {/* Team averages (full view only; keeps embedded summary clean) */}
+      {!minimal && board.teams.length >= 2 && (
         <div className="mt-2 border-t border-line pt-3">
           <p className="pixel mb-2 text-[10px] text-muted">Teams · average score</p>
           <ol className="grid gap-1.5">

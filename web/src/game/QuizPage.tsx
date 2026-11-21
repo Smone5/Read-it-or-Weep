@@ -67,6 +67,7 @@ export default function QuizPage() {
   const hostRef = useRef<HostVoice | null>(null)
   const partyFor = useRef<string | null>(null) // the game whose results-screen music is due (or playing)
   const soundtrackFor = useRef<string | null>(null) // the game being played, while its soundtrack is wanted
+  const celebratedRunRef = useRef<string | null>(null) // avoids re-firing confetti/SFX on return from HighScoresScreen
   const [resumed, setResumed] = useState(false)
   const [talkState, setTalkState] = useState<TalkState>('idle')
   const [talkAvailable, setTalkAvailable] = useState(false)
@@ -214,23 +215,23 @@ export default function QuizPage() {
       ((result.personalBest && result.score > 0) ||
         (result.mode === 'straight' && result.passed === true) ||
         (result.mode !== 'jukebox' && result.readiness.ready))
+    const host = hostRef.current
     if (party) {
       setJukeboxLevel('think')
       window.setTimeout(() => {
         if (!ours()) return
         setJukeboxLevel('party')
-        if (isVictory) cueJukebox('victory')
+        if (isVictory && (result.status !== 'completed' || !host)) cueJukebox('victory')
       }, ENDING_QUIET_MS)
     } else stopJukebox(1200) // no music on this quiz's results screen
     const music = () => {
       if (party && ours()) startParty(party.tracks)
     }
-    const host = hostRef.current
     if (result.status !== 'completed' || !host) {
       window.setTimeout(music, 2200)
       return
     }
-    const celebrating = result.personalBest && result.score > 0
+    // Wait >= 1.2s before speaking so the victory sting lands cleanly without being ducked mid-applause.
     summaryCueTimer.current = window.setTimeout(() => {
       if (!host.cue('summary')) {
         music() // no host to sign off after all
@@ -242,7 +243,7 @@ export default function QuizPage() {
         if (isVictory) cueJukebox('victory')
         window.setTimeout(music, FINALE_MS)
       })
-    }, celebrating ? 500 : 1500)
+    }, isVictory ? 1200 : 1500)
   }
 
   /** Leave the results screen: its music and its host stop. */
@@ -358,6 +359,8 @@ export default function QuizPage() {
               talk={talk}
               showLeaderboard={info.quiz.leaderboard}
               shareable={info.quiz.shareable !== false}
+              alreadyCelebrated={celebratedRunRef.current === summary.runId}
+              onCelebrated={() => { celebratedRunRef.current = summary.runId }}
               reportUrl={info.quiz.reportUrl}
               reportFiles={info.quiz.reportFiles}
               onVideoStart={() => {
