@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import math
 import random
-import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -726,52 +725,6 @@ async def submit_answer(run: dict, rules: dict, item_id: str, choice: int | None
     return reveal
 
 
-_REVEAL_IMG_STOP = {
-    "the", "and", "for", "with", "that", "this", "from", "was", "were", "are", "its", "their", "than", "into",
-    "over", "per", "has", "had", "have", "not", "but", "more", "most", "some", "any", "about", "both", "which",
-    "what", "when", "where", "how", "who", "why", "does", "did", "can", "will", "you", "your", "all", "one",
-    "two", "three", "chart", "figure", "graph", "diagram", "visual", "guide", "showing", "shows", "report",
-    "section", "table", "points", "versus", "across", "between", "every", "after", "before", "during", "only",
-    "fan", "fans", "game", "day", "team", "stadium", "field", "empower", "mile", "high", "denver", "broncos",
-    "level", "upper", "lower", "deck", "main", "part", "parts", "way",
-}
-
-
-def _topic_tokens(text: str) -> set[str]:
-    tokens: set[str] = set()
-    for tok in re.findall(r"[a-z0-9]{3,}", (text or "").lower()):
-        if len(tok) > 4 and tok.endswith("s") and not tok.endswith("ss"):
-            tok = tok[:-1]
-        if tok not in _REVEAL_IMG_STOP:
-            tokens.add(tok)
-    return tokens
-
-
-def _match_reveal_image(
-    question_text: str,
-    correct_answer: str,
-    images: list[dict],
-    section_id: str | None,
-) -> dict | None:
-    """Return a chart/map on Answer Reveal ONLY from the same section AND when it directly matches the question."""
-    if not section_id:
-        return None
-    q_tokens = _topic_tokens(f"{question_text} {correct_answer}")
-    if len(q_tokens) < 2:
-        return None
-    best: tuple[int, dict] | None = None
-    for img in images:
-        if img.get("section_id") != section_id:
-            continue
-        img_tokens = _topic_tokens(" ".join(filter(None, [img.get("caption"), img.get("description")])))
-        overlap = q_tokens & img_tokens
-        if len(overlap) < 2:
-            continue
-        if best is None or len(overlap) > best[0]:
-            best = (len(overlap), img)
-    return best[1] if best else None
-
-
 async def _reveal(item: dict, run: dict, rules: dict) -> dict:
     payload = item["payload"]
     result: dict[str, Any] = {
@@ -781,47 +734,29 @@ async def _reveal(item: dict, run: dict, rules: dict) -> dict:
         "correctAnswer": payload["options"][item["correct_index"]], "points": item["points"],
         "state": run_state(run, rules), "finished": run["status"] != "in_progress",
     }
-    section_id = None
+    reveal_image_id = None
     if item["question_id"]:
         question = await db.fetchrow(
             "select q.explanation, q.source_quote, q.source_type, q.video_url, q.video_title,"
-            " s.id as section_id, s.heading from questions q"
+            " q.reveal_image_id, s.id as section_id, s.heading from questions q"
             " left join doc_sections s on s.id = q.section_id where q.id = $1", item["question_id"])
         if question:
             result["explanation"] = question["explanation"]
             result["sourceQuote"] = question["source_quote"]
+            reveal_image_id = question.get("reveal_image_id")
             if question["section_id"]:
-                section_id = question["section_id"]
                 result["section"] = {"id": question["section_id"], "heading": question["heading"]}
             clip = video.parse_youtube(question.get("video_url"), question.get("video_title"))
             if clip:
                 result["video"] = clip
-    if payload.get("image_id"):
-        row = await db.fetchrow("select description, width, height from doc_images where id = $1", payload["image_id"])
+    shown_image_id = payload.get("image_id") or (reveal_image_id if item["slot"] not in ("fact_fake", *MUSIC_SLOTS) else None)
+    if shown_image_id:
+        row = await db.fetchrow("select caption, description, width, height from doc_images where id = $1", shown_image_id)
         result["image"] = _image_view(
-            payload["image_id"], "sharp",
-            row["description"] if row else None,
+            shown_image_id, "sharp",
+            (row["caption"] or row["description"]) if row else None,
             row["width"] if row else None, row["height"] if row else None,
         )
-    elif section_id and item["slot"] not in ("fact_fake", *MUSIC_SLOTS) and item["question_id"]:
-        # Only attach a chart/map from this same section when it directly matches the question & answer.
-        candidates = await db.fetch(
-            "select id, section_id, caption, description, width, height from doc_images"
-            " where section_id = $1 and usable is not false order by ordinal asc",
-            section_id,
-        )
-        ref_img = _match_reveal_image(
-            payload.get("text", ""),
-            result["correctAnswer"],
-            candidates,
-            section_id,
-        )
-        if ref_img:
-            result["image"] = _image_view(
-                ref_img["id"], "sharp",
-                ref_img["caption"] or ref_img["description"],
-                ref_img["width"], ref_img["height"],
-            )
     if item["music_track_id"]:
         track = await db.fetchrow("select artist, title, artwork_url, track_url from music_tracks where id = $1",
                                   item["music_track_id"])

@@ -196,6 +196,24 @@ async def process_document(document_id: str) -> None:
             videos_attached = await _attach_section_videos(structured, section_ids)
             if videos_attached:
                 log.info("auto-attached %d YouTube clip(s) extracted from %s", videos_attached, document["filename"])
+        if inserted and image_ids:
+            usable_imgs = await db.fetch(
+                "select id, caption, description from doc_images where document_id = $1 and usable is not false order by ordinal",
+                document_id,
+            )
+            text_mcqs = await db.fetch(
+                "select id, question_text, options, correct_index from questions"
+                " where document_id = $1 and kind = 'mcq' and image_id is null order by created_at",
+                document_id,
+            )
+            if usable_imgs and text_mcqs:
+                matches = await generate.match_reveal_images(text_mcqs, usable_imgs)
+                if matches:
+                    await db.executemany(
+                        "update questions set reveal_image_id = $2 where id = $1",
+                        list(matches.items()),
+                    )
+                    log.info("AI-matched %d reveal visual(s) for %s", len(matches), document["filename"])
 
         summary_text = None
         try:

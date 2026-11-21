@@ -558,3 +558,61 @@ async def summarise(document: StructuredDocument) -> Summary:
         system="Summarise this report for someone about to host a quiz on it. Be concrete and neutral.",
         user=f"Report: {document.title}\nOutline:\n{_outline(document)}\n\n{body}",
         schema=Summary, effort="low", max_output_tokens=800)
+
+
+class RevealImagePick(BaseModel):
+    question_number: int
+    image_number: int = Field(description="1-based image number that directly illustrates the answer, or 0 for NONE.")
+
+
+class RevealImageBatch(BaseModel):
+    picks: list[RevealImagePick]
+
+
+_REVEAL_MATCH_SYSTEM = """You decide whether a visual (chart, map, or diagram) should appear on the Answer Reveal screen after a trivia question is answered, to help the player visually see the answer.
+
+Be VERY strict: showing a loosely related chart is confusing and much worse than showing NO image at all (0).
+Return an image_number (1..N) ONLY if that image DIRECTLY depicts, plots, labels, or proves the EXACT fact or concept asked in the question and its answer.
+Return 0 (NONE) if the image only shares a person's name, team, section, or broad topic without actually showing the answer.
+
+Examples:
+- Question: "What was Terrell Davis's famous touchdown celebration called?" Answer: "The Mile High Salute" | Image: "Bar chart of Super Bowl scores & MVPs (MVP: Terrell Davis)" -> 0 (the chart shows scores, NOT his celebration).
+- Question: "What does Thunder the mascot do after touchdowns?" Answer: "Gallops across the field" | Image: "Bar chart of Super Bowl scores" -> 0.
+- Question: "Where did Denver start 'The Drive'?" Answer: "Own 2-yard line" | Image: "Field diagram of The Drive showing START at Own 2-Yd Line -> 98 yards -> TD" -> MATCH.
+- Question: "How many points did Denver score in 2013?" Answer: "606 points" | Image: "Bar chart of Historic Denver Offenses showing 2013: 606 pts" -> MATCH.
+
+Evaluate every numbered question."""
+
+
+async def match_reveal_images(questions: list[dict], images: list[dict]) -> dict[str, str]:
+    """Return {question_id: image_id} for text/table MCQs whose answer is directly illustrated by an image."""
+    if not questions or not images:
+        return {}
+    img_lines = []
+    for idx, img in enumerate(images, start=1):
+        label = " — ".join(filter(None, [img.get("caption"), img.get("description")]))
+        img_lines.append(f"IMAGE {idx}: {label[:350]}")
+    q_lines = []
+    for idx, q in enumerate(questions, start=1):
+        ans = q["options"][q["correct_index"]] if q.get("options") and q.get("correct_index") is not None else ""
+        q_lines.append(f"Q{idx}: {q['question_text']} | Answer: {ans}")
+
+    user_prompt = "AVAILABLE VISUALS:\n" + "\n".join(img_lines) + "\n\nQUESTIONS:\n" + "\n".join(q_lines)
+    try:
+        result = await llm.parse(
+            model=config.model_fast,
+            system=_REVEAL_MATCH_SYSTEM,
+            user=user_prompt,
+            schema=RevealImageBatch,
+            effort="low",
+            max_output_tokens=800,
+        )
+    except Exception as exc:
+        log.warning("could not match reveal images: %s", exc)
+        return {}
+
+    matched: dict[str, str] = {}
+    for pick in result.picks:
+        if 1 <= pick.question_number <= len(questions) and 1 <= pick.image_number <= len(images):
+            matched[questions[pick.question_number - 1]["id"]] = images[pick.image_number - 1]["id"]
+    return matched
