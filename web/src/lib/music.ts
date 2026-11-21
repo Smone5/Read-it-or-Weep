@@ -6,9 +6,16 @@
 // (The music that plays behind the questions and the results is the jukebox's, in jukebox.ts.
 // It listens to this module only to know when the host has the floor.)
 
+import { audioContext } from './sound'
 import { trace } from './trace'
 
 let element: HTMLAudioElement | null = null
+// The clip plays through the game's Web Audio mixer, and its level is this gain. iPhones ignore a media element's
+// own volume - while still reporting the value they were given - so a clip "ducked" that way stayed at full
+// volume under the host and into the next question on phones (user, 2026-11-21). Measured in iPhone Safari: this
+// gain does turn it down. (Without Web Audio the element's volume is the fallback; see volumeAdjustable.)
+let clipGain: GainNode | null = null
+let clipLevel = 1
 let silentUrl: string | null = null
 
 function silence(): string {
@@ -37,9 +44,30 @@ function silence(): string {
 export function musicElement(): HTMLAudioElement {
   if (!element) {
     element = new Audio()
+    element.crossOrigin = 'anonymous' // Web Audio only hears a clip from another site when it is fetched with CORS
     element.preload = 'auto'
+    try {
+      const context = audioContext()
+      clipGain = context.createGain()
+      context.createMediaElementSource(element).connect(clipGain).connect(context.destination)
+    } catch {
+      clipGain = null
+    }
   }
   return element
+}
+
+function level(audio: HTMLAudioElement): number {
+  return clipGain ? clipLevel : audio.volume
+}
+
+function setLevel(audio: HTMLAudioElement, value: number) {
+  if (!clipGain) {
+    audio.volume = value
+    return
+  }
+  clipLevel = value
+  clipGain.gain.setTargetAtTime(value, clipGain.context.currentTime, 0.015)
 }
 
 function unlock(audio: HTMLAudioElement) {
@@ -107,12 +135,14 @@ export function onVoiceOver(listener: () => void): () => void {
   return () => voiceListeners.delete(listener)
 }
 
-/** iPhones ignore volume changes on media elements; find out once. */
+/** Whether the clip's level can be moved: always through the mixer; without it, not on an iPhone or iPad. */
 export function volumeAdjustable(audio: HTMLAudioElement): boolean {
   if (adjustable === null) {
+    // (iOS reports a new volume back without applying it, so asking the element is not enough.)
+    const apple = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
     const before = audio.volume
     audio.volume = 0.5
-    adjustable = Math.abs(audio.volume - 0.5) < 0.01
+    adjustable = Boolean(clipGain) || (!apple && Math.abs(audio.volume - 0.5) < 0.01)
     audio.volume = before
   }
   return adjustable
@@ -130,15 +160,15 @@ function ride() {
   const elapsed = Math.min(0.25, lastTick ? (now - lastTick) / 1000 : 0.03)
   lastTick = now
   const goal = fadingOut ? 0 : ducked ? BED : FULL
-  const gap = goal - audio.volume
+  const gap = goal - level(audio)
   if (Math.abs(gap) < 0.004) {
-    audio.volume = goal
+    setLevel(audio, goal)
     stopRiding()
     if (fadingOut) stopMusic()
     return
   }
   const rate = fadingOut ? fadePerSecond : gap < 0 ? FALL_PER_SECOND : risePerSecond
-  audio.volume = Math.max(0, Math.min(1, audio.volume + Math.sign(gap) * Math.min(Math.abs(gap), rate * elapsed)))
+  setLevel(audio, Math.max(0, Math.min(1, level(audio) + Math.sign(gap) * Math.min(Math.abs(gap), rate * elapsed))))
 }
 
 function startRiding() {
@@ -200,8 +230,10 @@ export async function playClip(src: string): Promise<void> {
     /* not seekable yet */
   }
   trace('clip.play', { ducked })
+  // The clip is heard through the mixer, so it needs the mixer awake (a phone may have put it to sleep).
+  if (clipGain && clipGain.context.state !== 'running') void (clipGain.context as AudioContext).resume().catch(() => undefined)
   if (volumeAdjustable(audio)) {
-    audio.volume = 0.05
+    setLevel(audio, 0.05)
     risePerSecond = SWELL_PER_SECOND
     await audio.play()
     startRiding()
@@ -235,7 +267,7 @@ export function fadeOutMusic(ms = 350) {
     return
   }
   fadingOut = true
-  fadePerSecond = Math.max(audio.volume, 0.1) / (ms / 1000)
+  fadePerSecond = Math.max(level(audio), 0.1) / (ms / 1000)
   startRiding()
 }
 
