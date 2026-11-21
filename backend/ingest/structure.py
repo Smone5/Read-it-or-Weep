@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 from ingest.images import CleanImage, clean_image
 from ingest.model import Block, Chunk, ImageItem, ParsedDocument, Section, StructuredDocument
+from services.video import extract_youtube_urls
 
 TARGET_TOKENS = 360
 MAX_TOKENS = 520
@@ -66,6 +67,42 @@ def _topic_level(blocks: list[Block]) -> int:
     return chosen
 
 
+_BOILERPLATE_HEADING = re.compile(
+    r"^(table of contents|contents|list of (tables|figures|exhibits|charts|acronyms|abbreviations)|"
+    r"acronyms|abbreviations|references|bibliography|works cited|acknowledg(e)?ments|index|keywords)$",
+    re.I,
+)
+
+
+def _split_giant(draft: _Draft) -> list[_Draft]:
+    """If cover-page font sizes caused a giant section to absorb real chapter headings, split on its internal headings."""
+    sub_levels = Counter(b.level for b in draft.blocks if b.kind == "heading" and b.level >= 1)
+    if not sub_levels:
+        return [draft]
+    # Pick the shallowest internal heading level that yields at least 2 real headings.
+    split_lvl = None
+    running = 0
+    for lvl in sorted(sub_levels):
+        running += sub_levels[lvl]
+        if running >= 2:
+            split_lvl = lvl
+            break
+    if split_lvl is None:
+        return [draft]
+    parts: list[_Draft] = []
+    cur = _Draft(heading=draft.heading, level=draft.level)
+    for block in draft.blocks:
+        if block.kind == "heading" and 1 <= block.level <= split_lvl:
+            if cur.blocks:
+                parts.append(cur)
+            cur = _Draft(heading=block.text.strip(), level=block.level)
+        else:
+            cur.blocks.append(block)
+    if cur.blocks:
+        parts.append(cur)
+    return parts if len(parts) >= 2 else [draft]
+
+
 def _draft_sections(parsed: ParsedDocument, fallback_title: str) -> list[_Draft]:
     blocks = parsed.blocks
     level = _topic_level(blocks)
@@ -83,6 +120,48 @@ def _draft_sections(parsed: ParsedDocument, fallback_title: str) -> list[_Draft]
 
     # Headings with nothing under them (e.g. "2. Finance" directly followed by "2.1 Revenue") are dropped.
     drafts = [d for d in drafts if d.blocks]
+
+    # If a single section still swallows >45% of a large document and contains sub-headings, drill down into it
+    # (up to two passes in case cover/callout sub-headers sit between L1 and the true chapter level).
+    total_words = sum(d.words for d in drafts)
+    if total_words >= 1200:
+        for _ in range(2):
+            expanded: list[_Draft] = []
+            changed = False
+            for draft in drafts:
+                if draft.words >= 1200 and draft.words > total_words * 0.45:
+                    pieces = _split_giant(draft)
+                    if len(pieces) > 1:
+                        changed = True
+                    expanded.extend(pieces)
+                else:
+                    expanded.append(draft)
+            drafts = expanded
+            if not changed:
+                break
+
+    # Drop boilerplate front/back-matter (TOC, List of Tables/Figures, References) when real sections exist.
+    substantive = [d for d in drafts if not _BOILERPLATE_HEADING.match(d.heading.strip())]
+    if substantive:
+        drafts = substantive
+
+    # Drop empty / cover-art-only leading scraps (0-19 words and no tables/charts).
+    if len(drafts) > 1:
+        cleaned_drafts = [
+            d for d in drafts
+            if d.words >= 20 or any(b.kind in ("table", "chart") for b in d.blocks)
+        ]
+        if cleaned_drafts:
+            drafts = cleaned_drafts
+
+    # Merge consecutive sections with identical headings (e.g. multi-page tables that repeat their title).
+    deduped: list[_Draft] = []
+    for draft in drafts:
+        if deduped and re.sub(r"\s+", " ", deduped[-1].heading.lower()) == re.sub(r"\s+", " ", draft.heading.lower()):
+            deduped[-1].blocks.extend(draft.blocks)
+        else:
+            deduped.append(draft)
+    drafts = deduped
 
     if len(drafts) == 1 and not level:
         drafts = _split_evenly(drafts[0], fallback_title)
@@ -209,7 +288,12 @@ def build_structure(parsed: ParsedDocument, filename: str = "") -> StructuredDoc
     images: list[ImageItem] = []
 
     for section_index, draft in enumerate(drafts):
-        sections.append(Section(ordinal=section_index, level=draft.level, heading=draft.heading, word_count=draft.words))
+        section_videos = extract_youtube_urls(
+            "\n".join(filter(None, [b.text for b in draft.blocks] + [b.caption for b in draft.blocks])),
+            [link for b in draft.blocks for link in b.links],
+        )
+        sections.append(Section(ordinal=section_index, level=draft.level, heading=draft.heading,
+                                word_count=draft.words, video_urls=section_videos))
         subheading: str | None = None
         buffer: list[str] = []
         buffer_path: str | None = None

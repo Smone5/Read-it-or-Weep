@@ -114,7 +114,9 @@ async def process_document(document_id: str) -> None:
     if document is None:
         return
     quiz = await db.fetchrow("select * from quizzes where id = $1", document["quiz_id"])
-    auto_approve = bool((await settings_store.quiz_rules(quiz))["auto_approve"])   # the quiz's setting, else the company's
+    rules = await settings_store.quiz_rules(quiz)
+    auto_approve = bool(rules["auto_approve"])   # the quiz's setting, else the company's
+    purge_source = bool(rules.get("purge_source_after_process"))
 
     async def progress(label: str, done: int, total: int) -> None:
         await _set(document_id, progress={"label": label, "done": done, "total": total})
@@ -168,8 +170,17 @@ async def process_document(document_id: str) -> None:
         warnings = list(structured.warnings)
         if not inserted:
             warnings.append("No questions passed the quality checks. Add questions by hand or try a fuller document.")
+        storage_key = document["storage_key"]
+        if purge_source and storage_key:
+            try:
+                await storage().delete_prefix(storage_key)
+                storage_key = ""
+                warnings.append("Source file was purged after processing (confidential retention mode).")
+            except Exception as exc:
+                log.warning("could not purge source file %s: %s", storage_key, exc)
         await _set(
             document_id, status="ready", stage=None, title=structured.title, summary=summary_text,
+            storage_key=storage_key,
             word_count=structured.word_count, section_count=len(structured.sections),
             image_count=len(structured.images), chunk_count=len(structured.chunks), question_count=inserted,
             warnings=warnings, processed_at=datetime.now(timezone.utc),

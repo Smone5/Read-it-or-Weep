@@ -51,6 +51,8 @@ export type QuizView = {
   questions: number
   ready: boolean
   leaderboard: boolean
+  reportUrl?: string | null
+  reportFiles?: { id: string; filename: string; url: string }[]
   modes: ModeInfo[]
   defaultMode: ModeId
   decades: string[]
@@ -113,8 +115,20 @@ export type RunState = {
 
 export type Turn = { state: RunState; finished: boolean; item: Item | null }
 
+export type VideoClip = {
+  provider: 'youtube'
+  videoId: string
+  watchUrl: string
+  embedUrl: string | null
+  thumbnailUrl: string
+  startSec: number
+  title: string
+}
+
 export type Reveal = {
   itemId: string
+  quizId?: string
+  questionId?: string | null
   slot: Slot
   correct: boolean
   timedOut: boolean
@@ -130,6 +144,7 @@ export type Reveal = {
   image?: ItemImage
   /** The song behind a music question; in Office Jukebox its clip too, played once the answer is in. */
   music?: { artist: string; title: string; artworkUrl: string | null; trackUrl: string | null; previewUrl?: string }
+  video?: VideoClip | null
   strikeRestored?: boolean
 }
 
@@ -162,6 +177,16 @@ export type Soundtrack = {
   mix?: { opening: number; opening_sec: number; under_host: number; questions: number; between: number; ease_down: boolean }
 }
 
+export type BadgeInfo = {
+  label: string
+  tier: number
+  tone: 'legend' | 'gold' | 'good' | 'brand' | 'warn' | 'bad' | 'muted'
+  icon: 'crown' | 'trophy' | 'star' | 'book' | 'bolt' | 'bulb' | 'disc' | 'flag'
+  description: string
+  nextLabel: string | null
+  nextHint: string | null
+}
+
 export type Summary = {
   /** Music for the results screen: hits from the game's decade (null when music is off). */
   afterParty: AfterParty | null
@@ -171,6 +196,7 @@ export type Summary = {
   status: string
   score: number
   badge: string | null
+  badgeInfo?: BadgeInfo | null
   passed: boolean | null
   passMark: number | null
   accuracy: number
@@ -184,7 +210,8 @@ export type Summary = {
   sections: { id: string; heading: string; answered: number; correct: number }[]
   blindSpots: { id: string; heading: string }[]
   untouched: { id: string; heading: string }[]
-  review: { slot?: Slot; title: string | null; text: string; section: string | null; correctAnswer: string; yourAnswer: string | null; explanation: string | null; sourceQuote?: string | null }[]
+  review: { slot?: Slot; title: string | null; text: string; section: string | null; correctAnswer: string; yourAnswer: string | null; explanation: string | null; sourceQuote?: string | null; video?: VideoClip | null }[]
+  resultsGrid?: boolean[]
   readiness: Readiness
   rank: number | null
   players: number

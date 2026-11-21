@@ -116,6 +116,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "picture_mode": "show",           # show | auto | memory
         "ready_threshold": 80,            # % of sections cleared to count as "ready"
         "leaderboard": True,
+        "report_url": None,               # optional external report URL (SharePoint/Drive/Confluence)
+        "allow_download": False,          # opt-in: let signed-in players open/download the uploaded report
+        "unlisted": False,                # hide from the front door (direct link only)
+        "confidential_voice": False,      # keep report answers off third-party ElevenLabs voice synthesis
+        "purge_source_after_process": False,  # delete raw uploaded file once questions are generated
         "show": {
             "questions": 9, "music_rounds": 2, "lightning_items": 6, "second_chance": 2,
             "final_wager": True, "timer_sec": 30, "picture_timer_sec": 40,
@@ -293,6 +298,10 @@ def clean_game(value: dict) -> dict:
     if value.get("soundtrack_volume") not in ("quiet", "medium", "loud"):
         value["soundtrack_volume"] = "medium"
     value["mix"] = _clean_mix(value.get("mix"))
+    raw_url = str(value.get("report_url") or "").strip()[:500]
+    value["report_url"] = raw_url if re.match(r"^https?://\S+$", raw_url, re.I) else None
+    for flag in ("allow_download", "unlisted", "confidential_voice", "purge_source_after_process"):
+        value[flag] = bool(value.get(flag, False))
     return value
 
 

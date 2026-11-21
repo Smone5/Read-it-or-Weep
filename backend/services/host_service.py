@@ -348,8 +348,10 @@ async def persona(quiz: dict | None, *, straight: bool = False, host_id: str | N
     character = settings["hosts"][0]
     if host_id and settings["player_can_choose"]:
         character = next((c for c in settings["hosts"] if c["id"] == host_id), character)
+    confidential_voice = bool((await settings_store.quiz_rules(quiz)).get("confidential_voice")) if quiz else False
     host = {**settings, "name": character["name"], "style": character.get("style") or "",
-            "manner": character.get("manner") or DEFAULT_MANNER, **resolve_voice(character["voice"])}
+            "manner": character.get("manner") or DEFAULT_MANNER,
+            **resolve_voice(character["voice"], allow_eleven=not confidential_voice)}
     outline: list[str] = []
     if quiz:
         rows = await db.fetch(
@@ -364,11 +366,11 @@ async def persona(quiz: dict | None, *, straight: bool = False, host_id: str | N
     return instructions, host
 
 
-def resolve_voice(voice: str) -> dict:
-    """Who will perform a character's voice: ElevenLabs when it is an ElevenLabs voice and a key is set;
-    otherwise the realtime model, with the OpenAI voice that stands in for it."""
+def resolve_voice(voice: str, *, allow_eleven: bool = True) -> dict:
+    """Who will perform a character's voice: ElevenLabs when it is an ElevenLabs voice, a key is set, and
+    confidential_voice is not enabled for this quiz; otherwise the realtime model with its OpenAI/Azure stand-in."""
     if eleven.is_eleven(voice):
-        if eleven.configured():
+        if allow_eleven and eleven.configured():
             return {"engine": "eleven", "voice": voice}
         return {"engine": "realtime", "voice": eleven.BY_ID[voice].fallback}
     return {"engine": "realtime", "voice": voice}
@@ -601,6 +603,10 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
     if cue == "welcome" and run:
         return await _welcome(run, player, name)
     if cue == "summary" and run:
+        if run.get("status") == "abandoned":
+            return (f"{name} stepped out early after {run['questions_answered']} question(s) (no rank earned yet). "
+                    "Sign off warmly in one quick beat, teasing them to come back for a full run, and end on the "
+                    "show's name. Word limit: 18.")
         if run["mode"] == "jukebox":
             share = round(100 * run["music_correct"] / run["music_answered"]) if run["music_answered"] else 0
             return (f"Office Jukebox, the music side game, is over. {name} scored {run['score']} points and got {share}% "

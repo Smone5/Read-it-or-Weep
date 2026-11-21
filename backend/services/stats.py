@@ -7,7 +7,7 @@ import math
 from typing import Any
 
 import db
-from services import favorites, bank, music_service
+from services import badges, favorites, bank, music_service, video
 from services.settings_store import MODES
 
 
@@ -171,14 +171,17 @@ async def _after_party(run: dict, rules: dict, items: list[dict]) -> dict | None
 
 async def run_summary(run: dict, rules: dict) -> dict:
     items = await db.fetch(
-        "select ri.*, s.heading, q.explanation, q.source_quote, q.title as question_title from run_items ri"
+        "select ri.*, s.heading, q.explanation, q.source_quote, q.title as question_title,"
+        " q.video_url, q.video_title from run_items ri"
         " left join doc_sections s on s.id = ri.section_id left join questions q on q.id = ri.question_id"
         " where ri.run_id = $1 and ri.answered_at is not null order by ri.position", run["id"])
     per_section: dict[str, dict] = {}
     review = []
+    results_grid: list[bool] = []
     for item in items:
         if run["mode"] != "jukebox" and item["slot"] in ("music", "jargon", "song_or_jargon"):
             continue
+        results_grid.append(bool(item["is_correct"]))
         if item["section_id"]:
             entry = per_section.setdefault(item["section_id"], {"id": item["section_id"], "heading": item["heading"],
                                                                 "answered": 0, "correct": 0})
@@ -194,6 +197,7 @@ async def run_summary(run: dict, rules: dict) -> dict:
                 "yourAnswer": options[chosen] if chosen is not None else None,
                 "explanation": item["explanation"],
                 "sourceQuote": item["source_quote"],
+                "video": video.parse_youtube(item.get("video_url"), item.get("video_title")),
             })
     ready = await readiness(run["quiz_id"], run["player_id"], int(rules["ready_threshold"]))
     cleared_ids = {s["id"] for s in ready["sections"] if s["state"] == "cleared"}
@@ -225,14 +229,15 @@ async def run_summary(run: dict, rules: dict) -> dict:
     return {
         "afterParty": await _after_party(run, rules, items),
         "runId": run["id"], "mode": run["mode"], "modeName": MODES[run["mode"]]["name"], "status": run["status"],
-        "score": run["score"], "badge": run["badge"], "passed": run["passed"],
+        "score": run["score"], "badge": run["badge"], "badgeInfo": badges.summary_badge_info(run, rules),
+        "passed": run["passed"],
         "passMark": int(rules["straight"]["pass_mark"]) if run["mode"] == "straight" else None,
         "accuracy": accuracy, "report": {"answered": run["report_answered"], "correct": run["report_correct"]},
         "music": {"answered": run["music_answered"], "correct": run["music_correct"]},
         "streakMax": run["streak_max"], "durationSec": run["duration_sec"], "decade": run["decade"],
         "unusedLifelines": unused_lifelines, "lifelineBonus": lifeline_bonus,
         "sections": list(per_section.values()), "blindSpots": blind_spots, "untouched": untouched[:6],
-        "review": review[:12], "readiness": ready,
+        "review": review[:12], "resultsGrid": results_grid, "readiness": ready,
         "rank": board["you"]["rank"] if board["you"] else None, "players": board["players"],
         "personalBest": previous_best is None or run["score"] > previous_best, "previousBest": previous_best,
     }

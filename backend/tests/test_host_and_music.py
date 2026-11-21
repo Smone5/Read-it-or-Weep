@@ -114,6 +114,24 @@ def test_contextual_music_cues_match_moods_sections_and_favorites():
     assert cues["bySection"]["sec-fleet"]["title"] == "On the Road Again"
 
 
+def test_confidential_quiz_controls_validate_urls_and_disable_elevenlabs():
+    cleaned = settings_store.clean_game({
+        **settings_store.DEFAULTS["game"],
+        "report_url": "javascript:alert(1)",
+        "allow_download": True,
+        "unlisted": True,
+        "confidential_voice": True,
+        "purge_source_after_process": True,
+    })
+    assert cleaned["report_url"] is None
+    assert cleaned["unlisted"] is True and cleaned["confidential_voice"] is True
+    assert cleaned["allow_download"] is True and cleaned["purge_source_after_process"] is True
+
+    valid = settings_store.clean_game({**settings_store.DEFAULTS["game"], "report_url": "https://company.sharepoint.com/q3"})
+    assert valid["report_url"] == "https://company.sharepoint.com/q3"
+    assert host_service.resolve_voice("eleven:southern", allow_eleven=False) == {"engine": "realtime", "voice": "marin"}
+
+
 # --- the playlist behind the results ---------------------------------------------------------------------
 
 def track(number, artist):

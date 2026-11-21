@@ -1009,15 +1009,37 @@ button:disabled {
   }
 
   .medal-badge {
+    --medal: var(--accent);
     display: inline-flex;
     align-items: center;
     gap: 10px;
     padding: 8px 16px;
-    border: 2px solid var(--accent);
+    border: 2px solid var(--medal);
     border-radius: 4px;
-    background: color-mix(in oklab, var(--accent) 18%, var(--surface));
-    color: color-mix(in oklab, var(--accent) 65%, white);
-    box-shadow: 3px 3px 0 #000, 0 0 20px -4px color-mix(in oklab, var(--accent) 65%, transparent);
+    background: color-mix(in oklab, var(--medal) 18%, var(--surface));
+    color: color-mix(in oklab, var(--medal) 65%, var(--ink));
+    box-shadow: 3px 3px 0 #000, 0 0 20px -4px color-mix(in oklab, var(--medal) 65%, transparent);
+  }
+
+  .medal-badge[data-tone='legend'] {
+    --medal: #38e8ff;
+    background: linear-gradient(
+      135deg,
+      color-mix(in oklab, var(--accent) 26%, var(--surface)),
+      color-mix(in oklab, #38e8ff 22%, var(--surface))
+    );
+    border-color: var(--accent);
+    color: color-mix(in oklab, var(--accent) 55%, var(--ink));
+    box-shadow: 3px 3px 0 #000, 0 0 24px -3px color-mix(in oklab, #38e8ff 65%, transparent);
+  }
+  .medal-badge[data-tone='gold'] { --medal: var(--accent); }
+  .medal-badge[data-tone='good'] { --medal: var(--good); }
+  .medal-badge[data-tone='brand'] { --medal: var(--brand); }
+  .medal-badge[data-tone='warn'] { --medal: #f59e0b; }
+  .medal-badge[data-tone='bad'] { --medal: var(--bad); }
+  .medal-badge[data-tone='muted'] {
+    --medal: var(--muted);
+    box-shadow: 3px 3px 0 #000;
   }
 
   /* --- report exhibit bezel ------------------------------------------------- */

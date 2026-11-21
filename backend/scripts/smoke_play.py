@@ -370,8 +370,9 @@ async def main() -> None:
                   f"office jukebox opens each of its four rounds with a title card: {box['sealed']}")
             check(box["summary"]["music"]["answered"] == 12 and box["summary"]["report"]["answered"] == 0,
                   "office jukebox is all music, no report questions")
-            check(box["summary"]["badge"] in {"Chief Music Officer", "Senior Playlist Manager", "Jingle Intern",
-                                              "Hold Music Specialist"}, f"office jukebox earns its own title ({box['summary']['badge']})")
+            check(box["summary"]["badge"] in {"Chief Music Officer", "Senior Playlist Manager", "VP of Vibes",
+                                              "Jingle Intern", "Hold Music Specialist"},
+                  f"office jukebox earns its own title ({box['summary']['badge']})")
             jargon = await db.fetch("select payload from run_items where run_id = $1 and slot = 'jargon'", box["run_id"])
             print("       jargon titles:", [row["payload"]["text"] for row in jargon])
             check(all(plays for slot, plays in box["songs"] if slot in ("music", "jargon")),

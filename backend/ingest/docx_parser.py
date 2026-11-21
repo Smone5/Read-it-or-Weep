@@ -268,17 +268,29 @@ def parse_docx(data: bytes, filename: str = "") -> ParsedDocument:
                                     mime="image/png", caption=chart.title, origin="chart"))
         return blocks
 
+    def collect_links(element) -> list[str]:
+        urls: list[str] = []
+        for link in element.iter(W + "hyperlink"):
+            rel_id = link.get(R + "id")
+            if not rel_id:
+                continue
+            rel = part.rels.get(rel_id)
+            target = getattr(rel, "target_ref", None) or getattr(rel, "_target", None)
+            if isinstance(target, str) and target.startswith(("http://", "https://")):
+                urls.append(target)
+        return urls
+
     for element in _iter_body(document.element.body):
         if element.tag == W + "tbl":
             rows = _table_rows(element)
             media = collect_media(element)
+            tbl_links = collect_links(element)
             if rows and len(rows) >= 2 and len(rows[0]) >= 2:
-                items.append({"type": "table", "rows": rows})
+                items.append({"type": "table", "rows": rows, "links": tbl_links})
             else:  # a layout table: treat its cells as ordinary paragraphs
-                for row in rows:
-                    for cell in row:
-                        if cell:
-                            items.append({"type": "p", "text": cell, "styled": 0, "pseudo": 0})
+                for idx, cell in enumerate(c for row in rows for c in row if c):
+                    items.append({"type": "p", "text": cell, "styled": 0, "pseudo": 0,
+                                  "links": tbl_links if idx == 0 else []})
             items.extend({"type": "media", "block": b} for b in media)
             continue
 
@@ -287,6 +299,7 @@ def parse_docx(data: bytes, filename: str = "") -> ParsedDocument:
         if style_id in styles.toc:
             continue
         text = _text_of(element)
+        p_links = collect_links(element)
         outline = element.find(f"{W}pPr/{W}outlineLvl")
         styled_level = styles.level.get(style_id, 0)
         if outline is not None:
@@ -304,8 +317,10 @@ def parse_docx(data: bytes, filename: str = "") -> ParsedDocument:
                     "type": "p", "text": text, "styled": 0 if is_caption else styled_level,
                     "pseudo": 0 if (is_caption or is_list) else _pseudo_heading_level(
                         text, _is_all_bold(element, styles, style_id)),
-                    "list": is_list and not styled_level, "caption": is_caption,
+                    "list": is_list and not styled_level, "caption": is_caption, "links": p_links,
                 })
+        elif p_links:
+            items.append({"type": "p", "text": " ".join(p_links), "styled": 0, "pseudo": 0, "links": p_links})
         items.extend({"type": "media", "block": b} for b in collect_media(element))
         for text_box in element.iter(W + "txbxContent"):
             if _has_fallback_ancestor(text_box):
@@ -336,7 +351,8 @@ def parse_docx(data: bytes, filename: str = "") -> ParsedDocument:
             continue
         if kind == "table":
             caption, pending_caption = (pending_caption, None) if pending_caption else (None, None)
-            blocks.append(Block(kind="table", text=rows_to_markdown(item["rows"]), caption=caption))
+            blocks.append(Block(kind="table", text=rows_to_markdown(item["rows"]), caption=caption,
+                                links=list(item.get("links") or [])))
             continue
         if kind == "media":
             block: Block = item["block"]
@@ -345,6 +361,7 @@ def parse_docx(data: bytes, filename: str = "") -> ParsedDocument:
             blocks.append(block)
             continue
         text = item["text"]
+        item_links = list(item.get("links") or [])
         if item.get("caption"):
             previous = blocks[-1] if blocks else None
             wants_table = text.lower().startswith("table")
@@ -353,6 +370,8 @@ def parse_docx(data: bytes, filename: str = "") -> ParsedDocument:
                 or (previous.kind == "table" and wants_table)
             ):
                 previous.caption = text
+                if item_links:
+                    previous.links.extend(item_links)
             else:
                 flush_caption()
                 pending_caption = text
@@ -360,11 +379,11 @@ def parse_docx(data: bytes, filename: str = "") -> ParsedDocument:
         flush_caption()
         level = item.get("pseudo", 0) if use_pseudo else item.get("styled", 0)
         if level:
-            blocks.append(Block(kind="heading", text=text, level=level))
+            blocks.append(Block(kind="heading", text=text, level=level, links=item_links))
         elif item.get("list"):
-            blocks.append(Block(kind="list_item", text=text))
+            blocks.append(Block(kind="list_item", text=text, links=item_links))
         else:
-            blocks.append(Block(kind="paragraph", text=text))
+            blocks.append(Block(kind="paragraph", text=text, links=item_links))
     flush_caption()
 
     if not any(b.kind in ("paragraph", "list_item", "table") for b in blocks):

@@ -27,7 +27,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { IconBolt, IconBook, IconBulb, IconChart, IconChip, IconClose, IconDisc, IconFlag, IconHeart, IconPlay, IconSparkle, IconSplit } from '../components/Icons'
 import { MusicToggle } from '../components/NowPlaying'
 import { ErrorNote, Modal, SoundToggle } from '../components/ui'
-import { api, ApiError, onConnectionTrouble } from '../lib/api'
+import { VideoClipCard } from './VideoClipCard'
+import { api, ApiError, onConnectionTrouble, session } from '../lib/api'
 import type { HostVoice } from '../lib/hostVoice'
 import { cueJukebox, jukeboxMix, musicOn, onJukeboxChange, setJukeboxLevel, type JukeboxState } from '../lib/jukebox'
 import { fadeOutMusic, preloadClip, stopMusic } from '../lib/music'
@@ -1021,6 +1022,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
                           {reveal.sourceQuote}
                         </blockquote>
                       )}
+                      {reveal.video && <VideoClipCard video={reveal.video} />}
                     </>
                   )}
                 </section>
@@ -1043,6 +1045,17 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
             <button className="btn btn-ghost btn-sm" disabled={flagged} onClick={() => setFlagging(true)} title="Tell the organiser this question is not right">
               <IconFlag size={13} /> {flagged ? 'Flagged' : 'Flag'}
             </button>
+          )}
+          {session.adminToken && reveal.quizId && reveal.questionId && (
+            <a
+              className="btn btn-ghost btn-sm"
+              href={`/admin/quizzes/${reveal.quizId}/questions?edit=${reveal.questionId}`}
+              target="_blank"
+              rel="noopener"
+              title="Open this question in Admin to edit or reject it"
+            >
+              Edit ↗
+            </a>
           )}
           <button className="btn btn-primary btn-lg flex-1" disabled={moving} onClick={advance} autoFocus>
             <span>{error ? 'Try again' : last ? 'See results' : 'Next'}</span>

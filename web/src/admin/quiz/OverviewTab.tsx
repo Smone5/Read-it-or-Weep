@@ -263,9 +263,14 @@ type Details = {
   teams: string[]
   /** A team name typed but not yet added; it is added on save so it is never silently lost. */
   teamDraft: string
+  reportUrl: string
+  allowDownload: boolean
+  unlisted: boolean
+  confidentialVoice: boolean
+  purgeSource: boolean
 }
 
-const detailsOf = (quiz: Quiz): Details => ({
+const detailsOf = (quiz: Quiz, rules: import('../types').GameRules): Details => ({
   title: quiz.title,
   description: quiz.description ?? '',
   meeting: toLocalInput(quiz.meetingAt),
@@ -273,9 +278,15 @@ const detailsOf = (quiz: Quiz): Details => ({
   domains: quiz.allowedEmailDomains.join(', '),
   teams: quiz.teams,
   teamDraft: '',
+  reportUrl: rules.report_url ?? '',
+  allowDownload: Boolean(rules.allow_download),
+  unlisted: Boolean(rules.unlisted),
+  confidentialVoice: Boolean(rules.confidential_voice),
+  purgeSource: Boolean(rules.purge_source_after_process),
 })
 
 const DOMAIN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/
+const HTTP_URL = /^https?:\/\/\S+$/i
 
 function parseDomains(text: string): string[] {
   const cleaned = text
@@ -292,8 +303,8 @@ function addTeam(teams: string[], name: string): string[] {
 }
 
 /** Only what differs from the saved quiz, in the shape PATCH /quizzes/{id} expects. */
-function changesFrom(quiz: Quiz, form: Details): QuizPatch {
-  const saved = detailsOf(quiz)
+function changesFrom(quiz: Quiz, rules: import('../types').GameRules, form: Details): QuizPatch {
+  const saved = detailsOf(quiz, rules)
   const changes: QuizPatch = {}
   if (form.title.trim() !== quiz.title) changes.title = form.title.trim()
   if (form.description.trim() !== saved.description.trim()) changes.description = form.description.trim() || null
@@ -307,14 +318,21 @@ function changesFrom(quiz: Quiz, form: Details): QuizPatch {
   if (domains.join(',') !== quiz.allowedEmailDomains.join(',')) changes.allowedEmailDomains = domains
   const teams = addTeam(form.teams, form.teamDraft)
   if (teams.join('\n') !== quiz.teams.join('\n')) changes.teams = teams
+  const settingsPatch: NonNullable<QuizPatch['settings']> = {}
+  if (form.reportUrl.trim() !== saved.reportUrl.trim()) settingsPatch.report_url = form.reportUrl.trim() || null
+  if (form.allowDownload !== saved.allowDownload) settingsPatch.allow_download = form.allowDownload
+  if (form.unlisted !== saved.unlisted) settingsPatch.unlisted = form.unlisted
+  if (form.confidentialVoice !== saved.confidentialVoice) settingsPatch.confidential_voice = form.confidentialVoice
+  if (form.purgeSource !== saved.purgeSource) settingsPatch.purge_source_after_process = form.purgeSource
+  if (Object.keys(settingsPatch).length > 0) changes.settings = settingsPatch
   return changes
 }
 
 function DetailsForm() {
   const { detail, save } = useQuiz()
   const notify = useNotify()
-  const { quiz } = detail
-  const [form, setForm] = useState<Details>(() => detailsOf(quiz))
+  const { quiz, rules } = detail
+  const [form, setForm] = useState<Details>(() => detailsOf(quiz, rules))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const teamsLabel = useId()
@@ -324,9 +342,10 @@ function DetailsForm() {
     setError(null)
   }
 
-  const changes = changesFrom(quiz, form)
+  const changes = changesFrom(quiz, rules, form)
   const dirty = Object.keys(changes).length > 0
   const badDomain = parseDomains(form.domains).find((domain) => !DOMAIN.test(domain)) ?? null
+  const badReportUrl = form.reportUrl.trim() !== '' && !HTTP_URL.test(form.reportUrl.trim())
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -339,11 +358,15 @@ function DetailsForm() {
       setError(`“${badDomain}” does not look like an email domain. Use something like example.com.`)
       return
     }
+    if (badReportUrl) {
+      setError('Report link must start with https:// or http://.')
+      return
+    }
     setSaving(true)
     setError(null)
     try {
       const saved = await save(changes)
-      setForm(detailsOf(saved.quiz))
+      setForm(detailsOf(saved.quiz, saved.rules))
       notify('Quiz details saved.')
     } catch (reason) {
       setError(errorText(reason))
@@ -451,7 +474,85 @@ function DetailsForm() {
           </div>
         </div>
       </Panel>
-      <SaveBar dirty={dirty} saving={saving} error={error} onDiscard={() => set(detailsOf(quiz))} />
+
+      <Panel
+        title="Report access & confidentiality"
+        description="Control how players read the original report and keep sensitive documents private."
+      >
+        <div className="grid gap-4">
+          <Field
+            label="External report link (recommended)"
+            hint="Optional. Link to your SharePoint, Google Drive, or Confluence doc so your company’s own SSO and permissions govern who can read it."
+            error={badReportUrl ? 'Must start with https:// or http://.' : null}
+          >
+            {(props) => (
+              <input
+                className="field"
+                {...props}
+                type="url"
+                value={form.reportUrl}
+                onChange={(event) => set({ reportUrl: event.target.value })}
+                placeholder="https://company.sharepoint.com/..."
+                maxLength={500}
+              />
+            )}
+          </Field>
+
+          <label className="flex items-start gap-3 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={form.allowDownload}
+              onChange={(event) => set({ allowDownload: event.target.checked })}
+            />
+            <span>
+              <strong className="block">Allow signed-in players to open/download the uploaded report</strong>
+              <span className="text-muted">Off by default. Streams the uploaded PDF/Word file via short-lived signed links in the lobby and results screen.</span>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-3 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={form.unlisted}
+              onChange={(event) => set({ unlisted: event.target.checked })}
+            />
+            <span>
+              <strong className="block">Unlisted (direct link only)</strong>
+              <span className="text-muted">Hides this quiz’s title from the public front door (/). Pair with an access code above for confidential meetings.</span>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-3 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={form.confidentialVoice}
+              onChange={(event) => set({ confidentialVoice: event.target.checked })}
+            />
+            <span>
+              <strong className="block">Confidential voice mode (no third-party ElevenLabs)</strong>
+              <span className="text-muted">Prevents spoken questions and answers from being sent to ElevenLabs; uses your primary OpenAI/Azure tenant voice instead.</span>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-3 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={form.purgeSource}
+              onChange={(event) => set({ purgeSource: event.target.checked })}
+            />
+            <span>
+              <strong className="block">Purge source file after processing</strong>
+              <span className="text-muted">Automatically deletes the raw uploaded report file from storage once questions are generated (keeps questions and charts).</span>
+            </span>
+          </label>
+        </div>
+      </Panel>
+
+      <SaveBar dirty={dirty} saving={saving} error={error} onDiscard={() => set(detailsOf(quiz, rules))} />
     </form>
   )
 }

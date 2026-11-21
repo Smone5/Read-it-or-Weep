@@ -22,6 +22,7 @@ class Block:
     mime: str | None = None
     caption: str | None = None     # caption for a table / image / chart
     origin: str = "embedded"       # embedded | chart | page
+    links: list[str] = field(default_factory=list)   # hyperlink targets found in this block
 
 
 @dataclass
@@ -37,6 +38,7 @@ class Section:
     level: int
     heading: str
     word_count: int = 0
+    video_urls: list[str] = field(default_factory=list)
 
 
 @dataclass

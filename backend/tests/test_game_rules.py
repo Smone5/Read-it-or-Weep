@@ -162,3 +162,27 @@ def test_a_question_players_do_worse_than_guessing_on_is_pulled():
     assert worse_than_guessing(1, 24, 4)
     assert worse_than_guessing(2, 12, 2)               # a true/false statement almost everyone gets "wrong"
     assert not worse_than_guessing(5, 12, 2)
+
+
+def test_fact_fake_is_unpredictable_yet_balanced():
+    import random
+    rng_state = random.getstate()
+    random.seed(42)
+    try:
+        # After a True, Q2 must NOT always be False: both repeats and flips should happen naturally.
+        after_true = [engine._next_binary_choice([True]) for _ in range(200)]
+        assert 50 < sum(after_true) < 110              # ~40% True, ~60% False (never 0%!)
+
+        # Hard guardrails: 3 identical in a row always flips; imbalance never exceeds ±3.
+        assert engine._next_binary_choice([True, True, True]) is False
+        assert engine._next_binary_choice([False, False, False]) is True
+
+        seq: list[bool] = []
+        for _ in range(60):
+            seq.append(engine._next_binary_choice(seq))
+            assert abs(sum(1 if v else -1 for v in seq)) <= 3
+        # Verify no 4-in-a-row runs anywhere.
+        for i in range(len(seq) - 3):
+            assert not (seq[i] == seq[i + 1] == seq[i + 2] == seq[i + 3])
+    finally:
+        random.setstate(rng_state)

@@ -50,6 +50,11 @@ export type GameRules = {
   picture_mode: PictureMode
   ready_threshold: number
   leaderboard: boolean
+  report_url?: string | null
+  allow_download?: boolean
+  unlisted?: boolean
+  confidential_voice?: boolean
+  purge_source_after_process?: boolean
   show: {
     questions: number
     music_rounds: number
@@ -292,6 +297,8 @@ export type Question = {
   isTrue: boolean | null
   explanation: string | null
   sourceQuote: string | null
+  videoUrl?: string | null
+  videoTitle?: string | null
   difficulty: Difficulty
   status: QuestionStatus
   origin: 'generated' | 'manual'
@@ -322,6 +329,8 @@ export type QuestionWrite = {
   correctIndex: number | null
   isTrue: boolean | null
   explanation: string | null
+  videoUrl?: string | null
+  videoTitle?: string | null
   difficulty: Difficulty
   sectionId: string | null
   imageId: string | null
@@ -339,6 +348,8 @@ export type QuestionPatch = Partial<{
   isTrue: boolean
   title: string
   explanation: string
+  videoUrl: string
+  videoTitle: string
   difficulty: Difficulty
   sectionId: string | null
 }>

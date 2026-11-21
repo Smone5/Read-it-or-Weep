@@ -1,7 +1,7 @@
 // A quiz from the player's side: join → lobby → game → results.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { HostCrt, hostToneFor } from '../components/HostCrt'
 import { IconPlay, IconStop, IconTrophy } from '../components/Icons'
 import { ErrorNote, FullScreenMessage, Logo, SoundToggle, Spinner, Stage, untilText } from '../components/ui'
@@ -9,6 +9,7 @@ import { api, ApiError, session } from '../lib/api'
 import { HostVoice, type TalkState } from '../lib/hostVoice'
 import { setJukeboxLevel, startJukebox, startParty, stopJukebox } from '../lib/jukebox'
 import { unlockMusic } from '../lib/music'
+import { parseChallenge, type Challenge } from '../lib/shareCard'
 import { play, preloadSounds, unlockAudio } from '../lib/sound'
 import { applyBranding, applyDecade, DECADE_FLAVOUR, DECADE_LABEL, DECADE_SWATCH } from '../lib/theme'
 import type { ModeId, PlayerView, QuizInfo, Soundtrack, Summary as SummaryData, Turn } from '../lib/types'
@@ -54,6 +55,8 @@ const FINALE_MS = 5000
 
 export default function QuizPage() {
   const { slug = '' } = useParams()
+  const [searchParams] = useSearchParams()
+  const challenge = useMemo(() => parseChallenge(searchParams), [searchParams])
   const [info, setInfo] = useState<QuizInfo | null>(null)
   const [screen, setScreen] = useState<Screen>('loading')
   const [fatal, setFatal] = useState('')
@@ -300,11 +303,12 @@ export default function QuizPage() {
         />
       ) : (
         <>
-          {screen === 'join' && <JoinForm info={info} onJoined={() => void load().then(() => setScreen('lobby'))} />}
+          {screen === 'join' && <JoinForm info={info} challenge={challenge} onJoined={() => void load().then(() => setScreen('lobby'))} />}
           {screen === 'lobby' && info.player && (
             <Lobby
               info={info}
               player={info.player}
+              challenge={challenge}
               hostId={hostId}
               onChooseHost={chooseHost}
               onStart={start}
@@ -319,6 +323,11 @@ export default function QuizPage() {
           {screen === 'summary' && summary && (
             <Summary
               slug={slug}
+              quizTitle={info.quiz.title}
+              branding={info.branding}
+              playerName={info.player?.name}
+              playerTeam={info.player?.team}
+              challenge={challenge}
               summary={summary}
               hostName={hostName}
               hostLine={hostLine}
@@ -326,6 +335,8 @@ export default function QuizPage() {
               hostTone={hostTone}
               talk={talk}
               showLeaderboard={info.quiz.leaderboard}
+              reportUrl={info.quiz.reportUrl}
+              reportFiles={info.quiz.reportFiles}
               onOpenScores={() => setScoresView({ from: 'summary', mode: summary.mode })}
               onPlayReport={info.quiz.modes.some((m) => m.id !== 'jukebox') ? playReport : undefined}
               onPlayAgain={playAgain}
@@ -338,9 +349,32 @@ export default function QuizPage() {
   )
 }
 
+function ChallengeBanner({ challenge, modes }: { challenge: Challenge | null; modes: { id: ModeId; name: string }[] }) {
+  if (!challenge) return null
+  const modeName = challenge.mode ? modes.find((m) => m.id === challenge.mode)?.name : null
+  return (
+    <div
+      className="card card-accent rise flex items-center gap-3 p-4"
+      role="status"
+    >
+      <IconTrophy size={24} className="flex-none" style={{ color: 'var(--accent)' }} />
+      <div className="min-w-0 flex-1">
+        <p className="pixel text-[10px]" style={{ color: 'var(--accent-text)' }}>
+          Challenge from {challenge.by}
+        </p>
+        <p className="mt-1 text-sm">
+          Posted <b>{challenge.score.toLocaleString()} pts</b>
+          {challenge.badge ? <> ({challenge.badge})</> : null}
+          {modeName ? <> in {modeName}</> : null}. Think you can beat it?
+        </p>
+      </div>
+    </div>
+  )
+}
+
 // --------------------------------------------------------------------------- join
 
-function JoinForm({ info, onJoined }: { info: QuizInfo; onJoined: () => void }) {
+function JoinForm({ info, challenge, onJoined }: { info: QuizInfo; challenge: Challenge | null; onJoined: () => void }) {
   const { quiz, branding } = info
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
@@ -379,6 +413,8 @@ function JoinForm({ info, onJoined }: { info: QuizInfo; onJoined: () => void }) 
         <h1 className="neon text-lg sm:text-2xl">{branding.gameTitle}</h1>
         <p className="mt-3 text-muted">{branding.tagline}</p>
       </header>
+
+      <ChallengeBanner challenge={challenge} modes={quiz.modes} />
 
       <form className="card rise grid gap-4 p-5" onSubmit={submit}>
         <div>
@@ -425,6 +461,7 @@ function JoinForm({ info, onJoined }: { info: QuizInfo; onJoined: () => void }) 
 type LobbyProps = {
   info: QuizInfo
   player: PlayerView
+  challenge: Challenge | null
   hostId: string | null
   onChooseHost: (id: string) => void
   onStart: (mode: ModeId, decade: string | null) => Promise<void>
@@ -435,9 +472,12 @@ type LobbyProps = {
 
 const REGISTER_LABEL: Record<string, string> = { deeper: 'Deeper voice', middle: 'Mid voice', brighter: 'Brighter voice' }
 
-function Lobby({ info, player, hostId, onChooseHost, onStart, onResume, onOpenScores, onSwitchPlayer }: LobbyProps) {
+function Lobby({ info, player, challenge, hostId, onChooseHost, onStart, onResume, onOpenScores, onSwitchPlayer }: LobbyProps) {
   const { quiz, branding } = info
-  const [mode, setMode] = useState<ModeId>(quiz.defaultMode)
+  const initialMode = (challenge?.mode && quiz.modes.some((m) => m.id === challenge.mode))
+    ? challenge.mode
+    : quiz.defaultMode
+  const [mode, setMode] = useState<ModeId>(initialMode)
   const [decade, setDecade] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -516,8 +556,13 @@ function Lobby({ info, player, hostId, onChooseHost, onStart, onResume, onOpenSc
           <p className="pixel truncate text-[10px] text-muted">{branding.companyName}</p>
           <p className="pixel neon truncate text-xs sm:text-sm">{branding.gameTitle}</p>
         </div>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => navigate('/')} title="Switch to another report">
+          All reports
+        </button>
         <SoundToggle />
       </header>
+
+      <ChallengeBanner challenge={challenge} modes={quiz.modes} />
 
       <div className="grid items-start gap-4 lg:grid-cols-12 lg:gap-5">
         {/* Left column: player status, readiness map, game modes */}
@@ -528,6 +573,20 @@ function Lobby({ info, player, hostId, onChooseHost, onStart, onResume, onOpenSc
             <p className="mt-3 !normal-case text-[19px]" style={{ fontFamily: 'var(--font-sans)' }}>{quiz.title}</p>
             {meeting && <p className="mt-1" style={{ color: 'var(--accent-text)' }}>Meeting {meeting}</p>}
             {!quiz.ready && <p className="mt-3" style={{ color: 'var(--bad)' }}>This quiz is still being prepared. Check back soon.</p>}
+            {(quiz.reportUrl || (quiz.reportFiles && quiz.reportFiles.length > 0)) && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {quiz.reportUrl && (
+                  <a className="btn btn-ghost btn-sm" href={quiz.reportUrl} target="_blank" rel="noopener noreferrer">
+                    Read the report ↗
+                  </a>
+                )}
+                {(quiz.reportFiles ?? []).map((file) => (
+                  <a key={file.id} className="btn btn-ghost btn-sm" href={file.url} target="_blank" rel="noopener noreferrer">
+                    {quiz.reportFiles!.length === 1 && !quiz.reportUrl ? 'Open report ↗' : `${file.filename} ↗`}
+                  </a>
+                ))}
+              </div>
+            )}
           </section>
 
           {player.readiness.total > 0 && (

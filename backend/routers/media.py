@@ -54,6 +54,35 @@ async def report_image(image_id: str, v: str = "sharp", exp: int = 0, sig: str =
     return Response(data, media_type=row["mime_type"], headers=headers)
 
 
+@router.get("/document/{document_id}")
+async def report_document(document_id: str, exp: int = 0, sig: str = "") -> Response:
+    """Serve an uploaded report file only when the quiz allows downloads and the link signature is valid."""
+    if not verify_media(f"doc:{document_id}", exp, sig):
+        raise HTTPException(403, "This report link has expired. Refresh the page for a new one.")
+    row = await db.fetchrow(
+        "select d.filename, d.storage_key, d.mime_type, q.id as quiz_id, q.settings"
+        " from documents d join quizzes q on q.id = d.quiz_id where d.id = $1", document_id)
+    if row is None or not row["storage_key"]:
+        raise HTTPException(404, "Report file is not available for download.")
+    rules = await settings_store.quiz_rules({"settings": row["settings"]})
+    if not rules.get("allow_download"):
+        raise HTTPException(403, "Report download is switched off for this quiz.")
+    try:
+        data = await storage().get(row["storage_key"])
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Report file is no longer stored on this server.") from exc
+    safe_name = row["filename"].replace('"', "").replace("\r", "").replace("\n", "")
+    return Response(
+        data,
+        media_type=row["mime_type"] or "application/octet-stream",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'inline; filename="{safe_name}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @router.get("/logo")
 async def logo() -> Response:
     branding = await settings_store.get("branding")

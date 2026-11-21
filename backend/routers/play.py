@@ -5,13 +5,14 @@ import logging
 import re
 import time
 from collections import defaultdict, deque
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field
 
 import db
 from dependencies import current_player, optional_player
-from security import TokenError, issue_player_token, read_admin_token
+from security import TokenError, issue_player_token, read_admin_token, sign_media
 from services import eleven, bank, engine, favorites, host_samples, host_service, music_service, settings_store, stats
 from services.settings_store import MODES
 
@@ -97,10 +98,28 @@ async def health() -> dict:
 
 
 @router.get("/config")
-async def site_config() -> dict:
-    quizzes = await db.fetch("select slug, title, meeting_at from quizzes where status = 'open' order by created_at desc limit 12")
-    return {"branding": await _branding_view(),
-            "quizzes": [{"slug": q["slug"], "title": q["title"], "meetingAt": q["meeting_at"]} for q in quizzes]}
+async def site_config(player: dict | None = Depends(optional_player)) -> dict:
+    quizzes = await db.fetch(
+        "select id, slug, title, description, meeting_at, teams, settings from quizzes"
+        " where status = 'open' and not coalesce((settings->>'unlisted')::boolean, false)"
+        " order by case when meeting_at is not null and meeting_at >= now() - interval '1 day' then 0 else 1 end,"
+        " meeting_at asc nulls last, created_at desc limit 60")
+    items = []
+    for q in quizzes:
+        entry: dict[str, Any] = {
+            "slug": q["slug"], "title": q["title"], "description": q["description"],
+            "meetingAt": q["meeting_at"], "teams": q["teams"] or [],
+        }
+        if player is not None:
+            rules = await settings_store.quiz_rules(q)
+            ready = await stats.readiness(q["id"], player["id"], int(rules["ready_threshold"]))
+            entry["readiness"] = {
+                "cleared": ready["cleared"], "total": ready["total"],
+                "percent": ready["percent"], "ready": ready["ready"],
+            }
+        items.append(entry)
+    return {"branding": await _branding_view(), "quizzes": items,
+            "player": {"name": player["name"], "team": player["team"]} if player else None}
 
 
 @router.get("/quiz/{slug}")
@@ -111,6 +130,15 @@ async def quiz_info(slug: str, player: dict | None = Depends(optional_player),
     stock = bank.counts(await bank.approved(quiz["id"], rules["question_sources"]))
     sections = await stats.askable_sections(quiz["id"])
     music = bool(rules["music_enabled"])
+    report_files: list[dict] = []
+    if rules.get("allow_download") and (player is not None or _is_admin(x_admin_token)):
+        docs = await db.fetch(
+            "select id, filename from documents where quiz_id = $1 and status = 'ready' and storage_key <> ''"
+            " order by created_at asc", quiz["id"])
+        for d in docs:
+            exp, sig = sign_media(f"doc:{d['id']}", ttl_seconds=3600)
+            report_files.append({"id": d["id"], "filename": d["filename"],
+                                 "url": f"/api/media/document/{d['id']}?exp={exp}&sig={sig}"})
     view = {
         "branding": await _branding_view(),
         "quiz": {
@@ -118,6 +146,8 @@ async def quiz_info(slug: str, player: dict | None = Depends(optional_player),
             "meetingAt": quiz["meeting_at"], "status": quiz["status"], "requiresCode": bool(quiz["access_code"]),
             "teams": quiz["teams"], "sections": len(sections), "questions": stock["mcq"] + stock["fact_fake"],
             "ready": stock["mcq"] >= 3, "leaderboard": bool(rules["leaderboard"]),
+            "reportUrl": rules.get("report_url"),
+            "reportFiles": report_files,
             "modes": [{**settings_store.mode_view(m, rules), "music": music and m in ("show", "sudden_death", "jukebox")}
                       for m in rules["modes"]],
             "defaultMode": rules["default_mode"], "decades": rules["decades"] if music else [],

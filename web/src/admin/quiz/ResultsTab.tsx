@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { download, errorText } from '../api'
-import { Badge, Bar, EmptyState, ErrorBlock, LoadingBlock, Note, Panel, Segmented, Stat } from '../components'
+import { call, download, errorText } from '../api'
+import { Badge, Bar, ConfirmDialog, EmptyState, ErrorBlock, LoadingBlock, Note, Panel, Segmented, Stat } from '../components'
 import { useNotify } from '../context'
 import { decadeLabel, formatDate, plural, timeAgo } from '../format'
 import { useLoad } from '../hooks'
@@ -10,12 +10,30 @@ import type { Leaderboard, ModeId, Participant, Results } from '../types'
 import { useQuiz } from './context'
 
 export default function ResultsTab() {
-  const { detail } = useQuiz()
+  const { detail, refresh: refreshQuiz } = useQuiz()
   const notify = useNotify()
   const { quiz, rules } = detail
   const { data, error, loading, reload, refresh } = useLoad<Results>(`/quizzes/${quiz.id}/results`)
   const [refreshing, setRefreshing] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [askingReset, setAskingReset] = useState(false)
+  const [resetBusy, setResetBusy] = useState(false)
+  const [resetError, setResetError] = useState<string | null>(null)
+
+  const resetAll = async () => {
+    setResetBusy(true)
+    setResetError(null)
+    try {
+      await call(`/quizzes/${quiz.id}/reset-results`, { method: 'POST' })
+      setAskingReset(false)
+      notify('All play-test runs and scores have been cleared.')
+      await Promise.all([refresh().catch(() => {}), refreshQuiz().catch(() => {})])
+    } catch (reason) {
+      setResetError(errorText(reason))
+    } finally {
+      setResetBusy(false)
+    }
+  }
 
   const refreshNow = async () => {
     setRefreshing(true)
@@ -61,11 +79,32 @@ export default function ResultsTab() {
           <button type="button" className="btn btn-ghost" onClick={refreshNow} disabled={refreshing}>
             {refreshing ? 'Refreshing…' : 'Refresh'}
           </button>
+          {people.length > 0 && (
+            <button type="button" className="btn btn-ghost" onClick={() => { setResetError(null); setAskingReset(true) }}>
+              {quiz.status === 'draft' ? 'Clear test results' : 'Reset results'}
+            </button>
+          )}
           <button type="button" className="btn btn-primary" onClick={exportCsv} disabled={exporting || people.length === 0}>
             {exporting ? 'Preparing…' : 'Export CSV'}
           </button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={askingReset}
+        title={quiz.status === 'draft' ? 'Clear test results?' : 'Reset all results for this quiz?'}
+        confirmLabel={quiz.status === 'draft' ? 'Clear test results' : 'Reset all results'}
+        busyLabel="Clearing…"
+        busy={resetBusy}
+        error={resetError}
+        onConfirm={() => void resetAll()}
+        onCancel={() => !resetBusy && setAskingReset(false)}
+      >
+        <p>
+          This removes all solo games, live room scores, high scores, and ratings for <strong>{quiz.title}</strong>.
+        </p>
+        <p className="mt-2 text-muted">Your uploaded report, sections, and all questions stay untouched.</p>
+      </ConfirmDialog>
 
       {people.length === 0 ? (
         <EmptyState

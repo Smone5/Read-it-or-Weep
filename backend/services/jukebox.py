@@ -20,6 +20,7 @@ import re
 import db
 import llm
 from config import config
+from services import badges
 
 log = logging.getLogger("jukebox")
 
@@ -39,7 +40,7 @@ OFFICE_JARGON = (
 )
 
 # The title a player earns, by the share of the music they got right.
-BADGES = [(90, "Chief Music Officer"), (70, "Senior Playlist Manager"), (40, "Jingle Intern"), (0, "Hold Music Specialist")]
+BADGES = [(floor, label) for floor, label, *_ in badges.JUKEBOX_TIERS]
 
 _JARGON_BRIEF = (
     "You rewrite famous song titles as over-the-top corporate jargon for a light-hearted office quiz. A fan must be able "
@@ -149,5 +150,4 @@ def song_or_jargon_item(tracks: list[dict], avoid: set, phrases_used: set[str],
 
 
 def badge(music_correct: int, music_answered: int) -> str:
-    share = round(100 * music_correct / music_answered) if music_answered else 0
-    return next(name for floor, name in BADGES if share >= floor)
+    return badges.evaluate_jukebox(music_correct, music_answered)["label"]

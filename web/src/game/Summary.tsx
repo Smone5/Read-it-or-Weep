@@ -2,16 +2,57 @@
 
 import confetti from 'canvas-confetti'
 import { useEffect, useRef, useState } from 'react'
-import { IconCheck, IconClose, IconPlay, IconStar, IconTrophy } from '../components/Icons'
+import {
+  IconBolt,
+  IconBook,
+  IconBulb,
+  IconCheck,
+  IconClose,
+  IconCrown,
+  IconDisc,
+  IconFlag,
+  IconPlay,
+  IconStar,
+  IconTrophy,
+} from '../components/Icons'
 import { NowPlaying } from '../components/NowPlaying'
 import { api } from '../lib/api'
 import { cueJukebox } from '../lib/jukebox'
+import {
+  buildShareText,
+  downloadBlob,
+  renderCertificatePng,
+  renderTrophyCardPng,
+  shareOrDownloadImage,
+  type Challenge,
+} from '../lib/shareCard'
 import { play } from '../lib/sound'
-import type { Leaderboard, Summary as SummaryData } from '../lib/types'
+import type { BadgeInfo, Branding, Leaderboard, Summary as SummaryData } from '../lib/types'
 import { HighScores, HostBox, ReadinessMap, RollingScore, type TalkControl } from './parts'
+import { VideoClipCard } from './VideoClipCard'
+
+function BadgeIcon({ icon, tone }: { icon?: BadgeInfo['icon']; tone?: BadgeInfo['tone'] }) {
+  const color = tone === 'legend' ? 'var(--accent)' : 'var(--medal)'
+  const props = { size: 18, style: { color } }
+  switch (icon) {
+    case 'crown': return <IconCrown {...props} />
+    case 'star': return <IconStar {...props} />
+    case 'book': return <IconBook {...props} />
+    case 'bolt': return <IconBolt {...props} />
+    case 'bulb': return <IconBulb {...props} />
+    case 'disc': return <IconDisc {...props} />
+    case 'flag': return <IconFlag {...props} />
+    default: return <IconTrophy {...props} />
+  }
+}
 
 type Props = {
   slug: string
+  quizTitle: string
+  branding: Branding
+  playerName?: string | null
+  playerTeam?: string | null
+  challenge?: Challenge | null
   summary: SummaryData
   hostName: string
   hostLine: string
@@ -19,6 +60,8 @@ type Props = {
   hostTone?: 'accent' | 'brand' | 'cyan' | 'rose'
   talk?: TalkControl | null
   showLeaderboard: boolean
+  reportUrl?: string | null
+  reportFiles?: { id: string; filename: string; url: string }[]
   onOpenScores?: () => void
   onPlayReport?: () => void
   onPlayAgain: () => void
@@ -34,6 +77,11 @@ function minutes(seconds: number | null): string {
 
 export default function Summary({
   slug,
+  quizTitle,
+  branding,
+  playerName,
+  playerTeam,
+  challenge,
   summary,
   hostName,
   hostLine,
@@ -41,6 +89,8 @@ export default function Summary({
   hostTone = 'accent',
   talk,
   showLeaderboard,
+  reportUrl,
+  reportFiles,
   onOpenScores,
   onPlayReport,
   onPlayAgain,
@@ -51,13 +101,91 @@ export default function Summary({
   const [thanked, setThanked] = useState(false)
   const [reviewOpen, setReviewOpen] = useState(true)
   const [showAllReview, setShowAllReview] = useState(false)
-  const celebrate = summary.personalBest && summary.score > 0 && summary.status === 'completed'
+  const [shareNote, setShareNote] = useState('')
+  const [exporting, setExporting] = useState<'card' | 'cert' | null>(null)
+  const beatChallenge = Boolean(challenge && summary.status === 'completed' && summary.score > challenge.score)
+  const celebrate = (summary.personalBest && summary.score > 0 && summary.status === 'completed') || beatChallenge
   const failed = summary.mode === 'straight' && summary.passed === false
   const jukebox = summary.mode === 'jukebox' // the music side game: no report to be ready for
   const completed = summary.status === 'completed' && !failed
   const victory = celebrate || (summary.mode === 'straight' && summary.passed === true) || (!jukebox && summary.readiness.ready && completed)
   const previousBest = summary.previousBest
   const bestDelta = previousBest !== null && previousBest !== undefined ? summary.score - previousBest : null
+  const canCertificate = !jukebox && completed && (summary.readiness.ready || summary.passed === true)
+
+  const shareText = buildShareText({
+    slug,
+    quizTitle,
+    gameTitle: branding.gameTitle,
+    playerName,
+    summary,
+  })
+
+  const flashNote = (msg: string) => {
+    setShareNote(msg)
+    window.setTimeout(() => setShareNote((now) => (now === msg ? '' : now)), 3500)
+  }
+
+  const copyScore = async () => {
+    try {
+      await navigator.clipboard.writeText(shareText)
+      flashNote('Copied! Paste into Slack, Teams, or a group text.')
+    } catch {
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: `${branding.gameTitle} — ${quizTitle}`, text: shareText })
+          flashNote('Shared!')
+          return
+        } catch {
+          /* user cancelled */
+        }
+      }
+      flashNote('Could not access clipboard — try saving the trophy card instead.')
+    }
+  }
+
+  const nativeShare = async () => {
+    if (!navigator.share) return copyScore()
+    try {
+      await navigator.share({ title: `${branding.gameTitle} — ${quizTitle}`, text: shareText })
+      flashNote('Score shared!')
+    } catch (err) {
+      if ((err as Error)?.name !== 'AbortError') await copyScore()
+    }
+  }
+
+  const saveTrophyCard = async () => {
+    if (exporting) return
+    setExporting('card')
+    try {
+      const blob = await renderTrophyCardPng({ branding, quizTitle, playerName, team: playerTeam, summary })
+      const outcome = await shareOrDownloadImage(
+        blob,
+        `${slug}-score-${summary.score}.png`,
+        `${branding.gameTitle} — ${summary.score.toLocaleString()} pts`,
+        shareText,
+      )
+      flashNote(outcome === 'shared' ? 'Trophy card ready to share!' : 'Trophy card PNG saved!')
+    } catch {
+      flashNote('Could not generate trophy card.')
+    } finally {
+      setExporting(null)
+    }
+  }
+
+  const saveCertificate = async () => {
+    if (exporting) return
+    setExporting('cert')
+    try {
+      const blob = await renderCertificatePng({ branding, quizTitle, playerName, team: playerTeam, summary })
+      downloadBlob(blob, `${slug}-ready-certificate.png`)
+      flashNote('Completion certificate PNG saved!')
+    } catch {
+      flashNote('Could not generate certificate.')
+    } finally {
+      setExporting(null)
+    }
+  }
 
   useEffect(() => {
     play(victory ? 'cheer' : completed ? 'levelup' : 'gameover')
@@ -112,11 +240,21 @@ export default function Summary({
           </p>
         ) : (
           summary.badge && (
-            <div className="mt-4 flex justify-center">
-              <span className="medal-badge zoom-in">
-                <IconTrophy size={18} style={{ color: 'var(--accent)' }} />
-                <span className="pixel text-[11px]">{summary.badge}</span>
+            <div className="mt-4 flex flex-col items-center gap-2">
+              <span className="medal-badge zoom-in" data-tone={summary.badgeInfo?.tone ?? 'gold'}>
+                <BadgeIcon icon={summary.badgeInfo?.icon} tone={summary.badgeInfo?.tone} />
+                <span className="pixel text-[11px]">{summary.badgeInfo?.label ?? summary.badge}</span>
               </span>
+              {summary.badgeInfo?.description && (
+                <p className="max-w-md text-sm text-muted">
+                  {summary.badgeInfo.description}
+                </p>
+              )}
+              {summary.badgeInfo?.nextHint && (
+                <p className="text-xs" style={{ color: summary.badgeInfo.nextLabel ? 'var(--accent-text)' : 'var(--good)' }}>
+                  {summary.badgeInfo.nextLabel ? `Next rank: ${summary.badgeInfo.nextHint}` : summary.badgeInfo.nextHint}
+                </p>
+              )}
             </div>
           )
         )}
@@ -146,6 +284,84 @@ export default function Summary({
         )}
       </section>
 
+      {challenge && summary.status === 'completed' && (
+        <section
+          className="card flex items-center gap-3 p-4"
+          style={{
+            borderColor: beatChallenge ? 'var(--good)' : 'var(--accent)',
+            background: beatChallenge
+              ? 'color-mix(in oklab, var(--good) 12%, var(--surface))'
+              : 'color-mix(in oklab, var(--accent) 10%, var(--surface))',
+          }}
+        >
+          <IconTrophy size={22} className="flex-none" style={{ color: beatChallenge ? 'var(--good)' : 'var(--accent)' }} />
+          <div className="min-w-0 flex-1">
+            <p className="pixel text-[10px]" style={{ color: beatChallenge ? 'var(--good)' : 'var(--accent-text)' }}>
+              {beatChallenge
+                ? `Challenge beaten!`
+                : summary.score === challenge.score
+                  ? 'Dead heat!'
+                  : `Target: ${challenge.by} (${challenge.score.toLocaleString()} pts)`}
+            </p>
+            <p className="mt-1 text-sm">
+              {beatChallenge
+                ? <>You topped {challenge.by}&rsquo;s {challenge.score.toLocaleString()} pts by <b>+{(summary.score - challenge.score).toLocaleString()}</b>! Send your score back to claim the crown.</>
+                : summary.score === challenge.score
+                  ? <>You tied {challenge.by}&rsquo;s {challenge.score.toLocaleString()} pts on the nose. One more run to take the lead!</>
+                  : <>Only <b>{(challenge.score - summary.score).toLocaleString()} pts</b> shy of {challenge.by}&rsquo;s score. Run it back!</>}
+            </p>
+          </div>
+        </section>
+      )}
+
+      {summary.status === 'completed' && (
+        <section className="card card-accent p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="neon-accent text-xs">Show off your score</h2>
+              <p className="mt-1 text-xs text-muted">
+                Spoiler-free — shares your score, rank, and challenge link only (never report text).
+              </p>
+            </div>
+            {summary.resultsGrid && summary.resultsGrid.length > 0 && (
+              <div className="flex flex-wrap gap-1" aria-label={`Answer grid: ${summary.resultsGrid.filter(Boolean).length} of ${summary.resultsGrid.length} correct`}>
+                {summary.resultsGrid.slice(0, 20).map((ok, i) => (
+                  <span
+                    key={i}
+                    className="inline-block h-3.5 w-3.5 rounded-[3px]"
+                    style={{ background: ok ? 'var(--good)' : 'var(--bad)' }}
+                    title={ok ? 'Correct' : 'Missed'}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => void copyScore()}>
+              Copy score &amp; challenge link
+            </button>
+            {typeof navigator !== 'undefined' && 'share' in navigator && (
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => void nativeShare()}>
+                Share…
+              </button>
+            )}
+            <button type="button" className="btn btn-ghost btn-sm" disabled={exporting !== null} onClick={() => void saveTrophyCard()}>
+              {exporting === 'card' ? 'Building card…' : 'Save trophy card (PNG)'}
+            </button>
+            {canCertificate && (
+              <button type="button" className="btn btn-ghost btn-sm" disabled={exporting !== null} onClick={() => void saveCertificate()}>
+                {exporting === 'cert' ? 'Building certificate…' : 'Download ready certificate (PNG)'}
+              </button>
+            )}
+          </div>
+          {shareNote && (
+            <p className="mt-2 text-xs font-medium" style={{ color: 'var(--good)' }} role="status">
+              {shareNote}
+            </p>
+          )}
+        </section>
+      )}
+
       {/* Two-column desktop debrief; clean vertical flow on mobile. */}
       <div className="grid items-start gap-4 lg:grid-cols-12">
         <div className="flex flex-col gap-4 lg:col-span-7">
@@ -174,7 +390,14 @@ export default function Summary({
 
           {!jukebox && reread.length > 0 && (
             <section className="card card-accent p-4">
-              <h2 className="neon-accent text-xs">Worth a re-read</h2>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="neon-accent text-xs">Worth a re-read</h2>
+                {reportUrl && (
+                  <a className="btn btn-ghost btn-sm" href={reportUrl} target="_blank" rel="noopener noreferrer">
+                    Read the report ↗
+                  </a>
+                )}
+              </div>
               <ul className="mt-3 grid gap-1.5">
                 {reread.slice(0, 6).map((section) => (
                   <li key={section.id} className="flex items-start gap-2">
@@ -183,6 +406,15 @@ export default function Summary({
                   </li>
                 ))}
               </ul>
+              {reportFiles && reportFiles.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {reportFiles.map((file) => (
+                    <a key={file.id} className="btn btn-ghost btn-sm" href={file.url} target="_blank" rel="noopener noreferrer">
+                      {reportFiles.length === 1 && !reportUrl ? 'Open report ↗' : `${file.filename} ↗`}
+                    </a>
+                  ))}
+                </div>
+              )}
             </section>
           )}
 
@@ -218,6 +450,7 @@ export default function Summary({
                             “{miss.sourceQuote}”
                           </blockquote>
                         )}
+                        {miss.video && <VideoClipCard video={miss.video} compact restoreLevel="party" />}
                       </li>
                     ))}
                   </ol>

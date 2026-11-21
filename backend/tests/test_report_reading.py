@@ -75,3 +75,36 @@ def test_native_charts_are_drawn_large_enough_to_read_on_a_phone():
     image = Image.open(io.BytesIO(chart.render_png()))
     assert image.width >= 800 and image.height >= 550      # squarer than a page chart, with bigger lettering
     assert "North = 52.1" in chart.as_text()
+
+
+def test_real_world_pdf_hardening_helpers():
+    from ingest.model import Block, ParsedDocument
+    from ingest.other_parsers import _clean_pdf_title, _looks_like_heading
+
+    assert _clean_pdf_title("printmgr file") is None
+    assert _clean_pdf_title("Microsoft Word - Q3_Final.docx") is None
+    assert _clean_pdf_title("2024 Annual Report") == "2024 Annual Report"
+    assert not _looks_like_heading("($Billions")
+    assert not _looks_like_heading("https://doi.org/10.6028/NIST.AMS.600-16")
+    assert _looks_like_heading("US Manufacturing Supply Chain")
+
+    # Giant cover-page-collapsed section splits cleanly into real chapters, drops TOC/References, merges duplicates.
+    filler = " ".join(["revenue"] * 450)
+    parsed = ParsedDocument(title="Annual Report", blocks=[
+        Block(kind="heading", text="Cover Title", level=1),
+        Block(kind="heading", text="Table of Contents", level=4),
+        Block(kind="paragraph", text="Executive Summary ... 1"),
+        Block(kind="heading", text="Executive Summary", level=4),
+        Block(kind="paragraph", text=filler),
+        Block(kind="heading", text="Supply Chain", level=4),
+        Block(kind="paragraph", text=filler),
+        Block(kind="heading", text="Supply Chain", level=4),
+        Block(kind="paragraph", text=filler),
+        Block(kind="heading", text="References", level=4),
+        Block(kind="paragraph", text=filler),
+    ])
+    structured = build_structure(parsed, "annual.pdf")
+    headings = [s.heading for s in structured.sections]
+    assert "Executive Summary" in headings and "Supply Chain" in headings
+    assert headings.count("Supply Chain") == 1
+    assert "Table of Contents" not in headings and "References" not in headings

@@ -30,6 +30,8 @@ type Form = {
   live: boolean
   title: string
   explanation: string
+  videoUrl: string
+  videoTitle: string
 }
 
 function initialForm(question: Question | null): Form {
@@ -47,6 +49,8 @@ function initialForm(question: Question | null): Form {
       live: true,
       title: '',
       explanation: '',
+      videoUrl: '',
+      videoTitle: '',
     }
   }
   const options = [...(question.options ?? [])]
@@ -64,6 +68,8 @@ function initialForm(question: Question | null): Form {
     live: question.status === 'approved',
     title: question.title ?? '',
     explanation: question.explanation ?? '',
+    videoUrl: question.videoUrl ?? '',
+    videoTitle: question.videoTitle ?? '',
   }
 }
 
@@ -98,6 +104,8 @@ function patchFrom(question: Question, form: Form): QuestionPatch {
   }
   if (form.title.trim() !== (question.title ?? '')) patch.title = form.title.trim()
   if (form.explanation.trim() !== (question.explanation ?? '')) patch.explanation = form.explanation.trim()
+  if (form.videoUrl.trim() !== (question.videoUrl ?? '')) patch.videoUrl = form.videoUrl.trim()
+  if (form.videoTitle.trim() !== (question.videoTitle ?? '')) patch.videoTitle = form.videoTitle.trim()
   if (form.difficulty !== question.difficulty) patch.difficulty = form.difficulty
   if ((form.sectionId || null) !== question.sectionId) patch.sectionId = form.sectionId || null
   return patch
@@ -247,6 +255,8 @@ export default function QuestionEditor({
           correctIndex: mcq ? form.correctIndex : null,
           isTrue: mcq ? null : form.isTrue,
           explanation: form.explanation.trim() || null,
+          videoUrl: form.videoUrl.trim() || null,
+          videoTitle: form.videoTitle.trim() || null,
           difficulty: form.difficulty,
           sectionId: form.sectionId || null,
           imageId: mcq ? form.imageId || null : null, // the game never shows a picture with a Fact-or-Fake statement
@@ -456,6 +466,36 @@ export default function QuestionEditor({
                 onChange={(event) => set({ explanation: event.target.value })}
                 maxLength={EXPLANATION_MAX}
                 rows={2}
+              />
+            )}
+          </Field>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            label="YouTube clip link (optional)"
+            hint="Shown on the answer reveal card. Add #external if the uploader disables embeds."
+          >
+            {(props) => (
+              <input
+                className="field"
+                type="url"
+                placeholder="https://www.youtube.com/watch?v=..."
+                {...props}
+                value={form.videoUrl}
+                onChange={(event) => set({ videoUrl: event.target.value })}
+                maxLength={300}
+              />
+            )}
+          </Field>
+          <Field label="Clip title (optional)" hint="Short label on the replay card, e.g. 'Elway Helicopter Dive (SB XXXII)'.">
+            {(props) => (
+              <input
+                className="field"
+                {...props}
+                value={form.videoTitle}
+                onChange={(event) => set({ videoTitle: event.target.value })}
+                maxLength={120}
               />
             )}
           </Field>

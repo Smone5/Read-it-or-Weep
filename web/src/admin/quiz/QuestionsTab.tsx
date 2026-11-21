@@ -49,12 +49,13 @@ export default function QuestionsTab() {
   const notify = useNotify()
   const { quiz, rules, sections, documents } = detail
   const bank = useLoad<QuestionBank>(`/quizzes/${quiz.id}/questions`)
-  const [params] = useSearchParams()
+  const [params, setParams] = useSearchParams()
   const [filters, setFilters] = useState<Filters>(() => filtersFromLink(params))
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set())
   const [shown, setShown] = useState(PAGE)
   const [editing, setEditing] = useState<Question | 'new' | null>(null)
+  const openedEditRef = useRef<string | null>(null)
   const [previewing, setPreviewing] = useState<Question | null>(null)
   const [deleting, setDeleting] = useState<Question | 'selected' | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
@@ -89,6 +90,18 @@ export default function QuestionsTab() {
   }, [bank.data, stableUrl])
 
   const all = data?.questions ?? NONE
+  const editParam = params.get('edit')
+  useEffect(() => {
+    if (!editParam || !data || openedEditRef.current === editParam) return
+    const target = data.questions.find((q) => q.id === editParam)
+    if (target) {
+      openedEditRef.current = editParam
+      setEditing(target)
+      const next = new URLSearchParams(params)
+      next.delete('edit')
+      setParams(next, { replace: true })
+    }
+  }, [editParam, data, params, setParams])
   const filtered = useMemo(() => all.filter((question) => matches(question, filters)), [all, filters])
   const visible = filtered.slice(0, shown)
   const chosen = filtered.filter((question) => selected.has(question.id))

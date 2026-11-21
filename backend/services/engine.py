@@ -21,7 +21,7 @@ from typing import Any
 
 import db
 from security import sign_media
-from services import favorites, bank, jukebox, music_service, stats
+from services import badges, favorites, bank, jukebox, music_service, stats, video
 from services.settings_store import MODES
 
 GRACE_MS = 1500           # network + render time not counted against the player
@@ -36,7 +36,7 @@ READ_MAX_SEC = 20.0
 LATE_MS = 4000            # an answer this long after the limit counts as a timeout
 UNTIMED_SEC = 0
 
-BADGES = [(90, "Briefing Boss"), (70, "Well Read"), (40, "Skimmer"), (0, "Judged It By Its Cover")]
+BADGES = badges.REPORT_BADGES
 LIFELINE_MULTIPLIER = {"fifty": 0.75, "hint": 0.8, "peek": 0.5}
 PEEK_GRACE_SEC = 10
 UNUSED_LIFELINE_BONUS = 40
@@ -56,6 +56,26 @@ class GameError(Exception):
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _next_binary_choice(prior: list[bool]) -> bool:
+    """Pick the next True/False (or Song/Jargon) target unpredictably while staying balanced.
+
+    Previously, strictly forcing the rarer side whenever counts differed made every even-numbered
+    question (Q2, Q4, Q6...) 100% predictable as the opposite of the previous one. Instead:
+      * Never allow 4 identical answers in a row, and never let the cumulative split exceed ±3.
+      * Otherwise draw randomly with a gentle pull back toward 50/50 (40/60 at ±1, 25/75 at ±2),
+        so back-to-back TRUEs or FALSEs occur naturally and players cannot game the pattern.
+    """
+    if len(prior) >= 3 and prior[-1] == prior[-2] == prior[-3]:
+        return not prior[-1]
+    diff = sum(1 if v else -1 for v in prior)
+    if diff >= 3:
+        return False
+    if diff <= -3:
+        return True
+    p_true = {2: 0.25, 1: 0.40, 0: 0.50, -1: 0.60, -2: 0.75}[diff]
+    return random.random() < p_true
 
 
 # --------------------------------------------------------------------------- plans
@@ -239,10 +259,8 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
             built = await jukebox.jargon_item(tracks, avoid)
         else:
             used = {i["payload"].get("phrase") for i in items if i["slot"] == "song_or_jargon"}
-            prior = [i for i in items if i["slot"] == "song_or_jargon"]
-            songs_so_far = sum(1 for i in prior if i["correct_index"] == 0)
-            jargon_so_far = len(prior) - songs_so_far
-            prefer_song = True if songs_so_far < jargon_so_far else (False if jargon_so_far < songs_so_far else None)
+            prior = [i["correct_index"] == 0 for i in items if i["slot"] == "song_or_jargon"]
+            prefer_song = _next_binary_choice(prior)
             built = jukebox.song_or_jargon_item(tracks, avoid, used, prefer_song=prefer_song)
         if built is None:
             return None
@@ -275,9 +293,8 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
 
     if kind == "fact_fake":
         pool = [q for q in questions if q["kind"] == "fact_fake"]
-        facts_so_far = sum(1 for i in items if i["slot"] == "fact_fake" and i["correct_index"] == 0)
-        fakes_so_far = sum(1 for i in items if i["slot"] == "fact_fake" and i["correct_index"] == 1)
-        want_fact = facts_so_far < fakes_so_far if facts_so_far != fakes_so_far else random.random() < 0.5
+        prior = [i["correct_index"] == 0 for i in items if i["slot"] == "fact_fake"]
+        want_fact = _next_binary_choice(prior)
         question = (bank.choose([q for q in pool if q["is_true"] == want_fact], seen, used, section_load=load,
                                 asked=asked, section_states=sec_states)
                     or bank.choose(pool, seen, used, section_load=load, asked=asked, section_states=sec_states))
@@ -697,20 +714,25 @@ async def submit_answer(run: dict, rules: dict, item_id: str, choice: int | None
 async def _reveal(item: dict, run: dict, rules: dict) -> dict:
     payload = item["payload"]
     result: dict[str, Any] = {
-        "itemId": item["id"], "slot": item["slot"], "correct": bool(item["is_correct"]), "timedOut": item["timed_out"],
+        "itemId": item["id"], "quizId": run["quiz_id"], "questionId": item["question_id"],
+        "slot": item["slot"], "correct": bool(item["is_correct"]), "timedOut": item["timed_out"],
         "selectedIndex": item["selected_index"], "correctIndex": item["correct_index"],
         "correctAnswer": payload["options"][item["correct_index"]], "points": item["points"],
         "state": run_state(run, rules), "finished": run["status"] != "in_progress",
     }
     if item["question_id"]:
         question = await db.fetchrow(
-            "select q.explanation, q.source_quote, q.source_type, s.id as section_id, s.heading from questions q"
+            "select q.explanation, q.source_quote, q.source_type, q.video_url, q.video_title,"
+            " s.id as section_id, s.heading from questions q"
             " left join doc_sections s on s.id = q.section_id where q.id = $1", item["question_id"])
         if question:
             result["explanation"] = question["explanation"]
             result["sourceQuote"] = question["source_quote"]
             if question["section_id"]:
                 result["section"] = {"id": question["section_id"], "heading": question["heading"]}
+            clip = video.parse_youtube(question.get("video_url"), question.get("video_title"))
+            if clip:
+                result["video"] = clip
     if payload.get("image_id"):
         row = await db.fetchrow("select description, width, height from doc_images where id = $1", payload["image_id"])
         result["image"] = _image_view(
@@ -762,10 +784,9 @@ async def finish_run(run: dict, rules: dict, abandoned: bool = False) -> dict:
     if current["status"] != "in_progress":
         return current
     accuracy = round(100 * current["report_correct"] / current["report_answered"]) if current["report_answered"] else 0
-    badge = (jukebox.badge(current["music_correct"], current["music_answered"]) if current["mode"] == "jukebox"
-             else next(name for floor, name in BADGES if accuracy >= floor))
-    passed = accuracy >= int(rules["straight"]["pass_mark"]) if current["mode"] == "straight" else None
     status = "abandoned" if abandoned and current["questions_answered"] < 3 else "completed"
+    badge = badges.evaluate_run(current, rules, status=status)["label"]
+    passed = accuracy >= int(rules["straight"]["pass_mark"]) if current["mode"] == "straight" else None
     unused_lifelines = (
         sum(max(0, int(v)) for v in (current["lifelines"] or {}).values())
         if status == "completed" and not abandoned and (

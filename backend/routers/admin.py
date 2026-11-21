@@ -19,7 +19,7 @@ from ingest import MIME_TYPES, extension_of, supported_extensions
 from ingest import pipeline
 from routers.play import throttle, throttle_key
 from security import hash_password, issue_admin_token, verify_password
-from services import bank, host_service, live, music_service, settings_store, stats
+from services import bank, host_service, live, music_service, settings_store, stats, video
 from services import eleven, host_samples
 from services.settings_store import ALL_DECADES, DEFAULTS, MODES, VOICES
 from storage import storage
@@ -379,9 +379,11 @@ async def upload_document(quiz_id: str, file: UploadFile = File(...), admin: dic
 
 @router.post("/documents/{document_id}/reprocess")
 async def reprocess_document(document_id: str, admin: dict = Depends(current_admin)) -> dict:
-    document = await db.fetchrow("select quiz_id, status from documents where id = $1", document_id)
+    document = await db.fetchrow("select quiz_id, status, storage_key from documents where id = $1", document_id)
     if document is None:
         raise HTTPException(404, "Document not found.")
+    if not document["storage_key"]:
+        raise HTTPException(409, "The source file was purged after processing. Upload the report again to reprocess it.")
     if document["status"] == "processing":
         # "Stuck" means no sign of life for a while, however old the document itself is.
         stuck = await db.fetchval("select coalesce(heartbeat_at, created_at) < now() - interval '10 minutes'"
@@ -408,8 +410,9 @@ async def delete_document(document_id: str, admin: dict = Depends(current_admin)
 # --------------------------------------------------------------------------- question bank
 
 _QUESTION_COLUMNS = ("q.id, q.kind, q.source_type, q.skill, q.title, q.question_text, q.options, q.correct_index, q.is_true,"
-                     " q.explanation, q.source_quote, q.difficulty, q.status, q.origin, q.pinned, q.edited_at, q.flag_count,"
-                     " q.times_served, q.times_correct, q.quality, q.section_id, q.image_id, q.created_at")
+                     " q.explanation, q.source_quote, q.video_url, q.video_title, q.difficulty, q.status, q.origin, q.pinned,"
+                     " q.edited_at, q.flag_count, q.times_served, q.times_correct, q.quality, q.section_id, q.image_id,"
+                     " q.created_at")
 
 
 def _question_view(row: dict) -> dict:
@@ -417,7 +420,8 @@ def _question_view(row: dict) -> dict:
     return {"id": row["id"], "kind": row["kind"], "sourceType": row["source_type"], "skill": row["skill"],
             "title": row["title"], "text": row["question_text"], "options": row["options"],
             "correctIndex": row["correct_index"], "isTrue": row["is_true"], "explanation": row["explanation"],
-            "sourceQuote": row["source_quote"], "difficulty": row["difficulty"], "status": row["status"],
+            "sourceQuote": row["source_quote"], "videoUrl": row.get("video_url"), "videoTitle": row.get("video_title"),
+            "difficulty": row["difficulty"], "status": row["status"],
             "origin": row["origin"], "edited": row["edited_at"] is not None, "pinned": row["pinned"],
             "flags": row["flag_count"], "served": served,
             "accuracy": round(100 * row["times_correct"] / served) if served else None,
@@ -455,6 +459,8 @@ class QuestionWrite(BaseModel):
     correctIndex: int | None = None
     isTrue: bool | None = None
     explanation: str | None = Field(default=None, max_length=500)
+    videoUrl: str | None = Field(default=None, max_length=300)
+    videoTitle: str | None = Field(default=None, max_length=120)
     difficulty: Literal["easy", "medium", "hard"] = "medium"
     sectionId: str | None = None
     imageId: str | None = None
@@ -497,13 +503,19 @@ async def create_question(quiz_id: str, body: QuestionWrite, admin: dict = Depen
             raise HTTPException(422, "That section does not belong to this quiz.")
     if body.imageId and not await db.fetchval("select 1 from doc_images where id = $1 and quiz_id = $2", body.imageId, quiz_id):
         raise HTTPException(422, "That picture does not belong to this quiz.")
+    try:
+        video_url = video.normalize_url(body.videoUrl)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    video_title = (body.videoTitle or "").strip()[:120] or None
     row = await db.fetchrow(
         "insert into questions (quiz_id, document_id, section_id, image_id, kind, source_type, skill, title, question_text,"
-        " options, correct_index, is_true, explanation, difficulty, status, origin, pinned)"
-        " values ($1,$2,$3,$4,$5,$6,'recall',$7,$8,$9,$10,$11,$12,$13,$14,'manual',$15) returning id",
+        " options, correct_index, is_true, explanation, video_url, video_title, difficulty, status, origin, pinned)"
+        " values ($1,$2,$3,$4,$5,$6,'recall',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'manual',$17) returning id",
         quiz_id, document_id, body.sectionId, body.imageId, body.kind, "image" if body.imageId else "text",
         (body.title or "").strip() or None, body.text.strip(), shape["options"], shape["correct_index"],
-        shape["is_true"], (body.explanation or "").strip() or None, body.difficulty, body.status, body.pinned)
+        shape["is_true"], (body.explanation or "").strip() or None, video_url, video_title,
+        body.difficulty, body.status, body.pinned)
     bank.invalidate(quiz_id)
     return {"id": row["id"]}
 
@@ -545,6 +557,13 @@ async def update_question(question_id: str, body: dict[str, Any], admin: dict = 
         changes["title"] = (str(body["title"] or "")).strip()[:60] or None
     if "explanation" in body:
         changes["explanation"] = (str(body["explanation"] or "")).strip()[:500] or None
+    if "videoUrl" in body:
+        try:
+            changes["video_url"] = video.normalize_url(str(body["videoUrl"] or ""))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    if "videoTitle" in body:
+        changes["video_title"] = (str(body["videoTitle"] or "")).strip()[:120] or None
     if any(key in body for key in ("text", "options", "correctIndex", "isTrue")):
         try:
             merged = QuestionWrite(
@@ -677,6 +696,20 @@ async def results_csv(quiz_id: str, admin: dict = Depends(current_admin)) -> Res
     body = await stats.participants_csv(quiz, await settings_store.quiz_rules(quiz))
     return Response(body, media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="{quiz["slug"]}-results.csv"'})
+
+
+@router.post("/quizzes/{quiz_id}/reset-results")
+async def reset_results(quiz_id: str, admin: dict = Depends(current_admin)) -> dict:
+    """Clear solo runs, live sessions, leaderboards and feedback for a quiz (e.g. after admin play-testing),
+    leaving the uploaded report, sections and questions untouched."""
+    await _quiz(quiz_id)
+    async with db.transaction() as tx:
+        await tx.execute("delete from feedback where quiz_id = $1", quiz_id)
+        await tx.execute("delete from runs where quiz_id = $1", quiz_id)
+        await tx.execute("delete from live_sessions where quiz_id = $1", quiz_id)
+        await tx.execute("update questions set times_served = 0, times_correct = 0 where quiz_id = $1", quiz_id)
+    bank.invalidate(quiz_id)
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- live games

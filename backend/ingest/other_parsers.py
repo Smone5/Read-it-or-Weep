@@ -50,6 +50,46 @@ def parse_text(data: bytes, filename: str = "") -> ParsedDocument:
     return parsed
 
 
+_JUNK_TITLE = re.compile(
+    r"^(printmgr(\s+file)?|untitled.*|document\s*\d*|slide\s*\d*|microsoft\s+word\b.*|powerpoint\b.*|presentation\s*\d*|.*\.(docx?|pdf|pptx?))$",
+    re.I,
+)
+
+
+def _clean_pdf_title(raw: str | None) -> str | None:
+    title = re.sub(r"\s+", " ", (raw or "")).strip()
+    if not title or len(title) < 3 or _JUNK_TITLE.match(title):
+        return None
+    return title
+
+
+def _looks_like_heading(text: str) -> bool:
+    if not text or len(text) < 2 or len(text) > 120:
+        return False
+    if text[0] in "($%•-*·" or text.endswith((",", ";")):
+        return False
+    if "http://" in text.lower() or "https://" in text.lower() or "doi.org" in text.lower():
+        return False
+    if text.count("(") != text.count(")") or text.count("[") != text.count("]"):
+        return False
+    if re.fullmatch(r"[\d\s.,:%$€£/–-]+", text):
+        return False
+    return True
+
+
+def _overlap_ratio(inner: tuple[float, float, float, float], outer: tuple[float, float, float, float]) -> float:
+    ix0, iy0, ix1, iy1 = inner
+    ox0, oy0, ox1, oy1 = outer
+    dx = max(0.0, min(ix1, ox1) - max(ix0, ox0))
+    dy = max(0.0, min(iy1, oy1) - max(iy0, oy0))
+    area = max(1.0, (ix1 - ix0) * (iy1 - iy0))
+    return (dx * dy) / area
+
+
+def _norm_key(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
 def parse_pdf(data: bytes, filename: str = "") -> ParsedDocument:
     import pymupdf
 
@@ -59,32 +99,92 @@ def parse_pdf(data: bytes, filename: str = "") -> ParsedDocument:
         raise UnreadableDocument("This PDF could not be opened.") from exc
     if document.needs_pass:
         raise UnreadableDocument("This PDF is password-protected.")
-    parsed = ParsedDocument(title=(document.metadata or {}).get("title") or None)
+    parsed = ParsedDocument(title=_clean_pdf_title((document.metadata or {}).get("title")))
+
+    # Native PDF bookmarks (when present) give authoritative chapter titles & levels.
+    toc_levels: dict[str, int] = {}
+    try:
+        for lvl, title, _ in document.get_toc() or []:
+            key = _norm_key(title)
+            if key and 1 <= lvl <= 3 and key not in toc_levels:
+                toc_levels[key] = lvl
+    except Exception:
+        pass
 
     # Body text size = the most common font size; clearly larger lines are headings.
     sizes: Counter[float] = Counter()
+    body_page_sizes: Counter[float] = Counter()
+    margin_counts: Counter[str] = Counter()
     pages = []
-    for page in document:
+    page_count = len(document)
+    for page_idx, page in enumerate(document):
         layout = page.get_text("dict")
-        pages.append((page, layout))
+        rect = page.rect
+        pages.append((page_idx, page, layout, rect.height))
+        seen_margin: set[str] = set()
         for block in layout.get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            bbox = block.get("bbox") or (0, 0, 0, 0)
+            b_lines = []
             for line in block.get("lines", []):
                 for span in line.get("spans", []):
-                    if span.get("text", "").strip():
-                        sizes[round(span["size"], 1)] += len(span["text"])
+                    st = span.get("text", "").strip()
+                    if st:
+                        sz = round(span["size"], 1)
+                        sizes[sz] += len(st)
+                        if page_count < 4 or page_idx > 0:
+                            body_page_sizes[sz] += len(st)
+                        b_lines.append(st)
+            if page_count >= 4 and b_lines and (bbox[1] < rect.height * 0.09 or bbox[3] > rect.height * 0.91):
+                key = _norm_key(" ".join(b_lines))
+                if key and len(key) <= 100 and key not in seen_margin:
+                    seen_margin.add(key)
+                    margin_counts[key] += 1
     if not sizes:
         raise UnreadableDocument(
             "This PDF has no selectable text (it may be a scan). Export the report as Word or a text PDF.")
-    body_size = sizes.most_common(1)[0][0]
-    larger = sorted({s for s in sizes if s >= body_size * 1.12}, reverse=True)[:3]
 
-    for page, layout in pages:
+    running_headers = {k for k, c in margin_counts.items() if c >= max(3, int(page_count * 0.3))}
+    body_size = sizes.most_common(1)[0][0]
+    # Exclude cover-page-only outlier sizes when determining heading tiers on multi-page PDFs.
+    tier_source = body_page_sizes if body_page_sizes else sizes
+    larger = sorted({s for s in tier_source if s >= body_size * 1.12}, reverse=True)[:3]
+
+    for page_idx, page, layout, page_h in pages:
+        # Extract structured tables via PyMuPDF and avoid duplicating their text as mangled paragraphs.
+        page_tables: list[tuple[tuple[float, float, float, float], str, bool]] = []
+        try:
+            found = page.find_tables()
+            for tbl in (found.tables if found else []):
+                raw_rows = tbl.extract() or []
+                clean_rows = [[re.sub(r"\s+", " ", (cell or "")).strip() for cell in row] for row in raw_rows]
+                clean_rows = [r for r in clean_rows if any(r)]
+                if len(clean_rows) >= 2 and len(clean_rows[0]) >= 2:
+                    md = rows_to_markdown(clean_rows)
+                    if md.strip():
+                        page_tables.append((tuple(tbl.bbox), md, False))
+        except Exception:
+            page_tables = []
+
         for block in layout.get("blocks", []):
             if block.get("type") == 1:
                 image = block.get("image")
                 if image:
                     parsed.blocks.append(Block(kind="image", image=image, mime=f"image/{block.get('ext', 'png')}"))
                 continue
+            bbox = tuple(block.get("bbox") or (0.0, 0.0, 0.0, 0.0))
+            in_table = False
+            for t_idx, (tbbox, md, emitted) in enumerate(page_tables):
+                if _overlap_ratio(bbox, tbbox) >= 0.55:
+                    if not emitted:
+                        parsed.blocks.append(Block(kind="table", text=md))
+                        page_tables[t_idx] = (tbbox, md, True)
+                    in_table = True
+                    break
+            if in_table:
+                continue
+
             lines = []
             block_size = 0.0
             bold = True
@@ -98,12 +198,35 @@ def parse_pdf(data: bytes, filename: str = "") -> ParsedDocument:
             text = re.sub(r"\s+", " ", " ".join(lines)).strip()
             if not text or re.fullmatch(r"(page\s*)?\d+(\s*(of|/)\s*\d+)?", text, flags=re.I):
                 continue
-            if block_size in larger and len(text) <= 120:
+            norm = _norm_key(text)
+            if norm in running_headers and (bbox[1] < page_h * 0.11 or bbox[3] > page_h * 0.89):
+                continue
+
+            if norm in toc_levels and _looks_like_heading(text):
+                parsed.blocks.append(Block(kind="heading", text=text, level=toc_levels[norm]))
+            elif block_size in larger and _looks_like_heading(text) and not text.endswith("."):
                 parsed.blocks.append(Block(kind="heading", text=text, level=larger.index(block_size) + 1))
-            elif bold and len(text) <= 80 and not text.endswith("."):
+            elif bold and len(text) <= 80 and _looks_like_heading(text) and not text.endswith("."):
                 parsed.blocks.append(Block(kind="heading", text=text, level=len(larger) + 1))
             else:
                 parsed.blocks.append(Block(kind="paragraph", text=text))
+
+        # Emit any table that didn't overlap a text block (rare, e.g., image-backed table).
+        for _, md, emitted in page_tables:
+            if not emitted:
+                parsed.blocks.append(Block(kind="table", text=md))
+
+        # Capture clickable PDF link annotations (e.g. hyperlinked YouTube URLs on this page).
+        try:
+            page_uris = [
+                str(link["uri"]).strip()
+                for link in (page.get_links() or [])
+                if isinstance(link.get("uri"), str) and str(link["uri"]).strip().startswith(("http://", "https://"))
+            ]
+        except Exception:
+            page_uris = []
+        if page_uris and parsed.blocks:
+            parsed.blocks[-1].links.extend(page_uris)
     document.close()
     return parsed
 
@@ -138,10 +261,31 @@ def parse_pptx(data: bytes, filename: str = "") -> ParsedDocument:
                     pass
                 continue
             if getattr(shape, "has_text_frame", False) and shape.has_text_frame:
-                for paragraph in shape.text_frame.paragraphs:
+                shape_link: list[str] = []
+                try:
+                    addr = shape.click_action.hyperlink.address
+                    if isinstance(addr, str) and addr.startswith(("http://", "https://")):
+                        shape_link.append(addr)
+                except Exception:
+                    pass
+                for p_idx, paragraph in enumerate(shape.text_frame.paragraphs):
                     text = "".join(run.text for run in paragraph.runs).strip()
+                    run_links = list(shape_link) if p_idx == 0 else []
+                    for run in paragraph.runs:
+                        try:
+                            addr = run.hyperlink.address
+                            if isinstance(addr, str) and addr.startswith(("http://", "https://")):
+                                run_links.append(addr)
+                        except Exception:
+                            pass
                     if text:
-                        parsed.blocks.append(Block(kind="list_item" if paragraph.level else "paragraph", text=text))
+                        parsed.blocks.append(Block(
+                            kind="list_item" if paragraph.level else "paragraph",
+                            text=text,
+                            links=run_links,
+                        ))
+                    elif run_links and parsed.blocks:
+                        parsed.blocks[-1].links.extend(run_links)
 
     for number, slide in enumerate(deck.slides, start=1):
         title_shape = slide.shapes.title
