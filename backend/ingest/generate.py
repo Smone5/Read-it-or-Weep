@@ -131,22 +131,22 @@ class GenerationReport:
 
 # --------------------------------------------------------------------------- prompts
 
-WRITER_SYSTEM = """You write questions for a workplace trivia game. Colleagues play it before a meeting to show they read and understood a report. The game feels like a pub quiz with a sarcastic game-show host, but every question must be a fair, precise test of the report.
+WRITER_SYSTEM = """You write questions for a lively trivia game based on a reading document (such as a report, guide, briefing, lesson, or handbook). Players play it to prove they read and understood the document. The game feels like a pub quiz with a witty game-show host, but every question must be a fair, precise test of the document.
 
-You are given the report's title and outline, and ONE passage. Write only about facts stated in that passage.
+You are given the document's title, outline, key entities/terms, and ONE passage. Write only about facts stated in that passage.
 
 A good question
-- Tests something that matters: a key figure, a decision, a cause, a risk, an owner, a date, a comparison, what depends on what, what the reader is being asked to do.
-- Can be answered by someone who read the report carefully and cannot be answered by someone who did not: not by common sense, and not from the wording of the options.
-- Has exactly one option that is correct according to the report. The three wrong options are wrong according to the report yet believable: the same kind of thing, the same format and unit, similar length and magnitude. For numbers use nearby values. For names use other names of the same kind. No joke options, no "all of the above", no "none of the above".
-- Stands on its own. Name the specific thing you are asking about ("the Phoenix cross-dock", "Northstar Phase 2"). Never write "the passage", "this section", "the text", "the excerpt" or "mentioned above". You may say "the report".
+- Tests something that matters: a key figure, a decision, a cause, a risk, an owner, a date, a comparison, what depends on what, what the reader needs to know.
+- Can be answered by someone who read the document carefully and cannot be answered by someone who did not: not by common sense, and not from the wording of the options.
+- Has exactly one option that is correct according to the document. The three wrong options are wrong according to the document yet believable: the same kind of thing, the same format, precision, and unit, similar length and magnitude. For numbers use nearby values with matching decimal precision. For names use other names of the same kind. No joke options, no "all of the above", no "none of the above".
+- Stands on its own. Name the specific thing you are asking about ("the Phoenix cross-dock", "Apollo 11's Eagle lander"). Never write "the passage", "this section", "the text", "the excerpt" or "mentioned above". Use the document's actual topic rather than calling a sports guide or history piece "the report".
 - Does not contain or hint at its own answer.
 - Prefer understanding over look-up: why something happened, what a number means, what follows from a decision, how two facts relate. Label each question honestly as "understanding" or "recall". Aim for at least half "understanding" when the passage allows it.
 - For tables and chart data: compare rows, find the largest or smallest, or read a specific cell.
 - Never ask about formatting, figure or table numbers, page layout, or who wrote the document.
 
 title
-Give each question a short punny or wry title of 2 to 5 words, the way a pub quiz names its questions. The title must not give away the answer. The question itself stays plain and precise; the title carries the humour.
+Give each question a short punny or wry title of 2 to 5 words, the way a pub quiz names its questions. The title must NEVER contain or give away the answer. The question itself stays plain and precise; the title carries the humour.
 
 source_quote
 Copy, word for word, the sentence or table row from the passage that proves the correct answer (at most 300 characters).
@@ -156,14 +156,14 @@ One plain sentence the player sees after answering: state the correct fact, and 
 
 difficulty (IMPORTANT — write a true easy → medium → hard ladder!)
 Games start easy and ramp up so beginners and younger players build confidence while experts still get tested at the end. Across the questions you write for a passage, aim for roughly 35% easy, 45% medium, and 20% hard:
-- easy: a clear, memorable, fun headline fact, landmark, mascot, main rule, or big takeaway anyone who read the report (or is learning from it) can enjoy. Plain wording, distinct believable choices — NO trick-number traps (like 75,125 vs 76,125) on easy questions.
+- easy: a clear, memorable, fun headline fact, landmark, mascot, main rule, or big takeaway anyone who read the document (or is learning from it) can enjoy. Plain wording, distinct believable choices — NO trick-number traps (like 75,125 vs 76,125) on easy questions.
 - medium: a specific detail, section, comparison, or cause that rewards attentive reading.
 - hard: needs two facts combined, careful arithmetic, or a fine-grained operational number/section.
 
 Fact or Fake statements
 Also write short statements for a rapid-fire round where players call each FACT or FAKE.
 - A FACT restates something from the passage in fresh words.
-- A FAKE changes exactly one important detail (a number, a name, a direction, a date, a cause) so it is plainly false according to the report. It must not be a trick of wording and must not be something that could also be true.
+- A FAKE changes exactly one important detail (a number, a name, a direction, a date, a cause) so it is plainly false according to the document. It must not be a trick of wording and must not be something that could also be true.
 - One sentence, at most 140 characters, readable in three seconds.
 - explanation gives the true fact in one sentence.
 - Mix facts and fakes.
@@ -171,49 +171,49 @@ Also write short statements for a rapid-fire round where players call each FACT 
 How many
 Write up to the requested number of questions and statements, each about a different fact. Fewer is fine. If the passage has nothing worth asking (boilerplate, a cover note, a disclaimer), return empty lists."""
 
-CHECKER_SYSTEM = """You are the quality checker for a quiz about a report. Players are colleagues who read the report; a question they could fairly argue about is not acceptable, so be strict.
+CHECKER_SYSTEM = """You are the quality checker for a trivia quiz based on a reading document. Players read the document; a question they could fairly argue about is not acceptable, so be strict.
 
-You get the main passage, some related passages from elsewhere in the same report, and candidate questions WITHOUT the answer key.
+You get the main passage, some related passages from elsewhere in the same document, and candidate questions (including their punny titles) WITHOUT the answer key.
 
 For each multiple-choice question
-- answer_index: the 0-based index of the option the report supports. Use -1 if no option is clearly supported.
+- answer_index: the 0-based index of the option the document supports. Use -1 if no option is clearly supported.
 - problems: list any that apply
   - ambiguous: the question can reasonably be read in two ways
   - multiple_correct: more than one option is defensible given ALL the passages
   - not_answerable: the passages do not settle it
-  - leaks_answer: the wording of the question or options gives the answer away
+  - leaks_answer: the wording of the question, its title, or the options gives the answer away
   - refers_to_passage: it says "the passage", "this section", "above" or similar instead of standing on its own
-  - guessable: someone who never read the report could easily deduce the answer from obvious wording clues, joke distractors, or universal common sense (do NOT flag a legitimate easy warm-up question about a real headline fact in the report as guessable just because it is approachable)
+  - guessable: someone who never read the document could easily deduce the answer from obvious wording clues, joke distractors, conspicuous precision differences, or universal common sense (do NOT flag a legitimate easy warm-up question about a real headline fact in the document as guessable just because it is approachable)
   Leave the list empty when the question is sound.
 
 For each statement
-- verdict: "true" if the report clearly makes it true, "false" if the report clearly makes it false, "unclear" if it cannot be decided or is only loosely worded.
+- verdict: "true" if the document clearly makes it true, "false" if the document clearly makes it false, "unclear" if it cannot be decided or is only loosely worded.
 
 Answer every numbered item."""
 
-IMAGE_WRITER_SYSTEM = """You write picture-round questions for a workplace trivia game about a report. You are shown ONE picture from the report, with its caption and nearby text.
+IMAGE_WRITER_SYSTEM = """You write picture-round questions for a trivia game based on a reading document. You are shown ONE picture from the document, with its caption and nearby context.
 
 First decide what the picture is and whether it is informative. A chart, table, diagram, timeline, map, annotated screenshot or meaningful photo is informative. A logo, decorative photo, banner, icon, signature or cover image is not.
 
 If it is informative, describe it in one or two sentences (this becomes its alt text) and write up to the requested number of multiple-choice questions that the player answers BY LOOKING AT THE PICTURE, which is shown on screen with the question.
 - Ask about what the picture shows: the largest or smallest, a trend, a clearly labelled value, which item is in which state, what comes after what.
 - The answer must be plainly readable in the picture. Never ask for a value that has to be estimated between gridlines or read from tiny text.
-- Exactly one correct option and three believable wrong ones of the same kind, ideally other items or values that appear in the picture.
+- Exactly one correct option and three believable wrong ones of the same kind and precision, ideally other items or values that appear in the picture.
 - The question must stand on its own and name what it asks about. Do not ask what the caption says or what the figure number is.
 - title: a short punny title of 2 to 5 words that does not give away the answer.
 - source_quote: say where in the picture the answer is read from, e.g. "The Southwest bar is labelled 52.6".
-- explanation: one sentence stating the answer and what it means in the report.
+- explanation: one sentence stating the answer and what it means in the document.
 - skill: "understanding" when it needs comparing or interpreting, otherwise "recall".
 - difficulty: "easy" for the obvious headline/largest/smallest bar or single prominent label, "medium" for a clear comparison or trend, "hard" for multi-series synthesis or subtle contrast.
 
 If it is not informative, set informative to false and return no questions."""
 
-IMAGE_CHECKER_SYSTEM = """You are the quality checker for a picture round in a quiz about a report. You are shown the picture (plus its caption when available) and candidate questions WITHOUT the answer key. Answer each from the picture and caption alone.
+IMAGE_CHECKER_SYSTEM = """You are the quality checker for a picture round in a trivia quiz. You are shown the picture (plus its caption and nearby context when available) and candidate questions (with their titles) WITHOUT the answer key. Answer each from the picture and context alone.
 
 - answer_index: the 0-based index of the option the picture supports, or -1 if none is clearly supported.
 - problems: list any that apply
   - not_readable: the answer cannot be read clearly from the picture
-  - ambiguous / multiple_correct / not_answerable / leaks_answer / guessable: as usual
+  - ambiguous / multiple_correct / not_answerable / leaks_answer / guessable: as usual (including if the title leaks the answer)
   Leave the list empty when the question is sound.
 Return an empty statements list. Be strict."""
 
@@ -232,7 +232,18 @@ def _norm(text: str) -> str:
 
 
 def _numbers(text: str) -> set[str]:
-    return {n.replace(",", "").rstrip(".") for n in _NUMBER.findall(text)}
+    out: set[str] = set()
+    for n in _NUMBER.findall(text):
+        cleaned = n.replace(",", "").rstrip(".")
+        if "." in cleaned:
+            cleaned = cleaned.rstrip("0").rstrip(".")
+        if cleaned:
+            out.add(cleaned)
+    return out
+
+
+def _has_decimal(text: str) -> bool:
+    return bool(re.search(r"\d+\.\d+", text))
 
 
 def quote_is_grounded(quote: str, passage: str) -> bool:
@@ -252,6 +263,7 @@ def mcq_problem(draft: MCQDraft, passage: str | None) -> str | None:
     """Return a rejection reason, or None when the draft passes the mechanical checks."""
     question = draft.question.strip()
     answer = draft.correct_answer.strip()
+    title = (draft.title or "").strip()
     distractors = [d.strip() for d in draft.distractors if d and d.strip()]
     if len(distractors) != 3:
         return "wrong number of options"
@@ -265,10 +277,15 @@ def mcq_problem(draft: MCQDraft, passage: str | None) -> str | None:
     answer_norm = _norm(answer)
     if len(answer_norm) >= 4 and f" {answer_norm} " in f" {_norm(question)} ":
         return "answer appears in the question"
+    if title and len(answer_norm) >= 4 and f" {answer_norm} " in f" {_norm(title)} ":
+        return "title gives away the answer"
     wrong_lengths = sorted(len(d) for d in distractors)
     median_wrong = wrong_lengths[len(wrong_lengths) // 2]
     if len(answer) > 34 and len(answer) > 1.35 * median_wrong:
         return "correct option is conspicuously longer"
+    # Precision tell: correct option has a decimal (e.g. 14.7%) while all three distractors are round integers.
+    if _has_decimal(answer) and all(_numbers(d) and not _has_decimal(d) for d in distractors):
+        return "correct option is conspicuously more precise"
     if any(re.search(r"\b(all|none) of the above\b", o, re.I) for o in options):
         return "all/none of the above"
     if passage is not None:
@@ -312,14 +329,34 @@ def _outline(document: StructuredDocument) -> str:
     return "\n".join(f"- {s.heading}" for s in document.sections)
 
 
+_ENTITY_RE = re.compile(r"\b(?:[A-Z]{2,6}\d*|[A-Z][a-z]+(?:\s+[A-Z][a-z0-9]+){1,2})\b")
+_COMMON_CAPS = {"The", "This", "That", "These", "Those", "Table", "Figure", "Chart", "Section", "Part", "Overview"}
+
+
+def _entity_glossary(document: StructuredDocument, limit: int = 18) -> str:
+    """Compact list of recurring proper nouns / acronyms across the document to keep terminology consistent."""
+    from collections import Counter
+
+    counts: Counter[str] = Counter()
+    for chunk in document.chunks[:40]:
+        for match in _ENTITY_RE.findall(chunk.text):
+            if match in _COMMON_CAPS or len(match) < 2:
+                continue
+            counts[match] += 1
+    top = [term for term, cnt in counts.most_common(limit) if cnt >= 2]
+    return ", ".join(top)
+
+
 async def _write_for_chunk(document: StructuredDocument, chunk: Chunk, previous: Chunk | None,
-                           avoid: list[str], max_q: int, max_s: int) -> PassageDrafts:
+                           avoid: list[str], max_q: int, max_s: int, glossary: str = "") -> PassageDrafts:
     parts = [
-        f"Report: {document.title}",
+        f"Document: {document.title}",
         f"Outline:\n{_outline(document)}",
         f"Where this passage sits: {chunk.heading_path}",
         f"Passage type: {chunk.kind}",
     ]
+    if glossary:
+        parts.append(f"Key document entities/terms (for consistent naming): {glossary}")
     if previous is not None and previous.section == chunk.section:
         parts.append("Just before it (context only – do not write questions about this):\n" + previous.text[-450:])
     if avoid:
@@ -335,7 +372,8 @@ def _present(mcqs: list[tuple[MCQDraft, list[str], int]], statements: list[State
     if mcqs:
         lines.append("MULTIPLE-CHOICE QUESTIONS")
         for number, (draft, options, _) in enumerate(mcqs, start=1):
-            lines.append(f"\nQuestion {number}: {draft.question}")
+            title_part = f' [Title: "{draft.title.strip()}"]' if draft.title and draft.title.strip() else ""
+            lines.append(f"\nQuestion {number}{title_part}: {draft.question}")
             lines += [f"  [{i}] {option}" for i, option in enumerate(options)]
     if statements:
         lines.append("\nSTATEMENTS")
@@ -371,13 +409,13 @@ def _accept_mcqs(mcqs: list[tuple[MCQDraft, list[str], int]], checks: list[MCQCh
 
 
 async def _questions_for_chunk(document: StructuredDocument, index: int, embeddings: np.ndarray,
-                               avoid: list[str], report: GenerationReport) -> list[ReadyQuestion]:
+                               avoid: list[str], report: GenerationReport, glossary: str = "") -> list[ReadyQuestion]:
     chunk = document.chunks[index]
     max_q, max_s = _quota(chunk)
     if not max_q and not max_s:
         return []
     previous = document.chunks[index - 1] if index > 0 else None
-    drafts = await _write_for_chunk(document, chunk, previous, avoid, max_q, max_s)
+    drafts = await _write_for_chunk(document, chunk, previous, avoid, max_q, max_s, glossary=glossary)
     report.drafted += len(drafts.questions) + len(drafts.statements)
 
     mcqs: list[tuple[MCQDraft, list[str], int]] = []
@@ -454,9 +492,14 @@ async def _questions_for_image(document: StructuredDocument, image: ImageItem, r
     if not mcqs:
         # Still mark informative visuals usable=True so Answer Reveal matching can use them.
         return [], (drafts.kind, drafts.description.strip(), True)
-    caption_prefix = f"Caption: {image.caption}\n\n" if image.caption else ""
+    ctx_parts = []
+    if image.caption:
+        ctx_parts.append(f"Caption: {image.caption}")
+    if image.context:
+        ctx_parts.append(f"Context:\n{image.context[:450]}")
+    context_prefix = ("\n".join(ctx_parts) + "\n\n") if ctx_parts else ""
     check = await llm.parse(model=config.model_vision, system=IMAGE_CHECKER_SYSTEM,
-                            user=[llm.text_part(caption_prefix + _present(mcqs, [])), picture], schema=CheckResult,
+                            user=[llm.text_part(context_prefix + _present(mcqs, [])), picture], schema=CheckResult,
                             effort="low", max_output_tokens=2000)
     ready = [ReadyQuestion(
         kind="mcq", source_type="image", image_index=image.ordinal, section_index=image.section,
@@ -493,8 +536,11 @@ async def generate_bank(document: StructuredDocument, chunk_embeddings: np.ndarr
     """Write and check questions for every passage and picture of one document."""
     report = GenerationReport()
     avoid_by_chunk = avoid_by_chunk or {}
+    glossary = _entity_glossary(document)
     jobs = len(document.chunks) + (len(document.images) if include_images else 0)
     done = 0
+    attempted = 0
+    failed = 0
     lock = asyncio.Lock()
 
     async def tick() -> None:
@@ -505,9 +551,19 @@ async def generate_bank(document: StructuredDocument, chunk_embeddings: np.ndarr
                 await progress("Writing and checking questions", done, jobs)
 
     async def chunk_job(index: int) -> list[ReadyQuestion]:
+        nonlocal attempted, failed
+        chunk = document.chunks[index]
+        max_q, max_s = _quota(chunk)
+        if not max_q and not max_s:
+            await tick()
+            return []
+        attempted += 1
         try:
-            return await _questions_for_chunk(document, index, chunk_embeddings, avoid_by_chunk.get(index, []), report)
-        except Exception as exc:  # one bad passage must not sink the whole report
+            return await _questions_for_chunk(
+                document, index, chunk_embeddings, avoid_by_chunk.get(index, []), report, glossary=glossary,
+            )
+        except Exception as exc:  # one bad passage must not sink the whole document
+            failed += 1
             log.warning("passage %s failed: %s", index, exc)
             report.reject("passage failed (AI error)")
             return []
@@ -515,11 +571,14 @@ async def generate_bank(document: StructuredDocument, chunk_embeddings: np.ndarr
             await tick()
 
     async def image_job(image: ImageItem) -> list[ReadyQuestion]:
+        nonlocal attempted, failed
+        attempted += 1
         try:
             ready, note = await _questions_for_image(document, image, report)
             report.image_notes[image.ordinal] = note
             return ready
         except Exception as exc:
+            failed += 1
             log.warning("picture %s failed: %s", image.ordinal, exc)
             report.reject("picture failed (AI error)")
             report.image_notes[image.ordinal] = ("other", "", False)
@@ -531,6 +590,8 @@ async def generate_bank(document: StructuredDocument, chunk_embeddings: np.ndarr
     if include_images:
         tasks += [image_job(image) for image in document.images]
     batches = await asyncio.gather(*tasks)
+    if attempted > 0 and failed == attempted and report.drafted == 0:
+        raise llm.AIUnavailable("Every AI question-writing request failed.")
     questions = [q for batch in batches for q in batch]
 
     if questions:
@@ -552,7 +613,7 @@ async def name_sections(samples: list[str]) -> list[str]:
     listing = "\n\n".join(f"PART {i}\n{text[:700]}" for i, text in enumerate(samples, start=1))
     result = await llm.parse(
         model=config.model_fast,
-        system="Give each part of this report a plain, specific title of 2 to 5 words. Return the titles in order.",
+        system="Give each part of this document a plain, specific title of 2 to 5 words. Return the titles in order.",
         user=listing, schema=SectionNames, effort="low", max_output_tokens=600)
     return [n.strip()[:60] for n in result.names]
 
@@ -561,8 +622,8 @@ async def summarise(document: StructuredDocument) -> Summary:
     body = "\n\n".join(c.text for c in document.chunks)[:9000]
     return await llm.parse(
         model=config.model_fast,
-        system="Summarise this report for someone about to host a quiz on it. Be concrete and neutral.",
-        user=f"Report: {document.title}\nOutline:\n{_outline(document)}\n\n{body}",
+        system="Summarise this document for someone about to host a trivia quiz on it. Be concrete and neutral.",
+        user=f"Document: {document.title}\nOutline:\n{_outline(document)}\n\n{body}",
         schema=Summary, effort="low", max_output_tokens=800)
 
 
@@ -590,17 +651,26 @@ Examples:
 Evaluate every numbered question."""
 
 
-async def match_reveal_images(questions: list[dict], images: list[dict], *, batch_size: int = 18) -> dict[str, str]:
+async def match_reveal_images(
+    questions: list[dict],
+    images: list[dict],
+    *,
+    batch_size: int = 18,
+    max_per_image: int = 2,
+) -> dict[str, str]:
     """Return {question_id: image_id} for text/table MCQs whose answer is directly illustrated by an image."""
     if not questions or not images:
         return {}
     img_lines = []
     for idx, img in enumerate(images, start=1):
         label = " — ".join(filter(None, [img.get("caption"), img.get("description")]))
-        img_lines.append(f"IMAGE {idx}: {label[:350]}")
+        ctx = (img.get("context_text") or "").strip().replace("\n", " ")[:180]
+        extra = f" | Context: {ctx}" if ctx else ""
+        img_lines.append(f"IMAGE {idx}: {label[:320]}{extra}")
     visuals_block = "AVAILABLE VISUALS:\n" + "\n".join(img_lines)
 
     matched: dict[str, str] = {}
+    uses_by_img: dict[str, int] = {}
     for start in range(0, len(questions), batch_size):
         batch = questions[start:start + batch_size]
         q_lines = []
@@ -631,7 +701,11 @@ async def match_reveal_images(questions: list[dict], images: list[dict], *, batc
 
         for pick in result.picks:
             if 1 <= pick.question_number <= len(batch) and 1 <= pick.image_number <= len(images):
-                matched[batch[pick.question_number - 1]["id"]] = images[pick.image_number - 1]["id"]
+                img_id = images[pick.image_number - 1]["id"]
+                if uses_by_img.get(img_id, 0) >= max_per_image:
+                    continue
+                matched[batch[pick.question_number - 1]["id"]] = img_id
+                uses_by_img[img_id] = uses_by_img.get(img_id, 0) + 1
     return matched
 
 
@@ -660,7 +734,8 @@ async def match_section_videos(questions: list[dict], clips: list[dict]) -> dict
     q_lines = []
     for i, q in enumerate(questions, start=1):
         ans = q["options"][q["correct_index"]] if q.get("options") and q.get("correct_index") is not None else ""
-        q_lines.append(f"Q{i}: {q['question_text']} | Answer: {ans}")
+        note = f" | Note: {str(q['explanation'])[:140]}" if q.get("explanation") else ""
+        q_lines.append(f"Q{i}: {q['question_text']} | Answer: {ans}{note}")
     try:
         result = await llm.parse(
             model=config.model_fast,

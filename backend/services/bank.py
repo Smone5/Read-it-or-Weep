@@ -126,7 +126,7 @@ def choose(candidates: Iterable[dict], seen: dict[str, dict], used: set[str], *,
             # and Final Wager stays genuinely hard even after the first playthrough.
             cost += abs(_DIFFICULTY_ORDER[question["difficulty"]] - _DIFFICULTY_ORDER[difficulty]) * 16.0
         if asked and any(same_fact(key_terms(question), terms) for terms in asked):
-            cost += 6.0                             # the same fact again: only if nothing else in this tier is left
+            cost += 25.0                            # strongly avoid asking the same fact twice in a single game
         if best is None or cost < best[0]:
             best = (cost, question)
     return best[1] if best else None

@@ -6,6 +6,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { IconBolt, IconCheck, IconCrown, IconMusic, IconPlay, IconStar } from '../components/Icons'
 import { ErrorNote, FullScreenMessage, Logo, Spinner, Stage } from '../components/ui'
 import { formatScore, LETTERS, PictureView, TONE_INKS, TONES } from '../game/parts'
+import { VideoClipCard } from '../game/VideoClipCard'
 import { api, ApiError, session } from '../lib/api'
 import { buzz } from '../lib/sound'
 import { applyBranding, applyDecade } from '../lib/theme'
@@ -20,11 +21,15 @@ export default function LivePlayer() {
   const code = (rawCode ?? '').toUpperCase()
   const [info, setInfo] = useState<Info | null>(null)
   const [fatal, setFatal] = useState('')
+  const [joinNotice, setJoinNotice] = useState('')
+  const [codeOnly, setCodeOnly] = useState(false)
   const [joined, setJoined] = useState(false)
   const [typed, setTyped] = useState('')
 
   useEffect(() => {
     if (!code) return
+    setJoinNotice('')
+    setCodeOnly(false)
     api<Info>(`/api/live/${code}/info`, { as: 'none' })
       .then(async (data) => {
         applyBranding(data.branding)
@@ -32,11 +37,17 @@ export default function LivePlayer() {
         if (session.playerToken) {
           // Already known on this phone: take a seat straight away.
           try {
-            await api(`/api/live/${code}/join`, { body: {} })
+            const res = await api<{ token?: string | null }>(`/api/live/${code}/join`, { body: {} })
+            if (res.token) session.setPlayerToken(res.token)
             setJoined(true)
           } catch (caught) {
             if (caught instanceof ApiError && caught.status === 401) {
               session.setPlayerToken(null)
+            } else if (caught instanceof ApiError && caught.status === 403 && data.requiresCode && caught.message.toLowerCase().includes('access code')) {
+              setCodeOnly(true)
+              setJoinNotice(caught.message)
+            } else if (caught instanceof Error) {
+              setJoinNotice(caught.message)
             }
           }
         }
@@ -61,17 +72,49 @@ export default function LivePlayer() {
   }
   if (fatal) return <FullScreenMessage title="Hmm" action={<a className="btn btn-primary" href="/live">Try another code</a>}>{fatal}</FullScreenMessage>
   if (!info) return <Stage className="grid place-items-center"><Spinner /></Stage>
-  if (!joined) return <Stage><JoinLive info={info} onJoined={() => setJoined(true)} /></Stage>
+  if (!joined) {
+    return (
+      <Stage>
+        <JoinLive
+          info={info}
+          codeOnly={codeOnly}
+          initialError={joinNotice}
+          onSwitchAccount={() => {
+            session.setPlayerToken(null)
+            setCodeOnly(false)
+            setJoinNotice('')
+          }}
+          onJoined={() => setJoined(true)}
+        />
+      </Stage>
+    )
+  }
   return <Stage><Buzzer code={code} info={info} /></Stage>
 }
 
-function JoinLive({ info, onJoined }: { info: Info; onJoined: () => void }) {
+function JoinLive({
+  info,
+  codeOnly,
+  initialError,
+  onSwitchAccount,
+  onJoined,
+}: {
+  info: Info
+  codeOnly: boolean
+  initialError?: string
+  onSwitchAccount: () => void
+  onJoined: () => void
+}) {
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [team, setTeam] = useState('')
   const [accessCode, setAccessCode] = useState('')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+  const [error, setError] = useState(initialError ?? '')
+
+  useEffect(() => {
+    setError(initialError ?? '')
+  }, [initialError])
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -79,8 +122,10 @@ function JoinLive({ info, onJoined }: { info: Info; onJoined: () => void }) {
     setError('')
     try {
       const result = await api<{ token: string | null }>(`/api/live/${info.code}/join`, {
-        as: 'none',
-        body: { name, email, team: team || null, accessCode: accessCode || null },
+        as: codeOnly ? 'player' : 'none',
+        body: codeOnly
+          ? { accessCode: accessCode || null }
+          : { name, email, team: team || null, accessCode: accessCode || null },
       })
       if (result.token) session.setPlayerToken(result.token)
       buzz(25)
@@ -100,55 +145,75 @@ function JoinLive({ info, onJoined }: { info: Info; onJoined: () => void }) {
         <h1 className="neon mt-3 text-base sm:text-xl">{info.quizTitle}</h1>
       </header>
       <div className="card grid gap-4 p-5">
-        <div>
-          <label className="label" htmlFor="live-name">Your name</label>
-          <input id="live-name" className="field" value={name} onChange={(e) => setName(e.target.value)} required minLength={2} maxLength={60} autoComplete="name" />
-        </div>
-        <div>
-          <label className="label" htmlFor="live-email">Work email</label>
-          <input id="live-email" className="field" type="email" inputMode="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
-        </div>
-        {info.teams.length > 0 && (
-          <div>
-            <label className="label" htmlFor="live-team">Team</label>
-            <select id="live-team" className="field" value={team} onChange={(e) => setTeam(e.target.value)} required>
-              <option value="" disabled>Pick your team</option>
-              {info.teams.map((t) => <option key={t}>{t}</option>)}
-            </select>
-          </div>
+        {!codeOnly && (
+          <>
+            <div>
+              <label className="label" htmlFor="live-name">Your name</label>
+              <input id="live-name" className="field" value={name} onChange={(e) => setName(e.target.value)} required minLength={2} maxLength={60} autoComplete="name" />
+            </div>
+            <div>
+              <label className="label" htmlFor="live-email">Work email</label>
+              <input id="live-email" className="field" type="email" inputMode="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
+            </div>
+            {info.teams.length > 0 && (
+              <div>
+                <label className="label" htmlFor="live-team">Team</label>
+                <select id="live-team" className="field" value={team} onChange={(e) => setTeam(e.target.value)} required>
+                  <option value="" disabled>Pick your team</option>
+                  {info.teams.map((t) => <option key={t}>{t}</option>)}
+                </select>
+              </div>
+            )}
+          </>
         )}
-        {info.requiresCode && (
+        {(info.requiresCode || codeOnly) && (
           <div>
             <label className="label" htmlFor="live-access-code">Access code</label>
-            <input id="live-access-code" className="field" value={accessCode} onChange={(e) => setAccessCode(e.target.value)} required maxLength={40} autoComplete="off" />
+            <input id="live-access-code" className="field" value={accessCode} onChange={(e) => setAccessCode(e.target.value)} required maxLength={40} autoComplete="off" autoFocus={codeOnly} />
           </div>
         )}
         <ErrorNote>{error}</ErrorNote>
         <button className="btn btn-primary btn-lg" disabled={busy}>
           {busy ? 'Joining…' : <>Join the game <IconPlay size={14} /></>}
         </button>
+        {codeOnly && (
+          <button type="button" className="btn btn-ghost btn-sm min-h-[44px]" onClick={onSwitchAccount}>
+            Use a different name or email
+          </button>
+        )}
       </div>
     </form>
   )
 }
 
+type LockMeta = { timeMs?: number | null; answersIn?: number; players?: number }
+
 function Buzzer({ code, info }: { code: string; info: Info }) {
-  const { state, error, until } = useLive({ code, enabled: true })
+  const { state, error, connected, until } = useLive({ code, enabled: true })
   const [picked, setPicked] = useState<number | null>(null)
+  const [lockedMeta, setLockedMeta] = useState<LockMeta | null>(null)
   const [sending, setSending] = useState(false)
   const [notSent, setNotSent] = useState(false)
   const [showAllScores, setShowAllScores] = useState(false)
   const [showMissed, setShowMissed] = useState(false)
+  const submittingRef = useRef(false)
   const lastIndex = useRef(-2)
   const lastStatus = useRef('')
+  const wasLocked = useRef(true)
   useTicker(state?.status === 'question')
+
+  const opensInNow = state?.status === 'question' && state.question ? until(state.question.opensAt) : 1
+  const unlockedNow = state?.status === 'question' && Boolean(state.question) && opensInNow <= 0
 
   useEffect(() => {
     if (!state) return
     applyDecade(state.decade)
     if (state.index !== lastIndex.current) {
       lastIndex.current = state.index
+      submittingRef.current = false
+      wasLocked.current = true
       setPicked(null)
+      setLockedMeta(null)
       setNotSent(false)
       setShowAllScores(false)
     }
@@ -157,50 +222,92 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
       // Phones stay silent haptic buzzers in live rooms so 50 phones never step over the big screen's host & music.
       if (state.status === 'reveal' && state.yourAnswer) {
         buzz(state.yourAnswer.correct ? 40 : [70, 40, 70])
-      } else if (state.status === 'question') buzz(25)
-      else if (state.status === 'finished') buzz([35, 45, 70])
+      } else if (state.status === 'finished') {
+        buzz([35, 45, 70])
+      }
     }
   }, [state])
+
+  // Buzz at the exact moment answers unlock on the phone (not while the host is still reading the locked question).
+  useEffect(() => {
+    if (wasLocked.current && unlockedNow) {
+      buzz(25)
+    }
+    wasLocked.current = !unlockedNow
+  }, [unlockedNow])
 
   if (error) return <FullScreenMessage title="Lost the game">{error}</FullScreenMessage>
   if (!state) return <div className="grid min-h-[70dvh] place-items-center"><Spinner label="Connecting" /></div>
 
   const you = state.you
   const header = (
-    <header className="mb-4 flex items-center justify-between gap-3">
-      <div className="hud">Code<b>{state.code}</b></div>
+    <header className="mb-3 flex items-center justify-between gap-2.5">
+      <div className="hud">
+        Code
+        <b className="inline-flex items-center gap-1.5">
+          {state.code}
+          {!connected && (
+            <span className="inline-block h-2 w-2 rounded-full" style={{ background: 'var(--bad)' }} title="Reconnecting…" aria-label="Reconnecting" />
+          )}
+        </b>
+      </div>
+      {!connected && (
+        <span className="pixel text-[9px]" style={{ color: 'var(--bad)' }} role="status">
+          Reconnecting…
+        </span>
+      )}
       {you && <div className="hud text-center">Rank<b style={{ color: 'var(--accent-text)' }}>#{you.rank}</b></div>}
       {you && <div className="hud text-right">Score<b className="neon-accent">{String(you.score).padStart(5, '0')}</b></div>}
     </header>
   )
 
   const answer = async (index: number) => {
-    if (picked !== null || sending) return
+    if (picked !== null || sending || submittingRef.current) return
+    const submittedForIndex = state.index
+    submittingRef.current = true
     setPicked(index)
     setSending(true)
+    setNotSent(false)
     buzz(20)
     try {
-      // Sending the same answer twice changes nothing, so a dropped connection is simply tried again.
-      try {
-        await api(`/api/live/${code}/answer`, { body: { choiceIndex: index }, retry: 3 })
-      } catch (firstErr) {
-        // 425 = phone clock was slightly ahead of server's unlock timestamp; retry once after a short beat.
-        if (firstErr instanceof ApiError && firstErr.status === 425) {
-          await new Promise((r) => window.setTimeout(r, 280))
-          await api(`/api/live/${code}/answer`, { body: { choiceIndex: index }, retry: 1 })
-        } else {
-          throw firstErr
+      const sendOnce = () =>
+        api<{ locked: boolean; selectedIndex: number; timeMs?: number | null; answersIn?: number; players?: number }>(
+          `/api/live/${code}/answer`,
+          { body: { choiceIndex: index, questionIndex: submittedForIndex }, retry: 2 },
+        )
+      let response: { locked: boolean; selectedIndex: number; timeMs?: number | null; answersIn?: number; players?: number } | null = null
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          response = await sendOnce()
+          break
+        } catch (err) {
+          // 425 = phone clock was slightly ahead of server's unlock timestamp; wait briefly and retry up to 2x.
+          if (err instanceof ApiError && err.status === 425 && attempt < 2) {
+            await new Promise((r) => window.setTimeout(r, 350))
+            if (lastIndex.current !== submittedForIndex) return
+            continue
+          }
+          throw err
         }
+      }
+      if (lastIndex.current !== submittedForIndex) return
+      if (response) {
+        setLockedMeta({ timeMs: response.timeMs, answersIn: response.answersIn, players: response.players })
       }
       setNotSent(false)
     } catch (caught) {
+      if (lastIndex.current !== submittedForIndex) return
       // 409 ("Too late") stands. Anything else (including 425 still early) means the answer was not recorded: unlock!
       if (!(caught instanceof ApiError) || caught.status !== 409) {
         setPicked(null)
+        setLockedMeta(null)
         setNotSent(true)
       }
     } finally {
-      setSending(false)
+      if (lastIndex.current === submittedForIndex) {
+        submittingRef.current = false
+        setSending(false)
+      }
     }
   }
 
@@ -224,9 +331,12 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
     const question = state.question
     const opensIn = until(question.opensAt)
     const left = Math.max(0, until(question.endsAt))
-    const total = question.limitSec * 1000
-    const locked = picked !== null || state.yourAnswer?.selectedIndex !== undefined && state.yourAnswer?.selectedIndex !== null
+    const totalMs = Math.max(question.limitSec * 1000, left, 1)
+    const locked = picked !== null || (state.yourAnswer?.selectedIndex !== undefined && state.yourAnswer?.selectedIndex !== null)
     const chosen = picked ?? state.yourAnswer?.selectedIndex ?? null
+    const lockTimeMs = lockedMeta?.timeMs ?? state.yourAnswer?.timeMs ?? null
+    const lockAnswersIn = state.answersIn ?? lockedMeta?.answersIn
+    const lockPlayers = state.players || lockedMeta?.players
     body = (
       <div className="flex flex-1 flex-col gap-3">
         <div className="flex items-center justify-between gap-3">
@@ -234,10 +344,12 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
             <span className="chip">Question {question.number}/{state.total}</span>
             {question.doublePoints && <span className="chip chip-accent"><IconBolt size={11} /> 2× PTS</span>}
           </div>
-          <span className="pixel text-sm tabular-nums" style={{ color: left < 5000 ? 'var(--bad)' : 'var(--accent-text)' }}>{opensIn > 0 ? '' : Math.ceil(left / 1000)}</span>
+          <span className="pixel text-sm tabular-nums" style={{ color: left < 5000 && opensIn <= 0 ? 'var(--bad)' : 'var(--accent-text)' }}>
+            {opensIn > 0 ? '' : Math.ceil(left / 1000)}
+          </span>
         </div>
         <p className="text-[17px] leading-snug">
-          {question.kind === 'music' && <IconMusic size={16} className="mr-1.5" style={{ color: 'var(--accent)' }} />}
+          {question.kind === 'music' && <IconMusic size={16} className="mr-1.5" style={{ color: 'var(--accent-text)' }} />}
           {question.text}
         </p>
         {question.imageUrl && (
@@ -249,7 +361,9 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
         )}
         {notSent && <p className="pixel blink text-[10px]" style={{ color: 'var(--bad)' }} role="alert">That did not send – tap your answer again</p>}
         {opensIn <= 0 && (
-          <div className="timer-track"><div className="timer-fill" data-urgent={left < 5000} style={{ transform: `scaleX(${total ? left / total : 0})` }} /></div>
+          <div className="timer-track" role="timer" aria-label={`${Math.ceil(left / 1000)} seconds remaining`}>
+            <div className="timer-fill" data-urgent={left < 5000} style={{ transform: `scaleX(${Math.max(0, Math.min(1, left / totalMs))})` }} />
+          </div>
         )}
         {opensIn > 0 ? (
           <div className="grid flex-1 place-items-center"><p className="pixel neon blink text-xl">Get ready</p></div>
@@ -262,20 +376,27 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
               >
                 {LETTERS[chosen ?? 0]}
               </span>
-              <p className="pixel mt-5 text-xs">Locked in</p>
-              <p className="mt-2 text-muted">Waiting for everyone else…</p>
+              <p className="pixel mt-5 text-xs">
+                Locked in{lockTimeMs != null ? ` · ${(lockTimeMs / 1000).toFixed(1)}s` : ''}
+              </p>
+              <p className="mt-2 text-sm text-muted">
+                {lockAnswersIn !== undefined && lockPlayers
+                  ? `${lockAnswersIn}/${lockPlayers} answered · waiting for the room…`
+                  : 'Waiting for everyone else…'}
+              </p>
             </div>
           </div>
         ) : (
-          <div className="grid flex-1 grid-cols-1 gap-3 min-[480px]:grid-cols-2">
+          <div className="grid flex-1 grid-cols-2 gap-2.5 sm:gap-3">
             {question.options.map((option, index) => (
               <button
                 key={index}
-                className="tile min-h-[68px] px-4 py-3 text-[17px]"
+                type="button"
+                className="tile min-h-[82px] flex-col items-start justify-between gap-2 px-3 py-3 text-left text-[15px] leading-snug sm:flex-row sm:items-center sm:px-4 sm:text-[17px]"
                 style={{ ['--tone' as string]: TONES[index % 4], ['--tone-ink' as string]: TONE_INKS[index % 4] }}
                 onClick={() => void answer(index)}
               >
-                <span className="pixel grid h-9 w-9 flex-none place-items-center rounded-sm bg-black/25 text-sm">{LETTERS[index]}</span>
+                <span className="pixel grid h-8 w-8 flex-none place-items-center rounded-sm bg-black/25 text-xs sm:h-9 sm:w-9 sm:text-sm">{LETTERS[index]}</span>
                 <span className="min-w-0 flex-1 break-words">{option}</span>
               </button>
             ))}
@@ -286,15 +407,50 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
   } else if (state.status === 'reveal' && state.question && state.reveal) {
     const mine = state.yourAnswer
     const correct = Boolean(mine?.correct)
+    const yourChoice = mine?.selectedIndex !== null && mine?.selectedIndex !== undefined
+      ? state.question.options[mine.selectedIndex]
+      : null
+    const rightAnswer = state.reveal.music
+      ? `${state.reveal.music.title} – ${state.reveal.music.artist}`
+      : state.question.options[state.reveal.correctIndex]
     body = (
       <div className="grid flex-1 place-items-center text-center">
-        <div className="zoom-in w-full">
-          <h1 className="text-2xl" style={{ color: correct ? 'var(--good)' : 'var(--bad)' }}>{correct ? 'Correct!' : mine?.selectedIndex == null ? 'No answer' : 'Wrong'}</h1>
-          {correct && <p className="pixel neon-accent mt-4 text-lg">+{mine?.points}</p>}
-          <div className="card mx-auto mt-6 max-w-sm p-4 text-left">
+        <div className="zoom-in w-full max-w-md space-y-3">
+          <h1 className="text-2xl" style={{ color: correct ? 'var(--good)' : 'var(--bad)' }}>
+            {correct ? 'Correct!' : mine?.selectedIndex == null ? 'No answer' : 'Wrong'}
+          </h1>
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            {correct && mine?.points !== undefined && (
+              <span className="pixel neon-accent text-lg">+{formatScore(mine.points)} pts</span>
+            )}
+            {mine?.isFastest && (
+              <span className="chip chip-accent">
+                <IconBolt size={12} /> Fastest Finger!
+              </span>
+            )}
+          </div>
+          {!correct && yourChoice && (
+            <p className="text-xs text-muted">
+              You picked: <span className="font-semibold text-ink">{yourChoice}</span>
+            </p>
+          )}
+          <div className="card mx-auto p-4 text-left">
             <p className="text-xs font-bold tracking-wider text-muted uppercase">The answer</p>
-            <p className="mt-1 text-lg">{state.reveal.music ? `${state.reveal.music.title} – ${state.reveal.music.artist}` : state.question.options[state.reveal.correctIndex]}</p>
+            <p className="mt-1 text-lg font-semibold">{rightAnswer}</p>
             {state.reveal.explanation && <p className="mt-2 text-[15px] text-muted">{state.reveal.explanation}</p>}
+            {state.reveal.imageUrl && (
+              <div className="mt-3">
+                <PictureView
+                  image={{ url: state.reveal.imageUrl, alt: 'Exhibit from the report', mode: 'show' }}
+                  caption={state.question.text}
+                />
+              </div>
+            )}
+            {state.reveal.video && (
+              <div className="mt-3">
+                <VideoClipCard video={state.reveal.video} compact />
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -320,9 +476,9 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
 
     const renderRow = (row: NonNullable<LiveState['standings']>[number], keyPrefix = '') => {
       const mine = isMeRow(row)
-      const rankColor = row.rank === 1 ? '#ffd60a' : row.rank === 2 ? '#e2e8f0' : row.rank === 3 ? '#f59e0b' : 'var(--muted)'
+      const rankColor = row.rank === 1 ? 'var(--rank-1)' : row.rank === 2 ? 'var(--rank-2)' : row.rank === 3 ? 'var(--rank-3)' : 'var(--muted)'
       return (
-        <li key={`${keyPrefix}${row.rank}`} className="sb-row" data-you={mine}>
+        <li key={`${keyPrefix}${row.rank}-${row.name}`} className="sb-row" data-you={mine}>
           <span className="sb-bar" style={{ transform: `scaleX(${Math.max(0.03, row.score / topScore)})` }} aria-hidden />
           <span className="sb-rank" style={{ color: rankColor, borderColor: row.rank <= 3 ? rankColor : undefined }}>
             {row.rank === 1 && <IconCrown size={11} />}
@@ -333,14 +489,14 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
               <span className="truncate font-bold text-ink">{row.name}</span>
               {mine && <span className="sb-you-pill">You</span>}
               {row.streak >= 3 && (
-                <span className="inline-flex flex-none items-center text-xs font-bold" style={{ color: 'var(--accent)' }}>
+                <span className="inline-flex flex-none items-center text-xs font-bold" style={{ color: 'var(--accent-text)' }}>
                   <IconBolt size={11} />x{row.streak}
                 </span>
               )}
             </div>
             {row.team && <p className="truncate text-xs text-muted">{row.team}</p>}
           </div>
-          <span className="sb-score" style={{ color: mine ? 'var(--accent)' : row.rank === 1 ? '#ffd60a' : 'var(--ink)' }}>
+          <span className="sb-score" style={{ color: mine ? 'var(--accent-text)' : row.rank === 1 ? 'var(--rank-1)' : 'var(--ink)' }}>
             {formatScore(row.score)}
           </span>
         </li>
@@ -359,7 +515,7 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
 
     body = (
       <div className="flex flex-1 flex-col justify-center gap-3.5">
-        <p className="pixel blink text-center text-[10px]" style={{ color: finished && you && you.rank <= 3 ? '#ffd60a' : 'var(--muted)' }}>
+        <p className="pixel blink text-center text-[10px]" style={{ color: finished && you && you.rank <= 3 ? 'var(--rank-1)' : 'var(--muted)' }}>
           {finaleHeading}
         </p>
 
@@ -371,7 +527,7 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
                 style={{
                   borderColor: 'var(--accent)',
                   background: 'rgb(0 0 0 / 0.5)',
-                  color: you.rank === 1 ? '#ffd60a' : 'var(--accent)',
+                  color: you.rank === 1 ? '#ffd60a' : '#ffb020',
                 }}
               >
                 #{you.rank}
@@ -380,19 +536,19 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
                 <p className="pixel text-[9px] text-muted">Your standing · of {state.players}</p>
                 <p className="mt-0.5 text-sm text-ink">
                   {you.rank === 1 ? (
-                    <span className="inline-flex items-center gap-1" style={{ color: '#ffd60a' }}>
+                    <span className="inline-flex items-center gap-1 font-semibold" style={{ color: 'var(--rank-1)' }}>
                       <IconCrown size={13} /> Leading the room!
                     </span>
                   ) : you.gapToNext !== undefined ? (
                     <>
-                      <b style={{ color: 'var(--accent)' }}>{formatScore(you.gapToNext)}</b> pts behind {you.aheadName ?? `#${you.rank - 1}`} (#{you.rank - 1})
+                      <b style={{ color: 'var(--accent-text)' }}>{formatScore(you.gapToNext)}</b> pts behind {you.aheadName ?? `#${you.rank - 1}`} (#{you.rank - 1})
                     </>
                   ) : (
                     `Rank #${you.rank} of ${state.players}`
                   )}
                 </p>
                 {you.streak >= 2 && (
-                  <p className="mt-0.5 inline-flex items-center gap-1 text-xs" style={{ color: 'var(--accent)' }}>
+                  <p className="mt-0.5 inline-flex items-center gap-1 text-xs" style={{ color: 'var(--accent-text)' }}>
                     <IconBolt size={11} /> {you.streak} in a row
                   </p>
                 )}
@@ -400,7 +556,7 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
             </div>
             <div className="text-right">
               <p className="pixel text-[9px] text-muted">Score</p>
-              <p className="sb-score !text-xl" style={{ color: 'var(--accent)' }}>{formatScore(you.score)}</p>
+              <p className="sb-score !text-xl" style={{ color: 'var(--accent-text)' }}>{formatScore(you.score)}</p>
             </div>
           </div>
         )}
@@ -430,7 +586,7 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
             )}
           </div>
           {allStandings.length > 8 && (
-            <button type="button" className="btn btn-ghost btn-sm w-full" onClick={() => setShowAllScores((open) => !open)}>
+            <button type="button" className="btn btn-ghost btn-sm min-h-[44px] w-full" onClick={() => setShowAllScores((open) => !open)}>
               {showAllScores ? 'Show top 8' : `Show top ${allStandings.length} scores`}
             </button>
           )}
@@ -440,7 +596,7 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
           <section className="card card-accent p-3.5 text-left">
             <button
               type="button"
-              className="flex min-h-[32px] w-full items-center justify-between gap-2 text-left"
+              className="flex min-h-[44px] w-full items-center justify-between gap-2 text-left"
               onClick={() => setShowMissed((v) => !v)}
               aria-expanded={showMissed}
             >
@@ -466,7 +622,7 @@ function Buzzer({ code, info }: { code: string; info: Info }) {
           </section>
         )}
 
-        {finished && (
+        {finished && state.quizSlug && (
           <a className="btn btn-primary btn-lg" href={`/q/${state.quizSlug}`}>
             Play the full quiz <IconPlay size={14} />
           </a>

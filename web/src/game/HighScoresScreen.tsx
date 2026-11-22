@@ -103,18 +103,21 @@ export function HighScoresScreen({
     void loadPage(mode, team, debouncedSearch, 0, false)
   }, [mode, team, debouncedSearch, loadPage])
 
+  const scrollBehavior = () =>
+    typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'
+
   // If "Find me" triggered a reload/expansion, scroll once our row mounts.
   useEffect(() => {
     if (pendingJumpRef.current && yourRowRef.current) {
       pendingJumpRef.current = false
-      yourRowRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      yourRowRef.current.scrollIntoView({ behavior: scrollBehavior(), block: 'center' })
     }
   }, [entries])
 
   const jumpToMe = () => {
     if (!board?.you) return
     if (yourRowRef.current) {
-      yourRowRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      yourRowRef.current.scrollIntoView({ behavior: scrollBehavior(), block: 'center' })
       return
     }
     pendingJumpRef.current = true
@@ -302,14 +305,14 @@ export function HighScoresScreen({
                     Your high score · {board.modeName} · #{board.you.rank} of {totalCount}
                   </p>
                   <p className="mt-1 text-base text-ink">
-                    {board.you.rank === 1 ? (
+                    {board.you.rank === 1 || board.you.tied ? (
                       <span className="inline-flex items-center gap-1.5 font-bold" style={{ color: 'var(--rank-1)' }}>
-                        <IconCrown size={15} /> You hold the #1 spot!
+                        <IconCrown size={15} /> {board.you.tied ? 'Tied for the #1 spot!' : 'You hold the #1 spot!'}
                       </span>
                     ) : board.you.gapToNext !== undefined ? (
                       <>
                         <b style={{ color: 'var(--accent-text)' }}>{formatScore(board.you.gapToNext)}</b> pts behind{' '}
-                        {board.you.aheadName ?? `#${board.you.rank - 1}`} (#{board.you.rank - 1})
+                        {board.you.aheadName ?? `#${board.you.rank - 1}`}
                       </>
                     ) : (
                       `Ranked #${board.you.rank} of ${totalCount}`

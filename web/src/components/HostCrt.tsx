@@ -6,6 +6,9 @@
 // CRT tube overlay (rather than SVG <rect>s inside a filtered <g>) so iOS WebKit composites
 // transform animations smoothly on the GPU instead of freezing on static frames.
 
+import { useEffect, useRef, useState } from 'react'
+import { getHostVoiceLevel } from '../lib/hostVoice'
+
 export type HostCrtState = 'idle' | 'speaking' | 'listening' | 'happy' | 'wince' | 'thinking'
 
 type Props = {
@@ -17,12 +20,15 @@ type Props = {
   size?: 'sm' | 'md'
 }
 
+// Phosphors sit inside a dark #06050f CRT tube in both dark and light modes, so keep them bright and luminous.
 const TONE_COLOR: Record<NonNullable<Props['tone']>, string> = {
-  accent: 'var(--accent)',
-  brand: 'var(--brand)',
+  accent: '#ffb020',
+  brand: '#8b7dff',
   cyan: '#38e8ff',
   rose: '#ff5c93',
 }
+const PHOSPHOR_GOOD = '#32e875'
+const PHOSPHOR_BAD = '#ff4d6d'
 
 export function hostToneFor(register?: string | null): NonNullable<Props['tone']> {
   if (register === 'brighter') return 'cyan'
@@ -32,23 +38,72 @@ export function hostToneFor(register?: string | null): NonNullable<Props['tone']
   return 'accent'
 }
 
+const BAR_WEIGHTS = [0.55, 0.92, 0.78, 1.0, 0.84, 0.58]
+
 export function HostCrt({ state = 'idle', mood = 'idle', tone = 'accent', size = 'md' }: Props) {
   const effectiveMood = state === 'happy' || state === 'wince' ? state : mood
   const phosphor =
     state === 'listening'
-      ? 'var(--bad)'
+      ? PHOSPHOR_BAD
       : effectiveMood === 'happy'
-        ? 'var(--good)'
+        ? PHOSPHOR_GOOD
         : effectiveMood === 'wince'
-          ? 'var(--bad)'
+          ? PHOSPHOR_BAD
           : TONE_COLOR[tone]
   const dim = size === 'sm' ? 'h-10 w-11' : 'h-11 w-12 sm:h-13 sm:w-14'
   const showHtmlFace = state === 'idle' || state === 'speaking' || state === 'thinking' || state === 'listening'
+  const barsRef = useRef<HTMLDivElement | null>(null)
+  const [liveVu, setLiveVu] = useState(false)
+
+  useEffect(() => {
+    if (state !== 'speaking') {
+      setLiveVu(false)
+      const container = barsRef.current
+      if (container) {
+        Array.from(container.children).forEach((el) => {
+          ;(el as HTMLElement).style.transform = ''
+        })
+      }
+      return
+    }
+    const reduced = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    if (reduced) return
+    let raf = 0
+    let activeAudio = false
+    const tick = (t: number) => {
+      const level = getHostVoiceLevel()
+      if (level > 0.015 && !activeAudio) {
+        activeAudio = true
+        setLiveVu(true)
+      }
+      const container = barsRef.current
+      if (activeAudio && container) {
+        for (let i = 0; i < container.children.length; i += 1) {
+          const bar = container.children[i] as HTMLElement
+          const ripple = 0.78 + 0.22 * Math.sin(t * 0.022 + i * 1.35)
+          const scale = Math.max(0.18, Math.min(1, 0.18 + level * BAR_WEIGHTS[i] * ripple * 1.15))
+          bar.style.transform = `scaleY(${scale.toFixed(3)})`
+        }
+      }
+      raf = window.requestAnimationFrame(tick)
+    }
+    raf = window.requestAnimationFrame(tick)
+    return () => {
+      window.cancelAnimationFrame(raf)
+      const container = barsRef.current
+      if (container) {
+        Array.from(container.children).forEach((el) => {
+          ;(el as HTMLElement).style.transform = ''
+        })
+      }
+    }
+  }, [state])
 
   return (
     <div
       className={`host-crt relative flex-none ${dim}`}
       data-state={state}
+      data-vu={liveVu ? 'true' : undefined}
       style={{ ['--crt-color' as string]: phosphor }}
       aria-hidden="true"
     >
@@ -93,7 +148,7 @@ export function HostCrt({ state = 'idle', mood = 'idle', tone = 'accent', size =
               <span className="crt-eye" />
               <span className="crt-eye" />
             </div>
-            <div className="crt-bars">
+            <div ref={barsRef} className="crt-bars">
               <span className="crt-bar crt-b1" />
               <span className="crt-bar crt-b2" />
               <span className="crt-bar crt-b3" />

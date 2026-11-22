@@ -304,6 +304,7 @@ async def quiz_detail(quiz_id: uuid.UUID, admin: dict = Depends(current_admin)) 
             "sections": await db.fetch(
                 "select s.id, s.heading, s.ordinal, s.document_id,"
                 " (select count(*) from questions q where q.section_id = s.id and q.status = 'approved') as questions,"
+                " (select count(*) from questions q where q.section_id = s.id and q.status <> 'rejected') as total_questions,"
                 " (select count(*) from questions q where q.section_id = s.id and q.video_url is not null) as videos,"
                 " (select q.video_url from questions q where q.section_id = s.id and q.video_url is not null"
                 "  order by q.created_at asc limit 1) as video_url,"
@@ -332,8 +333,13 @@ async def update_quiz(quiz_id: uuid.UUID, body: QuizUpdate, admin: dict = Depend
         changes["description"] = body.description
     if body.meetingAt is not None or body.clearMeetingAt:
         changes["meeting_at"] = None if body.clearMeetingAt else body.meetingAt
+    revoke_memberships = False
     if "accessCode" in body.model_fields_set:
-        changes["access_code"] = (body.accessCode or "").strip() or None
+        new_code = (body.accessCode or "").strip() or None
+        changes["access_code"] = new_code
+        if new_code != (quiz["access_code"] or None):
+            changes["access_version"] = int(quiz.get("access_version") or 1) + 1
+            revoke_memberships = True
     if body.allowedEmailDomains is not None:
         changes["allowed_email_domains"] = [d.strip().lower().lstrip("@") for d in body.allowedEmailDomains if d.strip()]
     if body.teams is not None:
@@ -346,10 +352,27 @@ async def update_quiz(quiz_id: uuid.UUID, body: QuizUpdate, admin: dict = Depend
             merged["allow_download"] = False
         elif body.settings.get("allow_download"):
             merged["purge_source_after_process"] = False
-        changes["settings"] = merged
+        # Validate and clamp per-quiz overrides through clean_game without flattening inherited defaults.
+        cleaned_full = settings_store.clean_game(settings_store.deep_merge(await settings_store.get("game"), merged))
+        cleaned_overrides: dict[str, Any] = {}
+        for k, v in merged.items():
+            if k not in cleaned_full:
+                continue
+            if isinstance(v, dict) and isinstance(cleaned_full[k], dict):
+                sub = {}
+                for sk, sv in v.items():
+                    if sk in cleaned_full[k]:
+                        if isinstance(sv, dict) and isinstance(cleaned_full[k][sk], dict):
+                            sub[sk] = {ssk: cleaned_full[k][sk][ssk] for ssk in sv if ssk in cleaned_full[k][sk]}
+                        else:
+                            sub[sk] = cleaned_full[k][sk]
+                cleaned_overrides[k] = sub
+            else:
+                cleaned_overrides[k] = cleaned_full[k]
+        changes["settings"] = cleaned_overrides
         # When an unpublished draft becomes unlisted, give it an unguessable slug suffix.
         if (
-            merged.get("unlisted")
+            cleaned_full.get("unlisted")
             and not prior_rules.get("unlisted")
             and quiz["status"] == "draft"
             and not re.search(r"-[0-9a-f]{8}$", quiz["slug"])
@@ -361,16 +384,21 @@ async def update_quiz(quiz_id: uuid.UUID, body: QuizUpdate, admin: dict = Depend
             changes["slug"] = candidate
     if body.status is not None:
         if body.status == "open":
+            effective_rules = await settings_store.quiz_rules({**quiz, "settings": changes.get("settings", quiz["settings"])})
+            sources = effective_rules.get("question_sources", "all")
+            origin_filter = "and origin = 'manual'" if sources == "manual" else ("and origin = 'generated'" if sources == "ai" else "")
             live_questions = await db.fetchval(
-                "select count(*) from questions where quiz_id = $1 and status = 'approved' and kind = 'mcq'", qid)
+                f"select count(*) from questions where quiz_id = $1 and status = 'approved' and kind = 'mcq' {origin_filter}", qid)
             if live_questions < 3:
-                raise HTTPException(409, "Add a report (or at least three approved multiple-choice questions) before "
-                                         "opening the quiz.")
+                raise HTTPException(409, "Add a report (or at least three approved multiple-choice questions matching "
+                                         "your question-source filter) before opening the quiz.")
         changes["status"] = body.status
     if changes:
         columns = ", ".join(f"{name} = ${i}" for i, name in enumerate(changes, start=2))
         quiz = await db.fetchrow(f"update quizzes set {columns}, updated_at = now() where id = $1 returning *",
                                  qid, *changes.values())
+        if revoke_memberships:
+            await db.execute("delete from quiz_memberships where quiz_id = $1", qid)
         bank.invalidate(qid)
     return {"quiz": _quiz_view(quiz), "rules": await settings_store.quiz_rules(quiz)}
 
@@ -380,6 +408,7 @@ async def delete_quiz(quiz_id: uuid.UUID, admin: dict = Depends(current_admin)) 
     qid = str(quiz_id)
     await _quiz(qid)
     for document in await db.fetch("select id from documents where quiz_id = $1", qid):
+        pipeline.cancel_document(document["id"])
         await storage().delete_prefix(f"quizzes/images/{document['id']}")
         await storage().delete_prefix(f"quizzes/reports/{document['id']}")
     await db.execute("delete from quizzes where id = $1", qid)
@@ -440,7 +469,7 @@ async def reprocess_document(document_id: uuid.UUID, admin: dict = Depends(curre
     claimed = await db.fetchrow(
         "update documents set status = 'processing', stage = 'reading', heartbeat_at = now(), error = null"
         " where id = $1 and storage_key <> ''"
-        " and (status <> 'processing' or coalesce(heartbeat_at, created_at) < now() - interval '10 minutes')"
+        " and ((status <> 'processing' and stage is null) or coalesce(heartbeat_at, created_at) < now() - interval '10 minutes')"
         " returning quiz_id",
         did,
     )
@@ -462,6 +491,19 @@ async def delete_document(document_id: uuid.UUID, admin: dict = Depends(current_
     document = await db.fetchrow("select quiz_id from documents where id = $1", did)
     if document is None:
         raise HTTPException(404, "Document not found.")
+    pipeline.cancel_document(did)
+    # Any hand-written or cross-document picture question pointing at this document's images moves to review.
+    await db.execute(
+        "update questions set status = 'pending', image_id = null,"
+        " quality = coalesce(quality, '{}'::jsonb)"
+        " || jsonb_build_object('pulled', 'Its picture was removed when a report was deleted. Choose a picture again.')"
+        " where image_id in (select id from doc_images where document_id = $1)",
+        did,
+    )
+    await db.execute(
+        "update questions set reveal_image_id = null where reveal_image_id in (select id from doc_images where document_id = $1)",
+        did,
+    )
     await storage().delete_prefix(f"quizzes/images/{did}")
     await storage().delete_prefix(f"quizzes/reports/{did}")
     await db.execute("delete from documents where id = $1", did)
@@ -736,7 +778,8 @@ async def update_question(question_id: uuid.UUID, body: dict[str, Any], admin: d
             if (question["quality"] or {}).get("pulled"):
                 changes["quality"] = {k: v for k, v in (question["quality"] or {}).items() if k != "pulled"}
         curated = True
-    if "revealImageId" in body and "image_id" not in changes:
+    final_image_id = changes["image_id"] if "image_id" in changes else question["image_id"]
+    if "revealImageId" in body and not final_image_id:
         reveal_image_id = _uuid_or_none(body["revealImageId"], "reveal visual")
         if reveal_image_id and not await db.fetchval("select 1 from doc_images where id = $1 and quiz_id = $2",
                                                      reveal_image_id, question["quiz_id"]):
@@ -799,7 +842,9 @@ async def delete_question(question_id: uuid.UUID, admin: dict = Depends(current_
 
 class BulkAction(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=500)
-    action: Literal["approve", "reject", "delete", "pin", "unpin"]
+    action: Literal["approve", "reject", "delete", "pin", "unpin", "set_difficulty", "set_section"]
+    difficulty: Literal["easy", "medium", "hard"] | None = None
+    sectionId: str | None = None
 
 
 @router.post("/quizzes/{quiz_id}/questions/bulk")
@@ -814,6 +859,23 @@ async def bulk_questions(quiz_id: uuid.UUID, body: BulkAction, admin: dict = Dep
         result = await db.execute(
             "update questions set pinned = true, edited_at = now(), edited_by = $3, updated_at = now()"
             " where quiz_id = $1 and id = any($2::uuid[])", qid, ids, admin["id"])
+    elif body.action == "set_difficulty":
+        if not body.difficulty:
+            raise HTTPException(422, "Choose a difficulty level.")
+        result = await db.execute(
+            "update questions set difficulty = $3, edited_at = now(), edited_by = $4, updated_at = now()"
+            " where quiz_id = $1 and id = any($2::uuid[])", qid, ids, body.difficulty, admin["id"])
+    elif body.action == "set_section":
+        sec_id = _uuid_or_none(body.sectionId, "section")
+        doc_id = None
+        if sec_id:
+            doc_id = await db.fetchval("select document_id from doc_sections where id = $1 and quiz_id = $2", sec_id, qid)
+            if doc_id is None:
+                raise HTTPException(422, "That section does not belong to this quiz.")
+        result = await db.execute(
+            "update questions set section_id = $3, document_id = coalesce($4, document_id),"
+            " edited_at = now(), edited_by = $5, updated_at = now()"
+            " where quiz_id = $1 and id = any($2::uuid[])", qid, ids, sec_id, doc_id, admin["id"])
     else:
         statement = {
             "approve": "update questions set status = 'approved', flag_count = 0, updated_at = now(),"
@@ -929,9 +991,18 @@ async def reset_results(quiz_id: uuid.UUID, admin: dict = Depends(current_admin)
         await tx.execute("delete from runs where quiz_id = $1", qid)
         await tx.execute("delete from live_sessions where quiz_id = $1", qid)
         await tx.execute("delete from question_flags where question_id in (select id from questions where quiz_id = $1)", qid)
+        # Restore questions that were auto-pulled by play-test flags/stats, while leaving lost-picture pulls in review.
+        await tx.execute(
+            "update questions set status = 'approved'"
+            " where quiz_id = $1 and status = 'pending' and (quality ? 'pulled')"
+            " and coalesce(quality->>'pulled', '') not ilike '%picture%'",
+            qid,
+        )
         await tx.execute(
             "update questions set times_served = 0, times_correct = 0, flag_count = 0,"
-            " quality = coalesce(quality, '{}'::jsonb) - 'pulled' where quiz_id = $1",
+            " quality = case when coalesce(quality->>'pulled', '') ilike '%picture%' then quality"
+            "   else coalesce(quality, '{}'::jsonb) - 'pulled' end"
+            " where quiz_id = $1",
             qid,
         )
     bank.invalidate(qid)

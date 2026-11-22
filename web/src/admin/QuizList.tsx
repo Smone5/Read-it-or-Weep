@@ -7,7 +7,13 @@ import { useNotify, usePageTitle } from './context'
 import { formatDateTime, fromLocalInput, meetingHint, QUIZ_STATUS } from './format'
 import { useLoad } from './hooks'
 import { paths } from './paths'
-import type { Quiz, QuizListItem } from './types'
+import type { QuestionSources, Quiz, QuizListItem, QuizOverview } from './types'
+
+function playableMcqCount(overview: QuizOverview, source?: QuestionSources): number {
+  if (source === 'manual' && overview.approved_manual_mcq !== undefined) return overview.approved_manual_mcq
+  if (source === 'ai' && overview.approved_ai_mcq !== undefined) return overview.approved_ai_mcq
+  return overview.approved_mcq ?? overview.approved
+}
 
 type StatusFilter = 'all' | 'open' | 'draft' | 'closed'
 type SortKey = 'meeting' | 'newest'
@@ -165,6 +171,7 @@ function QuizCard({ quiz, busy, onToggleStatus }: { quiz: QuizListItem; busy: bo
     { label: 'Players', value: overview.players },
     { label: 'Games played', value: overview.games },
   ]
+  const playableMcq = playableMcqCount(overview, quiz.settings?.question_sources)
   return (
     <div className="card flex h-full flex-col p-4">
       <Link to={paths.quiz(quiz.id)} className="flex-1">
@@ -208,8 +215,8 @@ function QuizCard({ quiz, busy, onToggleStatus }: { quiz: QuizListItem; busy: bo
         <button
           type="button"
           className="btn btn-ghost btn-sm"
-          disabled={busy || (quiz.status !== 'open' && overview.approved < 3)}
-          title={quiz.status !== 'open' && overview.approved < 3 ? 'Needs at least 3 live questions before opening' : undefined}
+          disabled={busy || (quiz.status !== 'open' && playableMcq < 3)}
+          title={quiz.status !== 'open' && playableMcq < 3 ? 'Needs at least 3 live multiple-choice questions before opening' : undefined}
           onClick={onToggleStatus}
         >
           {busy ? 'Saving…' : quiz.status === 'open' ? 'Close' : 'Open'}

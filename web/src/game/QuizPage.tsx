@@ -10,7 +10,7 @@ import { HostVoice, type TalkState } from '../lib/hostVoice'
 import { cueJukebox, setJukeboxLevel, startJukebox, startParty, stopJukebox } from '../lib/jukebox'
 import { unlockMusic } from '../lib/music'
 import { parseChallenge, type Challenge } from '../lib/shareCard'
-import { play, preloadSounds, unlockAudio } from '../lib/sound'
+import { play, preloadSounds, soundOn, unlockAudio } from '../lib/sound'
 import { applyBranding, applyDecade, DECADE_FLAVOUR, DECADE_LABEL, DECADE_SWATCH } from '../lib/theme'
 import type { ModeId, PlayerView, QuizInfo, Soundtrack, Summary as SummaryData, Turn } from '../lib/types'
 import { HighScoresScreen } from './HighScoresScreen'
@@ -21,10 +21,20 @@ import Summary from './Summary'
 type Screen = 'loading' | 'join' | 'lobby' | 'play' | 'summary'
 
 const HOST_KEY = 'quiz.host'
+const DECADE_KEY = 'quiz.decade'
 
 function savedHost(): string | null {
   try {
     return localStorage.getItem(HOST_KEY)
+  } catch {
+    return null
+  }
+}
+
+function savedDecade(allowed: string[]): string | null {
+  try {
+    const raw = localStorage.getItem(DECADE_KEY)
+    return raw && allowed.includes(raw) ? raw : null
   } catch {
     return null
   }
@@ -217,24 +227,29 @@ export default function QuizPage() {
         (result.mode === 'straight' && result.passed === true) ||
         (result.mode !== 'jukebox' && result.readiness.ready))
     const host = hostRef.current
+    const hostSigningOff = result.status === 'completed' && Boolean(host)
     if (party) {
       setJukeboxLevel('think')
-      window.setTimeout(() => {
-        if (!ours()) return
-        setJukeboxLevel('party')
-        if (isVictory && (result.status !== 'completed' || !host)) cueJukebox('victory')
-      }, ENDING_QUIET_MS)
+      if (!hostSigningOff) {
+        window.setTimeout(() => {
+          if (!ours()) return
+          setJukeboxLevel('party')
+          if (isVictory) cueJukebox('victory')
+        }, ENDING_QUIET_MS)
+      }
     } else stopJukebox(1200) // no music on this quiz's results screen
     const music = () => {
       if (party && ours()) startParty(party.tracks)
     }
-    if (result.status !== 'completed' || !host) {
+    if (!hostSigningOff || !host) {
       window.setTimeout(music, 2200)
       return
     }
-    // Wait >= 1.2s before speaking so the victory sting lands cleanly without being ducked mid-applause.
+    // Wait >= 1.2s before speaking so the victory sting lands cleanly without being ducked mid-applause;
+    // hold music quietly at 'think' until the host finishes signing off, then swell smoothly into the after-party.
     summaryCueTimer.current = window.setTimeout(() => {
       if (!host.cue('summary')) {
+        if (party && ours()) setJukeboxLevel('party')
         music() // no host to sign off after all
         return
       }
@@ -342,7 +357,19 @@ export default function QuizPage() {
             />
           )}
           {screen === 'play' && turn && (
-            <Play key={turn.state.runId} firstTurn={turn} resumed={resumed} hostName={hostName} hostLine={hostLine} hostSpeaking={hostSpeaking} hostTone={hostTone} host={hostRef.current} talk={talk} onDone={finished} />
+            <Play
+              key={turn.state.runId}
+              firstTurn={turn}
+              resumed={resumed}
+              returning={Object.keys(info.player?.best ?? {}).length > 0}
+              hostName={hostName}
+              hostLine={hostLine}
+              hostSpeaking={hostSpeaking}
+              hostTone={hostTone}
+              host={hostRef.current}
+              talk={talk}
+              onDone={finished}
+            />
           )}
           {screen === 'summary' && summary && (
             <Summary
@@ -394,7 +421,7 @@ function ChallengeBanner({ challenge, modes }: { challenge: Challenge | null; mo
           Challenge from {challenge.by}
         </p>
         <p className="mt-1 text-sm">
-          Posted <b>{challenge.score.toLocaleString()} pts</b>
+          Posted <b>{challenge.mode === 'straight' ? `${challenge.score}%` : `${challenge.score.toLocaleString()} pts`}</b>
           {challenge.badge ? <> ({challenge.badge})</> : null}
           {modeName ? <> in {modeName}</> : null}. Think you can beat it?
         </p>
@@ -516,7 +543,16 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onFavouriteArtis
     ? challenge.mode
     : quiz.defaultMode
   const [mode, setMode] = useState<ModeId>(initialMode)
-  const [decade, setDecade] = useState<string | null>(null)
+  const [decade, setDecadeState] = useState<string | null>(() => savedDecade(quiz.decades))
+  const setDecade = (value: string | null) => {
+    setDecadeState(value)
+    try {
+      if (value) localStorage.setItem(DECADE_KEY, value)
+      else localStorage.removeItem(DECADE_KEY)
+    } catch {
+      /* ignore */
+    }
+  }
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const chosen = quiz.modes.find((m) => m.id === mode) ?? quiz.modes[0]
@@ -534,6 +570,10 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onFavouriteArtis
     audio.pause()
     if (hearing?.id === id) {
       setHearing(null)
+      return
+    }
+    if (!soundOn()) {
+      setError('Sound is muted — unmute with the volume button at the top right to preview host voices.')
       return
     }
     const done = () => setHearing((now) => (now?.id === id ? null : now))
@@ -780,7 +820,7 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onFavouriteArtis
           )}
           <button
             className="btn btn-primary btn-lg w-full"
-            disabled={busy || !quiz.ready}
+            disabled={busy || (!quiz.ready && mode !== 'jukebox')}
             onClick={() => void go(() => onStart(mode, wantsDecade ? decade : null))}
           >
             {busy ? 'Loading…' : player.unfinishedRun ? 'Start a fresh game' : <>Press start <IconPlay size={14} /></>}

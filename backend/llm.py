@@ -151,16 +151,31 @@ async def text(
     return final_text(response)
 
 
-async def embed(texts: Sequence[str], batch_size: int = 64) -> np.ndarray:
+async def embed(texts: Sequence[str], batch_size: int = 64, attempts: int = 3) -> np.ndarray:
     """Return an (n, d) float32 array of L2-normalised embeddings."""
     if not texts:
         return np.zeros((0, 0), dtype=np.float32)
     vectors: list[list[float]] = []
     for start in range(0, len(texts), batch_size):
         batch = [t.replace("\n", " ")[:8000] or " " for t in texts[start:start + batch_size]]
-        async with _gate():
-            response = await client().embeddings.create(model=config.model_embedding, input=batch)
-        vectors.extend(item.embedding for item in sorted(response.data, key=lambda d: d.index))
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                async with _gate():
+                    response = await client().embeddings.create(model=config.model_embedding, input=batch)
+                vectors.extend(item.embedding for item in sorted(response.data, key=lambda d: d.index))
+                last_error = None
+                break
+            except _RETRYABLE as exc:
+                last_error = exc
+            except APIStatusError as exc:
+                if exc.status_code < 500:
+                    raise
+                last_error = exc
+            if attempt < attempts:
+                await asyncio.sleep(1.5 * attempt)
+        if last_error is not None:
+            raise AIUnavailable(str(last_error)) from last_error
     matrix = np.asarray(vectors, dtype=np.float32)
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     return matrix / np.clip(norms, 1e-9, None)

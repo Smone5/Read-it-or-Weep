@@ -190,11 +190,15 @@ export type QuizStatus = 'draft' | 'open' | 'closed'
 
 export type QuizOverview = {
   approved: number
+  approved_mcq?: number
+  approved_manual_mcq?: number
+  approved_ai_mcq?: number
   pending: number
   manual: number
   flagged: number
   players: number
   games: number
+  live_sessions?: number
   documents: number
 }
 
@@ -271,13 +275,14 @@ export type SectionVideoClip = {
   count: number
 }
 
-/** `questions` counts the live (approved) questions filed under the section. */
+/** `questions` counts live (approved) questions; `total_questions` includes pending (non-rejected) questions too. */
 export type Section = {
   id: string
   heading: string
   ordinal: number
   document_id: string
   questions: number
+  total_questions?: number
   videos?: number
   video_url?: string | null
   video_title?: string | null
@@ -389,7 +394,7 @@ export type QuestionPatch = Partial<{
   revealImageId: string | null
 }>
 
-export type BulkAction = 'approve' | 'reject' | 'delete' | 'pin' | 'unpin'
+export type BulkAction = 'approve' | 'reject' | 'delete' | 'pin' | 'unpin' | 'set_difficulty' | 'set_section'
 
 export type Suggestion = { wrongAnswers: string[]; title: string; explanation: string; concern: string }
 

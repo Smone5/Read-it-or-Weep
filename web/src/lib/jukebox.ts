@@ -596,7 +596,27 @@ function listen() {
   tabHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden'
   const onVisibility = () => {
     tabHidden = document.visibilityState === 'hidden'
-    if (on) sync()
+    if (!on) return
+    if (!tabHidden && wanted()) {
+      const ctx = audioContext()
+      if (ctx.state !== 'running') {
+        void ctx
+          .resume()
+          .catch(() => undefined)
+          .finally(() => {
+            if (!on || tabHidden) return
+            if (ctx.state !== 'running' && wanted()) {
+              needsTap = true
+              startWhenAwake()
+              announce()
+            } else {
+              sync()
+            }
+          })
+        return
+      }
+    }
+    sync()
   }
   document.addEventListener('visibilitychange', onVisibility)
   stopListening = [

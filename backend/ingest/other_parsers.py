@@ -9,6 +9,7 @@ import io
 import re
 from collections import Counter
 
+from ingest import charts
 from ingest.docx_parser import UnreadableDocument, rows_to_markdown
 from ingest.model import Block, ParsedDocument
 
@@ -20,31 +21,67 @@ def parse_text(data: bytes, filename: str = "") -> ParsedDocument:
         text = data.decode("latin-1", errors="replace")
     parsed = ParsedDocument()
     paragraph: list[str] = []
+    table_lines: list[str] = []
+    in_code = False
+    code_lines: list[str] = []
 
-    def flush() -> None:
+    def flush_paragraph() -> None:
         if paragraph:
             parsed.blocks.append(Block(kind="paragraph", text=" ".join(paragraph)))
             paragraph.clear()
 
+    def flush_table() -> None:
+        if table_lines:
+            if len(table_lines) >= 2:
+                parsed.blocks.append(Block(kind="table", text="\n".join(table_lines)))
+            else:
+                parsed.blocks.append(Block(kind="paragraph", text=table_lines[0]))
+            table_lines.clear()
+
+    def flush_code() -> None:
+        if code_lines:
+            parsed.blocks.append(Block(kind="paragraph", text="\n".join(code_lines)))
+            code_lines.clear()
+
     for raw in text.splitlines():
         line = raw.strip()
-        if not line:
-            flush()
+        if line.startswith("```"):
+            flush_paragraph()
+            flush_table()
+            if in_code:
+                flush_code()
+                in_code = False
+            else:
+                in_code = True
             continue
+        if in_code:
+            code_lines.append(raw.rstrip())
+            continue
+        if not line:
+            flush_paragraph()
+            flush_table()
+            continue
+        if line.startswith("|") and line.count("|") >= 2:
+            flush_paragraph()
+            table_lines.append(line)
+            continue
+        flush_table()
         heading = re.match(r"^(#{1,6})\s+(.*)$", line)
         if heading:
-            flush()
+            flush_paragraph()
             level = len(heading.group(1))
             title = heading.group(2).strip(" #")
             if level == 1 and not parsed.title:
                 parsed.title = title
             parsed.blocks.append(Block(kind="heading", text=title, level=level))
         elif re.match(r"^([-*•]|\d+[.)])\s+", line):
-            flush()
+            flush_paragraph()
             parsed.blocks.append(Block(kind="list_item", text=re.sub(r"^([-*•]|\d+[.)])\s+", "", line)))
         else:
             paragraph.append(line)
-    flush()
+    flush_paragraph()
+    flush_table()
+    flush_code()
     if not parsed.blocks:
         raise UnreadableDocument("No readable text was found in this file.")
     return parsed
@@ -301,10 +338,30 @@ def parse_pptx(data: bytes, filename: str = "") -> ParsedDocument:
                     content_blocks += 1
                 continue
             if getattr(shape, "has_chart", False) and shape.has_chart:
-                c_title, md = _pptx_chart_markdown(shape.chart)
-                if md.strip():
-                    parsed.blocks.append(Block(kind="chart", text=md, caption=c_title))
+                chart_data = None
+                png = None
+                try:
+                    chart_data = charts.parse_chart_xml(shape.chart.part.blob)
+                    if chart_data is not None:
+                        png = chart_data.render_png()
+                except Exception:
+                    chart_data = None
+                    png = None
+                if chart_data is not None:
+                    parsed.blocks.append(Block(
+                        kind="chart",
+                        text=chart_data.as_text(),
+                        image=png,
+                        mime="image/png" if png else None,
+                        caption=chart_data.title,
+                        origin="chart_render" if png else "embedded",
+                    ))
                     content_blocks += 1
+                else:
+                    c_title, md = _pptx_chart_markdown(shape.chart)
+                    if md.strip():
+                        parsed.blocks.append(Block(kind="chart", text=md, caption=c_title))
+                        content_blocks += 1
                 continue
             if shape.shape_type == 13 and hasattr(shape, "image"):  # picture
                 try:

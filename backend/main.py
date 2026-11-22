@@ -54,10 +54,18 @@ async def lifespan(_: FastAPI):
         log.info("applied migrations: %s", ", ".join(applied))
     await _bootstrap_admin()
     # Documents caught mid-processing by a restart would otherwise look busy forever.
-    await db.execute("update documents set status = 'failed', stage = null,"
-                     " error = 'Processing was interrupted. Use \"Process again\".' where status = 'processing'")
-    # ...and a "write more questions" job cut short would leave a finished document looking busy.
-    await db.execute("update documents set stage = null, progress = '{}'::jsonb where status = 'ready' and stage is not null")
+    # Leave recently heartbeated docs untouched so multi-instance rolling deploys do not abort a peer's live job.
+    await db.execute(
+        "update documents set status = 'failed', stage = null,"
+        " error = 'Processing was interrupted. Use \"Process again\".'"
+        " where status = 'processing' and coalesce(heartbeat_at, created_at) < now() - interval '2 minutes'"
+    )
+    # ...and a "write more questions" job cut short would leave a finished document looking busy (keep its progress stats).
+    await db.execute(
+        "update documents set stage = null"
+        " where status = 'ready' and stage is not null"
+        " and coalesce(heartbeat_at, created_at) < now() - interval '2 minutes'"
+    )
     if not config.ai_configured:
         log.warning("no AI provider configured – uploads and the host are disabled until one is set")
     else:

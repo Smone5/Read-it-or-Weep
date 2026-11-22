@@ -23,13 +23,36 @@ from storage import storage
 log = logging.getLogger("pipeline")
 
 _running: set[asyncio.Task] = set()
+_tasks_by_doc: dict[str, asyncio.Task] = {}
+
+
+def _track(document_id: str, task: asyncio.Task) -> None:
+    prev = _tasks_by_doc.get(document_id)
+    if prev and not prev.done():
+        prev.cancel()
+    _running.add(task)
+    _tasks_by_doc[document_id] = task
+
+    def _done(t: asyncio.Task) -> None:
+        _running.discard(t)
+        if _tasks_by_doc.get(document_id) is t:
+            _tasks_by_doc.pop(document_id, None)
+
+    task.add_done_callback(_done)
+
+
+def cancel_document(document_id: str) -> bool:
+    """Cancel any active background ingestion or top-up task for this document."""
+    task = _tasks_by_doc.pop(document_id, None)
+    if task and not task.done():
+        task.cancel()
+        return True
+    return False
 
 
 def start_processing(document_id: str) -> None:
     """Run the job in the background and keep a reference so it is not garbage-collected."""
-    task = asyncio.create_task(process_document(document_id))
-    _running.add(task)
-    task.add_done_callback(_running.discard)
+    _track(document_id, asyncio.create_task(process_document(document_id)))
 
 
 async def _set(document_id: str, **fields) -> None:
@@ -41,12 +64,18 @@ async def clear_derived(document_id: str) -> None:
     """Remove everything extracted from a document (it is about to be re-read or deleted)."""
     await db.execute("delete from questions where document_id = $1 and origin = 'generated' and edited_at is null",
                      document_id)
-    # Questions that are kept (hand-written or edited) lose their links into the old text. One that was about
-    # a picture cannot be asked without it, so it goes back to the review queue instead of into a game.
+    # Questions that are kept (hand-written, edited, or cross-document) lose their links into the old pictures/text.
+    # Any picture question whose image belongs to this document goes back to the review queue instead of into a game.
     await db.execute(
         "update questions set status = 'pending', quality = coalesce(quality, '{}'::jsonb)"
         " || jsonb_build_object('pulled', 'Its picture was removed when the report was re-read. Choose a picture again.')"
-        " where document_id = $1 and image_id is not null", document_id)
+        " where image_id in (select id from doc_images where document_id = $1)", document_id)
+    await db.execute(
+        "update questions set image_id = null where image_id in (select id from doc_images where document_id = $1)",
+        document_id)
+    await db.execute(
+        "update questions set reveal_image_id = null where reveal_image_id in (select id from doc_images where document_id = $1)",
+        document_id)
     await db.execute("update questions set chunk_id = null, image_id = null, section_id = null where document_id = $1",
                      document_id)
     await db.execute("delete from doc_images where document_id = $1", document_id)
@@ -84,6 +113,27 @@ async def _store_structure(document: dict, structured: StructuredDocument) -> tu
 
 
 async def _existing_question_vectors(quiz_id: str) -> np.ndarray | None:
+    # Backfill embeddings for hand-written or edited questions so AI top-ups never duplicate them.
+    missing = await db.fetch(
+        "select id, question_text, options, correct_index from questions"
+        " where quiz_id = $1 and embedding is null and status <> 'rejected'",
+        quiz_id,
+    )
+    if missing:
+        texts = []
+        for q in missing:
+            opts = q.get("options") or []
+            cidx = q.get("correct_index")
+            ans = opts[cidx] if isinstance(cidx, int) and 0 <= cidx < len(opts) else ""
+            texts.append(f"{q['question_text']} {ans}".strip())
+        try:
+            vecs = await llm.embed(texts)
+            await db.executemany(
+                "update questions set embedding = $2 where id = $1",
+                [(q["id"], vec.tolist()) for q, vec in zip(missing, vecs)],
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not backfill manual question embeddings for quiz %s: %s", quiz_id, exc)
     rows = await db.fetch("select embedding from questions where quiz_id = $1 and embedding is not null", quiz_id)
     if not rows:
         return None
@@ -130,7 +180,7 @@ async def _attach_section_videos(
         if not section.video_urls or inspected >= MAX_AUTO_VIDEOS:
             continue
         mcqs = await db.fetch(
-            "select id, question_text, options, correct_index from questions"
+            "select id, question_text, options, correct_index, explanation from questions"
             " where section_id = $1 and kind = 'mcq' and video_url is null"
             " order by (image_id is not null) asc, pinned desc, created_at asc",
             section_id,
@@ -167,16 +217,17 @@ async def _attach_section_videos(
 async def _match_document_reveal_images(document_id: str) -> int:
     """Pair unlinked text MCQs with informative visuals that directly illustrate their answers."""
     usable_imgs = await db.fetch(
-        "select id, caption, description from doc_images"
+        "select id, section_id, caption, description, context_text from doc_images"
         " where document_id = $1 and usable is not false order by ordinal",
         document_id,
     )
     if not usable_imgs:
         return 0
     text_mcqs = await db.fetch(
-        "select q.id, q.question_text, q.options, q.correct_index, q.explanation, q.source_quote, s.heading"
+        "select q.id, q.section_id, q.question_text, q.options, q.correct_index, q.explanation, q.source_quote, s.heading"
         " from questions q left join doc_sections s on s.id = q.section_id"
-        " where q.document_id = $1 and q.kind = 'mcq' and q.image_id is null and q.reveal_image_id is null"
+        " where q.document_id = $1 and q.kind = 'mcq' and q.image_id is null"
+        " and q.reveal_image_id is null and q.video_url is null"
         " order by q.created_at",
         document_id,
     )
@@ -308,9 +359,7 @@ async def process_document(document_id: str) -> None:
 
 
 def start_more_questions(document_id: str) -> None:
-    task = asyncio.create_task(more_questions(document_id))
-    _running.add(task)
-    task.add_done_callback(_running.discard)
+    _track(document_id, asyncio.create_task(more_questions(document_id)))
 
 
 async def more_questions(document_id: str) -> None:

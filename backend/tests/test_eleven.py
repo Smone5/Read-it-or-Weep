@@ -621,13 +621,13 @@ def recordings(monkeypatch):
     async def recorded(key):
         return store.get(key)
 
-    async def record(key, voice, line, audio):
+    async def record(key, voice, line, audio, quiz_id=None):      # (a line is kept against its quiz)
         store[key] = audio
 
     async def bank_lines(bank):
         return [dict(row) for row in banks.get(bank, [])]
 
-    async def bank_add(bank, line):
+    async def bank_add(bank, line, quiz_id=None):
         banks.setdefault(bank, []).append({"id": len(banks.get(bank, [])) + 1, "line": line, "used_count": 1})
 
     async def bank_used(line_id):

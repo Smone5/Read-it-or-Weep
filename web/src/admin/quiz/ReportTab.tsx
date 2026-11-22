@@ -180,6 +180,7 @@ function Uploader() {
   const notify = useNotify()
   const quizId = detail.quiz.id
   const [busy, setBusy] = useState(false)
+  const [uploadStatus, setUploadStatus] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [over, setOver] = useState(false)
   const input = useRef<HTMLInputElement>(null)
@@ -189,40 +190,57 @@ function Uploader() {
   const upload = async (files: FileList | null) => {
     const chosen = files ? Array.from(files) : []
     if (chosen.length === 0 || disabled) return
-    if (chosen.length > 1) {
-      setError('Upload one file at a time.')
-      return
+    const valid: File[] = []
+    const rejected: string[] = []
+    for (const file of chosen) {
+      const extension = extensionOf(file.name)
+      if (!meta.extensions.includes(extension)) {
+        rejected.push(
+          extension === '.doc'
+            ? `${file.name}: old .doc format is not supported (save as .docx).`
+            : `${file.name}: unsupported type (use ${meta.extensions.join(', ')}).`,
+        )
+        continue
+      }
+      if (file.size === 0) {
+        rejected.push(`${file.name}: file is empty.`)
+        continue
+      }
+      if (file.size > MAX_UPLOAD_BYTES) {
+        rejected.push(`${file.name}: larger than 60 MB.`)
+        continue
+      }
+      valid.push(file)
     }
-    const file = chosen[0]
-    const extension = extensionOf(file.name)
-    if (!meta.extensions.includes(extension)) {
-      setError(
-        extension === '.doc'
-          ? 'Old-format .doc files are not supported. Open it in Word and save it as .docx.'
-          : `That file type is not supported. Use ${meta.extensions.join(', ')}.`,
-      )
-      return
-    }
-    if (file.size === 0) {
-      setError('That file is empty.')
-      return
-    }
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setError('That file is larger than 60 MB.')
+    if (valid.length === 0) {
+      setError(rejected.join(' '))
+      if (input.current) input.current.value = ''
       return
     }
     setBusy(true)
-    setError(null)
+    setError(rejected.length > 0 ? rejected.join(' ') : null)
+    let uploaded = 0
+    const failed: string[] = [...rejected]
     try {
-      const body = new FormData()
-      body.append('file', file)
-      const result = await call<{ documents: QuizDocument[] }>(`/quizzes/${quizId}/documents`, { method: 'POST', body })
-      setDocuments(result.documents)
-      notify(`${file.name} uploaded. Reading it now.`)
-    } catch (reason) {
-      setError(errorText(reason))
+      for (let i = 0; i < valid.length; i++) {
+        const file = valid[i]
+        setUploadStatus(valid.length > 1 ? `Uploading ${i + 1} of ${valid.length}: ${file.name}…` : `Uploading ${file.name}…`)
+        try {
+          const body = new FormData()
+          body.append('file', file)
+          const result = await call<{ documents: QuizDocument[] }>(`/quizzes/${quizId}/documents`, { method: 'POST', body })
+          setDocuments(result.documents)
+          uploaded += 1
+        } catch (reason) {
+          failed.push(`${file.name}: ${errorText(reason)}`)
+        }
+      }
+      if (uploaded === 1) notify(`${valid[0].name} uploaded. Reading it now.`)
+      else if (uploaded > 1) notify(`${uploaded} documents uploaded. Reading them now.`)
+      if (failed.length > 0) setError(failed.join(' '))
     } finally {
       setBusy(false)
+      setUploadStatus('')
       if (input.current) input.current.value = '' // so the same file can be chosen again
     }
   }
@@ -247,22 +265,23 @@ function Uploader() {
   return (
     <>
       <div className="ad-drop" data-over={over} onDragEnter={onDrag} onDragOver={onDrag} onDragLeave={onLeave} onDrop={onDrop}>
-        <p className="text-sm font-semibold">{busy ? 'Uploading…' : 'Drag the report here'}</p>
+        <p className="text-sm font-semibold">{busy ? uploadStatus || 'Uploading…' : 'Drag your report or packet files here'}</p>
         <button type="button" className="btn btn-primary" onClick={() => input.current?.click()} disabled={disabled}>
-          Choose a file
+          Choose file(s)
         </button>
         <input
           ref={input}
           type="file"
+          multiple
           hidden
           accept={meta.extensions.join(',')}
           disabled={disabled}
-          aria-label="Report file"
+          aria-label="Report files"
           onChange={(event) => void upload(event.target.files)}
         />
         <p className="max-w-xl text-xs text-muted">
           <strong>Word (.docx) is the main format</strong>: its headings become the quiz's sections, and its tables, charts and pictures are read
-          too.{others.length > 0 && ` Supporting material can also be added as ${others.join(', ')}.`} Up to 60 MB, one file at a time.
+          too.{others.length > 0 && ` Supporting material can also be added as ${others.join(', ')}.`} Up to 60 MB per file — drop multiple files to queue a full packet.
         </p>
       </div>
       {error && (
@@ -414,6 +433,14 @@ function DocumentCard({
               <ul className="mt-2 grid gap-1.5 text-sm">
                 {sections.map((section) => {
                   const vids = section.videos ?? 0
+                  const totalQ = section.total_questions ?? section.questions
+                  const pendingQ = Math.max(0, totalQ - section.questions)
+                  const countText =
+                    totalQ === 0
+                      ? 'no questions'
+                      : pendingQ > 0
+                        ? `${section.questions} live · ${pendingQ} pending`
+                        : plural(section.questions, 'question')
                   return (
                     <li key={section.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-surface-2 px-3 py-2">
                       <div className="min-w-0 flex-1">
@@ -433,11 +460,11 @@ function DocumentCard({
                         <Link
                           to={`${paths.quiz(quizId, 'questions')}?section=${encodeURIComponent(section.id)}`}
                           className="tabular-nums text-muted hover:underline"
-                          style={section.questions === 0 ? { color: 'var(--warn)', fontWeight: 600 } : undefined}
+                          style={totalQ === 0 ? { color: 'var(--warn)', fontWeight: 600 } : undefined}
                         >
-                          {section.questions === 0 ? 'no questions' : plural(section.questions, 'question')}
+                          {countText}
                         </Link>
-                        {section.questions > 0 && (
+                        {totalQ > 0 && (
                           <button
                             type="button"
                             className="btn btn-ghost btn-sm"

@@ -86,7 +86,7 @@ def parse_youtube(url: str | None, title: str | None = None) -> dict[str, Any] |
     watch_url = f"https://www.youtube.com/watch?v={vid}" + (f"&t={start}s" if start else "")
     embed_url = (
         None if external_only
-        else f"https://www.youtube-nocookie.com/embed/{vid}?rel=0&autoplay=1&enablejsapi=1" + (f"&start={start}" if start else "")
+        else f"https://www.youtube-nocookie.com/embed/{vid}?rel=0&autoplay=1&playsinline=1&enablejsapi=1" + (f"&start={start}" if start else "")
     )
     return {
         "provider": "youtube",

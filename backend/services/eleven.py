@@ -240,6 +240,10 @@ async def perform(text: str, voice: Voice, *, output_format: str = OUTPUT_FORMAT
     path = engine()
     voice_id = await account_voice_id(voice)
     model_id = model_for(voice)
+    # Eleven v3 (used by accent-sensitive voices like Southern Charmer) is served via the HTTP dialogue endpoint
+    # rather than the v4-turbo WebSocket stream.
+    if path == "socket" and model_id == "eleven_v3":
+        path = "dialogue"
     # Several games at once: the plan takes only so many lines at the same moment. The rest queue here for a free
     # slot, and a "busy" answer is tried again after a short pause rather than handed to the backup voice at once.
     for attempt in range(BUSY_RETRIES + 1):

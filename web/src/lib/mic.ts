@@ -18,7 +18,7 @@ export class Mic {
   /** Start capturing. `onChunk` receives 24 kHz 16-bit mono audio, about ten times a second. */
   async start(onChunk: (pcm: ArrayBuffer) => void): Promise<void> {
     const context = audioContext()
-    if (context.state === 'suspended') await context.resume()
+    if (context.state !== 'running') await context.resume()
     workletReady ??= context.audioWorklet.addModule('/mic-worklet.js').catch((error) => {
       workletReady = null // a hiccup loading it must not break the microphone for the rest of the visit
       throw error

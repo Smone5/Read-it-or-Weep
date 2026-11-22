@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { ErrorNote } from '../../components/ui'
 import { call, errorText } from '../api'
 import { ChoiceGroup, Dialog, DialogActions, Field, Note, Segmented, Switch } from '../components'
-import type { Difficulty, PictureMode, Question, QuestionKind, QuestionPatch, QuestionWrite, QuizImage, Suggestion } from '../types'
+import type { Difficulty, PictureMode, Question, QuestionKind, QuestionPatch, QuestionStatus, QuestionWrite, QuizImage, Suggestion } from '../types'
 import { useQuiz } from './context'
 import { LETTERS } from './questions'
 import { YouTubePicker } from './YouTubePicker'
@@ -28,8 +28,7 @@ type Form = {
   revealImageId: string
   difficulty: Difficulty
   pinned: boolean
-  /** New questions only: go live straight away, or wait for review. */
-  live: boolean
+  status: QuestionStatus
   title: string
   explanation: string
   videoUrl: string
@@ -49,7 +48,7 @@ function initialForm(question: Question | null): Form {
       revealImageId: '',
       difficulty: 'medium',
       pinned: false,
-      live: true,
+      status: 'approved',
       title: '',
       explanation: '',
       videoUrl: '',
@@ -69,7 +68,7 @@ function initialForm(question: Question | null): Form {
     revealImageId: question.revealImageId ?? '',
     difficulty: question.difficulty,
     pinned: question.pinned,
-    live: question.status === 'approved',
+    status: question.status,
     title: question.title ?? '',
     explanation: question.explanation ?? '',
     videoUrl: question.videoUrl ?? '',
@@ -111,6 +110,8 @@ function patchFrom(question: Question, form: Form): QuestionPatch {
   if (form.videoUrl.trim() !== (question.videoUrl ?? '')) patch.videoUrl = form.videoUrl.trim()
   if (form.videoTitle.trim() !== (question.videoTitle ?? '')) patch.videoTitle = form.videoTitle.trim()
   if (form.difficulty !== question.difficulty) patch.difficulty = form.difficulty
+  if (form.pinned !== question.pinned) patch.pinned = form.pinned
+  if (form.status !== question.status) patch.status = form.status
   if ((form.sectionId || null) !== question.sectionId) patch.sectionId = form.sectionId || null
   if (question.kind === 'mcq') {
     if ((form.imageId || null) !== question.imageId) patch.imageId = form.imageId || null
@@ -136,6 +137,17 @@ const KINDS = [
   { value: 'mcq', label: 'Multiple choice' },
   { value: 'fact_fake', label: 'Fact or Fake' },
 ] as const
+
+const STATUS_EDIT: { value: QuestionStatus; label: string }[] = [
+  { value: 'approved', label: 'Live' },
+  { value: 'pending', label: 'Pending' },
+  { value: 'rejected', label: 'Rejected' },
+]
+
+const STATUS_ADD: { value: QuestionStatus; label: string }[] = [
+  { value: 'approved', label: 'Live straight away' },
+  { value: 'pending', label: 'Waiting for review' },
+]
 
 const VERDICTS = [
   { value: 'fact', label: 'Fact', description: 'The statement is true according to the report.' },
@@ -272,10 +284,10 @@ export default function QuestionEditor({
           imageId: mcq ? form.imageId || null : null, // the game never shows a picture with a Fact-or-Fake statement
           revealImageId: mcq && !form.imageId ? form.revealImageId || null : null,
           pinned: form.pinned,
-          status: form.live ? 'approved' : 'pending',
+          status: form.status,
         }
         await call<{ id: string }>(`/quizzes/${quizId}/questions`, { method: 'POST', body })
-        onSaved(form.live ? 'Question added. It is live.' : 'Question added. It is waiting for review.')
+        onSaved(form.status === 'approved' ? 'Question added. It is live.' : 'Question added. It is waiting for review.')
       }
     } catch (reason) {
       setError(errorText(reason))
@@ -409,7 +421,7 @@ export default function QuestionEditor({
         )}
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Section of the report" hint="A player clears a section by getting one of its questions right, which is what makes them “ready”.">
+          <Field label="Section of the report" hint="A player clears a section by hitting ≥75% across their last 4 answers in it (including at least 1 multiple-choice question).">
             {(props) => (
               <select className="field" {...props} value={form.sectionId} onChange={(event) => set({ sectionId: event.target.value })}>
                 <option value="">No particular section</option>
@@ -517,24 +529,32 @@ export default function QuestionEditor({
           onChange={({ videoUrl, videoTitle }) => set({ videoUrl, videoTitle })}
         />
 
-        {adding && (
-          <div className="grid gap-x-6 sm:grid-cols-2">
-            <Switch
-              checked={form.pinned}
-              onChange={(pinned) => set({ pinned })}
-              label="Pin as a must-ask"
-              description="Pinned questions are asked before the others."
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <span className="label">Status</span>
+            <Segmented
+              label="Question status"
+              options={adding ? STATUS_ADD : STATUS_EDIT}
+              value={form.status}
+              onChange={(status) => set({ status })}
               disabled={busy}
             />
-            <Switch
-              checked={form.live}
-              onChange={(live) => set({ live })}
-              label="Put it live straight away"
-              description="Turn off to save it as waiting for review."
-              disabled={busy}
-            />
+            <p className="mt-1 text-xs text-muted">
+              {form.status === 'approved'
+                ? 'Live questions can be asked in games (approving also clears player flags).'
+                : form.status === 'pending'
+                  ? 'Held in review — players will not see it until approved.'
+                  : 'Rejected — kept for reference but never asked.'}
+            </p>
           </div>
-        )}
+          <Switch
+            checked={form.pinned}
+            onChange={(pinned) => set({ pinned })}
+            label="Pin as a must-ask"
+            description="Pinned questions are asked before the others."
+            disabled={busy}
+          />
+        </div>
 
         <ErrorNote>{error}</ErrorNote>
 

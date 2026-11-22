@@ -47,12 +47,24 @@ def _read(token: str, kind: str) -> dict[str, Any]:
     return payload
 
 
-def issue_player_token(player_id: str) -> str:
-    return _issue("player", player_id, PLAYER_TOKEN_DAYS * 86400)
+def issue_player_token(player_id: str, quiz_grants: list[str] | set[str] | None = None) -> str:
+    claims: dict[str, Any] = {}
+    if quiz_grants:
+        # Cap at 40 most-recent restricted quiz grants so JWT headers stay compact.
+        grants = list(dict.fromkeys(str(g) for g in quiz_grants if g))[-40:]
+        claims["q"] = grants
+    return _issue("player", player_id, PLAYER_TOKEN_DAYS * 86400, **claims)
+
+
+def read_player_claims(token: str) -> tuple[str, set[str]]:
+    payload = _read(token, "player")
+    raw_grants = payload.get("q")
+    grants = {str(g) for g in raw_grants} if isinstance(raw_grants, list) else set()
+    return str(payload["sub"]), grants
 
 
 def read_player_token(token: str) -> str:
-    return _read(token, "player")["sub"]
+    return read_player_claims(token)[0]
 
 
 def issue_admin_token(admin_id: str) -> str:

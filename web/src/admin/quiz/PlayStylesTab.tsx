@@ -455,8 +455,9 @@ export default function PlayStylesTab() {
           <div>
             {numberField(READY_THRESHOLD)}
             <p className="mt-1 text-xs text-muted">
-              Someone counts as <Badge tone="good">Ready</Badge> once they have cleared this share of the report's sections. A section is cleared by
-              answering one of its questions correctly.
+              Someone counts as <Badge tone="good">Ready</Badge> once they have cleared this share of the report's sections. A section is cleared
+              once they hit at least 75% across their last 4 answers in that section (including at least 1 multiple-choice question; Speed Run does
+              not affect readiness).
             </p>
           </div>
           <Switch

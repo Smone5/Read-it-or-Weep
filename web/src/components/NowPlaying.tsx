@@ -5,6 +5,7 @@
 
 import { useEffect, useId, useRef, useState } from 'react'
 import { musicVolume, nextJukeboxSong, onJukeboxChange, onMusicVolumeChange, setMusicOn, setMusicVolume, toggleJukebox, type JukeboxState } from '../lib/jukebox'
+import { unlockAudio } from '../lib/sound'
 import type { PartyTrack } from '../lib/types'
 import { IconExternal, IconHeart, IconPause, IconPlay, IconSkip, IconSoundOff, IconSoundOn } from './Icons'
 
@@ -69,7 +70,7 @@ export function MusicToggle({ showSong = true }: { showSong?: boolean }) {
       </button>
       {open && (
         <div
-          className={`card rise absolute right-0 z-[60] w-64 p-3.5 text-left ${openUp ? 'bottom-full mb-2' : 'top-full mt-2'}`}
+          className={`card rise absolute right-0 z-[60] max-h-[min(78dvh,20rem)] w-64 max-w-[calc(100vw-1.5rem)] overflow-y-auto p-3.5 text-left ${openUp ? 'bottom-full mb-2' : 'top-full mt-2'}`}
           role="dialog"
           aria-label="Background music"
         >
@@ -102,16 +103,27 @@ export function MusicToggle({ showSong = true }: { showSong?: boolean }) {
             max={100}
             step={5}
             value={level}
-            onChange={(event) => setMusicVolume(Number(event.target.value))}
+            onChange={(event) => {
+              const next = Number(event.target.value)
+              if (next > 0) unlockAudio()
+              setMusicVolume(next)
+            }}
             aria-valuetext={words}
-            className="mt-1 min-h-[40px] w-full cursor-pointer"
+            className="mt-1 min-h-[44px] w-full cursor-pointer"
             style={{ accentColor: 'var(--accent)' }}
           />
           <div className="-mt-1 flex justify-between text-[12px] text-muted" aria-hidden>
             <span>Off</span>
             <span>Loud</span>
           </div>
-          <button type="button" className="btn btn-ghost btn-sm mt-3 w-full" onClick={() => setMusicOn(!on)}>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm mt-3 w-full"
+            onClick={() => {
+              if (!on) unlockAudio()
+              setMusicOn(!on)
+            }}
+          >
             {on ? 'Turn music off' : 'Turn music on'}
           </button>
         </div>
@@ -188,7 +200,6 @@ export function NowPlaying({ decade, large, subtle }: { decade?: string | null; 
             <button type="button" className="btn btn-ghost btn-sm flex-none" onClick={nextJukeboxSong} aria-label="Next song">
               <IconSkip size={14} />
             </button>
-            <MusicToggle showSong={false} />
           </div>
         </div>
       </section>

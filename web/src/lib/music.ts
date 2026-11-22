@@ -6,7 +6,7 @@
 // (The music that plays behind the questions and the results is the jukebox's, in jukebox.ts.
 // It listens to this module only to know when the host has the floor.)
 
-import { audioContext } from './sound'
+import { audioContext, onSoundChange, soundOn } from './sound'
 import { trace } from './trace'
 
 let element: HTMLAudioElement | null = null
@@ -17,6 +17,8 @@ let element: HTMLAudioElement | null = null
 let clipGain: GainNode | null = null
 let clipLevel = 1
 let silentUrl: string | null = null
+let playEpoch = 0
+let soundSubscribed = false
 
 function silence(): string {
   if (silentUrl) return silentUrl
@@ -42,6 +44,12 @@ function silence(): string {
 }
 
 export function musicElement(): HTMLAudioElement {
+  if (!soundSubscribed) {
+    soundSubscribed = true
+    onSoundChange((on) => {
+      if (!on) stopMusic()
+    })
+  }
   if (!element) {
     element = new Audio()
     element.crossOrigin = 'anonymous' // Web Audio only hears a clip from another site when it is fetched with CORS
@@ -67,17 +75,20 @@ function setLevel(audio: HTMLAudioElement, value: number) {
     return
   }
   clipLevel = value
-  clipGain.gain.setTargetAtTime(value, clipGain.context.currentTime, 0.015)
+  const now = clipGain.context.currentTime
+  clipGain.gain.cancelScheduledValues(now)
+  clipGain.gain.setTargetAtTime(value, now, 0.015)
 }
 
 function unlock(audio: HTMLAudioElement) {
-  if (audio.dataset.unlocked) return
+  if (audio.dataset.unlocked || audio.dataset.clip) return
+  const epoch = ++playEpoch
   audio.muted = true
   audio.src = silence()
   audio
     .play()
     .then(() => {
-      audio.pause()
+      if (epoch === playEpoch && !audio.dataset.clip) audio.pause()
       audio.dataset.unlocked = 'true'
     })
     .catch(() => undefined)
@@ -222,7 +233,13 @@ export function preloadClip(src: string) {
 
 /** Play a music clip, swelling in rather than slamming in. Rejects if the browser wants a tap first. */
 export async function playClip(src: string): Promise<void> {
+  if (!soundOn()) {
+    stopMusic()
+    return
+  }
+  playEpoch += 1
   const audio = musicElement()
+  audio.muted = false
   setClip(audio, src)
   try {
     audio.currentTime = 0
@@ -247,7 +264,9 @@ export async function playClip(src: string): Promise<void> {
 }
 
 export function resumeClip(): Promise<void> {
+  if (!soundOn()) return Promise.resolve()
   const audio = musicElement()
+  if (clipGain && clipGain.context.state !== 'running') void (clipGain.context as AudioContext).resume().catch(() => undefined)
   heldForHost = false
   startRiding()
   return audio.play()

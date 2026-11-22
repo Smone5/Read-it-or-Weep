@@ -289,22 +289,86 @@ def _clean_mix(given: Any) -> dict:
     return mix
 
 
+def _clamp_int(given: Any, default: int, low: int, high: int) -> int:
+    try:
+        return max(low, min(high, int(given)))
+    except (TypeError, ValueError):
+        return default
+
+
 def clean_game(value: dict) -> dict:
+    defaults = DEFAULTS["game"]
     modes = [m for m in value.get("modes") or [] if m in MODES] or ["show"]
     value["modes"] = modes
     value["default_mode"] = value.get("default_mode") if value.get("default_mode") in modes else modes[0]
-    value["decades"] = [d for d in value.get("decades") or [] if d in ALL_DECADES] or DEFAULTS["game"]["decades"]
+    value["decades"] = [d for d in value.get("decades") or [] if d in ALL_DECADES] or defaults["decades"]
     if value.get("question_sources") not in ("all", "manual", "ai"):
         value["question_sources"] = "all"
     if value.get("picture_mode") not in ("auto", "show", "memory"):
         value["picture_mode"] = "auto"
     if value.get("soundtrack_volume") not in ("quiet", "medium", "loud"):
         value["soundtrack_volume"] = "medium"
+    value["ready_threshold"] = _clamp_int(value.get("ready_threshold"), defaults["ready_threshold"], 1, 100)
     value["mix"] = _clean_mix(value.get("mix"))
     raw_url = str(value.get("report_url") or "").strip()[:500]
     value["report_url"] = raw_url if re.match(r"^https?://\S+$", raw_url, re.I) else None
     for flag in ("allow_download", "unlisted", "confidential_voice", "purge_source_after_process"):
         value[flag] = bool(value.get(flag, False))
+
+    show_in = value.get("show") if isinstance(value.get("show"), dict) else {}
+    show_def = defaults["show"]
+    ll_in = show_in.get("lifelines") if isinstance(show_in.get("lifelines"), dict) else {}
+    ll_def = show_def["lifelines"]
+    value["show"] = {
+        "questions": _clamp_int(show_in.get("questions"), show_def["questions"], 3, 30),
+        "music_rounds": _clamp_int(show_in.get("music_rounds"), show_def["music_rounds"], 0, 5),
+        "lightning_items": _clamp_int(show_in.get("lightning_items"), show_def["lightning_items"], 0, 20),
+        "second_chance": _clamp_int(show_in.get("second_chance"), show_def["second_chance"], 0, 5),
+        "final_wager": bool(show_in.get("final_wager", show_def["final_wager"])),
+        "timer_sec": _clamp_int(show_in.get("timer_sec"), show_def["timer_sec"], 10, 120),
+        "picture_timer_sec": _clamp_int(show_in.get("picture_timer_sec"), show_def["picture_timer_sec"], 10, 180),
+        "lifelines": {
+            "fifty": _clamp_int(ll_in.get("fifty"), ll_def["fifty"], 0, 5),
+            "peek": _clamp_int(ll_in.get("peek"), ll_def["peek"], 0, 5),
+            "hint": _clamp_int(ll_in.get("hint"), ll_def["hint"], 0, 5),
+        },
+    }
+
+    sd_in = value.get("sudden_death") if isinstance(value.get("sudden_death"), dict) else {}
+    sd_def = defaults["sudden_death"]
+    sd_start = _clamp_int(sd_in.get("timer_start_sec"), sd_def["timer_start_sec"], 10, 120)
+    sd_min = _clamp_int(sd_in.get("timer_min_sec"), sd_def["timer_min_sec"], 5, min(60, sd_start))
+    value["sudden_death"] = {
+        "strikes": _clamp_int(sd_in.get("strikes"), sd_def["strikes"], 1, 9),
+        "timer_start_sec": sd_start,
+        "timer_min_sec": sd_min,
+        "music_every": _clamp_int(sd_in.get("music_every"), sd_def["music_every"], 3, 20),
+        "max_questions": _clamp_int(sd_in.get("max_questions"), sd_def["max_questions"], 5, 200),
+    }
+
+    sp_in = value.get("speed") if isinstance(value.get("speed"), dict) else {}
+    sp_def = defaults["speed"]
+    value["speed"] = {
+        "clock_sec": _clamp_int(sp_in.get("clock_sec"), sp_def["clock_sec"], 30, 600),
+        "wrong_penalty_sec": _clamp_int(sp_in.get("wrong_penalty_sec"), sp_def["wrong_penalty_sec"], 0, 30),
+    }
+
+    st_in = value.get("straight") if isinstance(value.get("straight"), dict) else {}
+    st_def = defaults["straight"]
+    value["straight"] = {
+        "per_section": _clamp_int(st_in.get("per_section"), st_def["per_section"], 1, 10),
+        "max_questions": _clamp_int(st_in.get("max_questions"), st_def["max_questions"], 3, 100),
+        "pass_mark": _clamp_int(st_in.get("pass_mark"), st_def["pass_mark"], 1, 100),
+    }
+
+    lv_in = value.get("live") if isinstance(value.get("live"), dict) else {}
+    lv_def = defaults["live"]
+    value["live"] = {
+        "questions": _clamp_int(lv_in.get("questions"), lv_def["questions"], 3, 50),
+        "timer_sec": _clamp_int(lv_in.get("timer_sec"), lv_def["timer_sec"], 5, 120),
+        "music_rounds": _clamp_int(lv_in.get("music_rounds"), lv_def["music_rounds"], 0, 5),
+        "head_start": _clamp_int(lv_in.get("head_start"), lv_def["head_start"], 0, 5000),
+    }
     return value
 
 

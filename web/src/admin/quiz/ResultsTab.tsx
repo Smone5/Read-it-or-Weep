@@ -67,6 +67,7 @@ export default function ResultsTab() {
   const answering = people.filter((person) => person.answered > 0)
   const averageAccuracy = answering.length ? Math.round(answering.reduce((sum, person) => sum + person.accuracy, 0) / answering.length) : null
   const games = people.reduce((sum, person) => sum + person.games, 0)
+  const hasAnyResults = people.length > 0 || detail.overview.games > 0 || (detail.overview.live_sessions ?? 0) > 0
 
   return (
     <div className="grid gap-5">
@@ -79,7 +80,7 @@ export default function ResultsTab() {
           <button type="button" className="btn btn-ghost" onClick={refreshNow} disabled={refreshing}>
             {refreshing ? 'Refreshing…' : 'Refresh'}
           </button>
-          {people.length > 0 && (
+          {hasAnyResults && (
             <button type="button" className="btn btn-ghost" onClick={() => { setResetError(null); setAskingReset(true) }}>
               {quiz.status === 'draft' ? 'Clear test results' : 'Reset results'}
             </button>
@@ -159,7 +160,7 @@ const COLUMNS: { key: SortKey; label: string; numeric?: boolean; title?: string 
   { key: 'name', label: 'Name' },
   { key: 'team', label: 'Team' },
   { key: 'readiness', label: 'Readiness' },
-  { key: 'sectionsCleared', label: 'Sections cleared', numeric: true, title: 'Sections where they have answered at least one question correctly' },
+  { key: 'sectionsCleared', label: 'Sections cleared', numeric: true, title: 'Sections cleared (≥75% across their last 4 answers, including at least 1 multiple-choice question; Speed Run excluded)' },
   { key: 'accuracy', label: 'Accuracy', numeric: true, title: 'Report questions answered correctly' },
   { key: 'games', label: 'Games', numeric: true },
   { key: 'bestScore', label: 'Best score', numeric: true },

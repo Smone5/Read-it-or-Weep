@@ -214,12 +214,20 @@ _SOUTHERN_PLAIN_SHAPES = (
 _TAG = re.compile(r"\[[^\[\]]{0,60}\]")
 
 
+def _strip_outer_quotes(text: str) -> str:
+    """Remove only balanced wrapping quotes so trailing apostrophes like darlin' stay intact."""
+    text = text.strip()
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return text
+
+
 def spoken_text(line: str) -> str:
     """A written line as it is heard: the delivery tags taken out (that is what the host box shows)."""
     text = _TAG.sub(" ", line)
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\s+([,!?]|\.(?!\.))", r"\1", text)      # "Sam !" -> "Sam!", but a "..." keeps its space
-    return text.strip(" \"'")
+    return _strip_outer_quotes(text)
 
 
 def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, room: bool = False,
@@ -380,12 +388,14 @@ def resolve_voice(voice: str, *, allow_eleven: bool = True) -> dict:
     return {"engine": "realtime", "voice": voice}
 
 
-def open_voice(instructions: str, host: dict, speak: bool) -> "AnyVoice":
+def open_voice(instructions: str, host: dict, speak: bool, *, quiz_id: str | None = None) -> "AnyVoice":
     """The voice session for a host, as persona() described it."""
     pace = host.get("pace", "snappy")
     if host.get("engine") == "eleven":
         return WrittenHostVoice(instructions, eleven.BY_ID[host["voice"]], speak, pace=pace,
                                 manner=host.get("manner") or DEFAULT_MANNER,
+                                style=host.get("style") or "",
+                                quiz_id=quiz_id,
                                 budget=int(host.get("voice_budget", settings_store.DEFAULTS["host"]["voice_budget"])))
     return HostVoice(instructions, host["voice"], speak, model=voice_model(host), pace=pace)
 
@@ -463,7 +473,7 @@ def _how_it_works(run: dict, rules: dict, rounds: list[str]) -> str:
         return (f"{int(cfg['clock_sec'])} seconds on one clock for the whole game, as many answers as they can manage. "
                 f"A wrong answer costs {int(cfg['wrong_penalty_sec'])} seconds.")
     cfg = rules["straight"]
-    return (f"No clock, no jokes, no tricks: questions from every section of the report, and {int(cfg['pass_mark'])}% "
+    return (f"No clock, no jokes, no tricks: questions from every section of the reading, and {int(cfg['pass_mark'])}% "
             "to pass.")
 
 
@@ -653,7 +663,7 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
         if final_row and final_row["wager"]:
             wager_note = (f" They {'won' if final_row['is_correct'] else 'lost'} their {final_row['wager']}-point "
                           "Final Wager.")
-        return (f"The game is over. {name} scored {run['score']} points and got {accuracy}% of the report questions right "
+        return (f"The game is over. {name} scored {run['score']} points and got {accuracy}% of the quiz questions right "
                 f"(best streak {run['streak_max']}), earning the title '{run['badge']}'. The title is on their screen."
                 f"{screen}{wager_note} Sign off, speaking to them directly (\"you\"), in three short beats: the title, announced like an "
                 "award; one last joke; then the show's name as your very last words, like the end of a broadcast - the "
@@ -765,7 +775,7 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
         # Inspect recent prior answers so the host knows if a hot streak just snapped or if they are on a cold run.
         prev_rows = await db.fetch(
             "select is_correct from run_items where run_id = $1 and answered_at is not null and id <> $2"
-            " and slot <> 'fact_fake' order by position desc limit 8", run["id"], item["id"])
+            " and slot not in ('fact_fake', 'second_chance') order by position desc limit 8", run["id"], item["id"])
         prev_streak = 0
         prev_wrong = 0
         for row in prev_rows:
@@ -818,17 +828,23 @@ async def _recorded(key: str) -> bytes | None:
     return bytes(row["audio"]) if row else None
 
 
-async def _record(key: str, voice: "eleven.Voice", line: str, audio: bytes) -> None:
-    await db.execute("insert into host_line_audio (key, voice, line, audio, seconds) values ($1, $2, $3, $4, $5)"
-                     " on conflict (key) do nothing", key, voice.id, line, audio, len(audio) / 2 / SAMPLE_RATE)
+async def _record(key: str, voice: "eleven.Voice", line: str, audio: bytes, quiz_id: str | None = None) -> None:
+    await db.execute(
+        "insert into host_line_audio (key, voice, line, audio, seconds, quiz_id) values ($1, $2, $3, $4, $5, $6)"
+        " on conflict (key) do nothing",
+        key, voice.id, line, audio, len(audio) / 2 / SAMPLE_RATE, quiz_id,
+    )
 
 
 async def _bank_lines(bank: str) -> list[dict]:
     return [dict(r) for r in await db.fetch("select id, line, used_count from host_line_bank where bank = $1", bank)]
 
 
-async def _bank_add(bank: str, line: str) -> None:
-    await db.execute("insert into host_line_bank (bank, line, used_count) values ($1, $2, 1)", bank, line)
+async def _bank_add(bank: str, line: str, quiz_id: str | None = None) -> None:
+    await db.execute(
+        "insert into host_line_bank (bank, line, used_count, quiz_id) values ($1, $2, 1, $3)",
+        bank, line, quiz_id,
+    )
 
 
 async def _bank_used(line_id: int) -> None:
@@ -943,6 +959,7 @@ class TightEdit:
 
     FRAME = int(SAMPLE_RATE * 0.02) * 2          # 20 ms of 16-bit mono audio, in bytes
     RELEASE = int(SAMPLE_RATE * 0.06) * 2        # kept after the last word, so it dies away rather than snapping off
+    XFADE_SAMPLES = int(SAMPLE_RATE * 0.012)     # 12 ms linear crossfade at pause splices to prevent clicks
 
     def __init__(self, pause_cap_sec: float | None):
         self.cap = None if pause_cap_sec is None else int(SAMPLE_RATE * pause_cap_sec) * 2
@@ -961,7 +978,8 @@ class TightEdit:
             frame = data[start:start + self.FRAME]
             samples = np.frombuffer(frame, dtype=np.int16).astype(np.float32)
             level = float(np.sqrt(np.mean(samples * samples))) / 32768
-            self.loudest = max(self.loudest, level)
+            # Slowly decay peak envelope per frame so a loud shout early in a line never gates quieter punchlines later.
+            self.loudest = max(level, self.loudest * 0.995)
             if level > max(0.006, 0.03 * self.loudest):
                 out += self._release()
                 out += frame
@@ -973,8 +991,8 @@ class TightEdit:
     def _release(self) -> bytes:
         """The silence that was held back, now that talking has resumed - shortened if it was a long one.
 
-        Both ends are kept and the middle removed, so the word before still dies away naturally and the
-        next one still starts cleanly.
+        Both ends are kept and the middle removed with a 12 ms linear crossfade so the word before dies away
+        naturally and the splice never clicks.
         """
         held = bytes(self.held)
         self.held.clear()
@@ -983,7 +1001,19 @@ class TightEdit:
         if self.cap is None or len(held) <= self.cap:
             return held
         half = self.cap // 2 - (self.cap // 2) % 2
-        return held[:half] + held[len(held) - half:]
+        head = held[:half]
+        tail = held[len(held) - half:]
+        xfade = min(self.XFADE_SAMPLES, len(head) // 2, len(tail) // 2)
+        if xfade <= 0:
+            return head + tail
+        xfade_bytes = xfade * 2
+        a = np.frombuffer(head[-xfade_bytes:], dtype=np.int16).astype(np.float32)
+        b = np.frombuffer(tail[:xfade_bytes], dtype=np.int16).astype(np.float32)
+        ramp = np.linspace(0.0, 1.0, xfade, dtype=np.float32)
+        mixed = np.clip(np.rint(a * (1.0 - ramp) + b * ramp), -32768, 32767).astype(np.int16).tobytes()
+        # Pad the remaining half-crossfade symmetrically from the cut boundaries to preserve exact self.cap length.
+        pad = xfade_bytes // 2 - (xfade_bytes // 2) % 2
+        return head[:-xfade_bytes + pad] + mixed + tail[xfade_bytes - (xfade_bytes - pad):]
 
     def finish(self) -> bytes:
         """The line is over: what is left to send (a short release - not the silence after it)."""
@@ -1044,6 +1074,18 @@ class HostVoice:
 
     async def forget_heard(self) -> None:
         await self._connection.input_audio_buffer.clear()
+
+    async def set_speak(self, enabled: bool) -> None:
+        """Toggle spoken audio on/off mid-session without tearing down the realtime connection."""
+        if self.speak == enabled:
+            return
+        self.speak = enabled
+        if self._connection is not None:
+            try:
+                await self._connection.session.update(session=self._session(with_speed=True))
+            except Exception:  # noqa: BLE001
+                with contextlib.suppress(Exception):
+                    await self._connection.session.update(session=self._session(with_speed=False))
 
     async def interrupt(self) -> None:
         """Stop the line being spoken (the contestant has started talking)."""
@@ -1136,7 +1178,7 @@ def tidy_line(line: str) -> str:
     The writer has been seen to return its line twice, back to back, and to add its own word count or stray
     characters after it. Whatever produced that, the host must never say it.
     """
-    line = re.sub(r"\s+", " ", line).strip().strip("\"'")
+    line = _strip_outer_quotes(re.sub(r"\s+", " ", line))
     for pattern in (_FOREIGN, _LEAKS):
         found = pattern.search(line)
         if found:
@@ -1180,11 +1222,14 @@ class WrittenHostVoice:
     KEEP = 40                     # messages remembered besides the brief: enough not to repeat a joke
 
     def __init__(self, instructions: str, voice: eleven.Voice, speak: bool, *, pace: str = "snappy",
-                 manner: str = DEFAULT_MANNER, budget: int = 0):
+                 manner: str = DEFAULT_MANNER, style: str = "", quiz_id: str | None = None, budget: int = 0):
         self.instructions = instructions
         self.voice = voice
         self.speak = speak
+        self.pace = pace
         self.manner = manner
+        self.style = style
+        self.quiz_id = quiz_id
         self.pause_cap = WRITTEN_PAUSE_CAP_SEC.get(pace, WRITTEN_PAUSE_CAP_SEC["snappy"])
         self.history: list[dict] = []
         self.heard = bytearray()
@@ -1194,6 +1239,9 @@ class WrittenHostVoice:
         self.budget = budget      # % of the month's plan after which new lines use the backup voice (0: no guard)
         self.last_by = ""         # who performed the last line: "eleven", "backup" or "replay"
         self.timings: list[dict] = []
+
+    async def set_speak(self, enabled: bool) -> None:
+        self.speak = enabled
 
     async def __aenter__(self) -> "WrittenHostVoice":
         return self
@@ -1247,9 +1295,13 @@ class WrittenHostVoice:
                 pick = min(lines, key=lambda line: (line["used_count"], random.random()))
                 await _bank_used(pick["id"])
                 return pick["line"]
-            line = await self._write([{"role": "user", "content": direction}])
+            prompt = direction
+            if lines:
+                earlier = "\n".join(f"- {spoken_text(l['line'])}" for l in lines)
+                prompt = f"{direction}\nDo not repeat or closely echo these earlier intros:\n{earlier}"
+            line = await self._write([{"role": "user", "content": prompt}])
             if line:
-                await _bank_add(bank, line)
+                await _bank_add(bank, line, quiz_id=self.quiz_id)
             return line
         except Exception as exc:  # noqa: BLE001 - the set is a saving; without it he says the line live
             log.warning("round introduction set unavailable: %s", exc)
@@ -1329,9 +1381,13 @@ class WrittenHostVoice:
     async def _backup(self, words: str) -> AsyncIterator[bytes]:
         """The OpenAI voice that stands in for this one, performing the line from its words."""
         speech_voice = _SPEECH_VOICE.get(self.voice.fallback, self.voice.fallback)
+        sound_notes = MANNERS.get(self.manner, MANNERS[DEFAULT_MANNER])["sound"]
+        if self.style:
+            sound_notes = f"{sound_notes}\nCharacter notes: {self.style}"
+        speed = PACE_SPEED.get(self.pace, 1.0)
         async with llm.client().audio.speech.with_streaming_response.create(
                 model=config.model_speech, voice=speech_voice, input=words,
-                instructions=MANNERS.get(self.manner, MANNERS[DEFAULT_MANNER])["sound"],
+                instructions=sound_notes, speed=speed,
                 response_format="pcm") as response:
             async for chunk in response.iter_bytes():
                 yield chunk
@@ -1413,7 +1469,7 @@ class WrittenHostVoice:
         # Only a whole line, in the real voice, is kept (never the backup voice standing in, never a line cut short).
         if key and kept and not self.stopped and self.last_by == "eleven" and len(kept) <= KEEP_UP_TO_SEC * SAMPLE_RATE * 2:
             try:
-                await _record(key, self.voice, line, bytes(kept))
+                await _record(key, self.voice, line, bytes(kept), quiz_id=self.quiz_id)
             except Exception as exc:  # noqa: BLE001
                 log.warning("could not record a line: %s", exc)
 

@@ -79,6 +79,7 @@ export type Item = {
   hint: string | null
   hintRefunded?: boolean
   peek: string | null
+  canPeek?: boolean
   /** Dealt but not yet shown: only the round is known until the game asks to open it. */
   sealed?: boolean
   needsWager?: boolean
@@ -106,10 +107,14 @@ export type RunState = {
   lifelines: Record<string, number>
   remaining: number | null
   nextRound: string | null
+  passMark?: number
+  reportAnswered?: number
+  reportCorrect?: number
   strikes?: number
   maxStrikes?: number
   /** Speed Run: the length of the clock, and (once the first question has opened) when it runs out. */
   clockSec?: number
+  wrongPenaltySec?: number
   deadlineAt?: string
   remainingMs?: number
 }
@@ -147,6 +152,7 @@ export type Reveal = {
   music?: { artist: string; title: string; artworkUrl: string | null; trackUrl: string | null; previewUrl?: string }
   video?: VideoClip | null
   strikeRestored?: boolean
+  breakdown?: { speed?: number; streak?: number; penaltySec?: number }
 }
 
 /** One song of the music that plays behind a game and its results. */
@@ -233,6 +239,7 @@ export type LeaderboardEntry = {
   you: boolean
   gapToNext?: number
   aheadName?: string
+  tied?: boolean
 }
 
 export type PlayerRunRecord = {
@@ -293,11 +300,11 @@ export type LiveState = {
   role: 'host' | 'player'
   decade: string | null
   you?: { name: string; score: number; rank: number; streak: number; headStart: number; gapToNext?: number; aheadName?: string } | null
-  roster?: { name: string; team: string | null; prepared: boolean }[]
+  roster?: { id?: string; name: string; team: string | null; prepared: boolean }[]
   headStart?: number
   question?: LiveQuestion
   answersIn?: number
-  yourAnswer?: { selectedIndex: number | null; correct?: boolean; points?: number }
+  yourAnswer?: { selectedIndex: number | null; correct?: boolean; points?: number; timeMs?: number | null; isFastest?: boolean }
   reveal?: {
     correctIndex: number
     counts: number[]

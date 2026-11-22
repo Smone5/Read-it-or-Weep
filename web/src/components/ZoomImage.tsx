@@ -288,12 +288,9 @@ export function PictureViewer({ src, alt, secondsLeft, caption, onClose }: Viewe
     const onResize = () => setUpright(window.innerHeight > window.innerWidth * 1.15)
     window.addEventListener('resize', onResize)
     media.addEventListener('change', onMedia)
-    const scroll = document.documentElement.style.overflow
-    document.documentElement.style.overflow = 'hidden'
     return () => {
       window.removeEventListener('resize', onResize)
       media.removeEventListener('change', onMedia)
-      document.documentElement.style.overflow = scroll
       if (dialog?.open) dialog.close()
     }
   }, [])
@@ -326,8 +323,8 @@ export function PictureViewer({ src, alt, secondsLeft, caption, onClose }: Viewe
           <span
             className="pixel rounded-sm border-2 bg-black/85 px-3 py-2 text-sm tabular-nums"
             style={{
-              borderColor: secondsLeft <= 5 ? 'var(--bad)' : 'var(--accent)',
-              color: secondsLeft <= 5 ? 'var(--bad)' : 'var(--accent)',
+              borderColor: secondsLeft <= 5 ? '#ff4d6d' : '#ffb020',
+              color: secondsLeft <= 5 ? '#ff4d6d' : '#ffb020',
             }}
             role="timer"
             aria-label="Time left"

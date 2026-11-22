@@ -227,6 +227,8 @@ def _picture_mode(rules: dict, question: dict) -> str:
     setting = rules.get("picture_mode", "show")
     if setting == "memory":
         return "memory"
+    if setting == "auto":
+        return "memory" if question.get("skill") == "recall" else "show"
     return "show"
 
 
@@ -334,7 +336,7 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
         pool = [q for q in mcqs if q["source_type"] != "image"]
     question = bank.choose(pool, seen, used, section_load=load, difficulty=slot.get("difficulty"),
                            section_id=slot.get("section"), asked=asked, section_states=sec_states)
-    if question is None and (kind == "image" or slot.get("section")):
+    if question is None:
         question = bank.choose(mcqs, seen, used, section_load=load, difficulty=slot.get("difficulty"),
                                asked=asked, section_states=sec_states)
     if question is None:
@@ -497,13 +499,22 @@ async def public_item(item: dict, run: dict) -> dict:
                         if item["time_limit_sec"] else None),
     })
     if payload.get("image_id"):
-        row = await db.fetchrow("select description, width, height from doc_images where id = $1", payload["image_id"])
+        row = await db.fetchrow("select description, context_text, width, height from doc_images where id = $1", payload["image_id"])
         variant = "sharp" if payload.get("picture_mode") == "show" or "peek" in item["lifelines_used"] else "blur"
         view["image"] = _image_view(
             payload["image_id"], variant,
             row["description"] if row and variant == "sharp" else None,
             row["width"] if row else None, row["height"] if row else None,
         )
+        view["canPeek"] = bool(
+            item["slot"] in ("report", "image")
+            and (payload.get("picture_mode") == "memory" or (row and (row.get("context_text") or "").strip()))
+        )
+    elif item["slot"] in ("report", "image") and item["question_id"]:
+        q_peek = await db.fetchrow("select chunk_id, source_quote from questions where id = $1", item["question_id"])
+        view["canPeek"] = bool(q_peek and (q_peek["chunk_id"] or (q_peek["source_quote"] or "").strip()))
+    else:
+        view["canPeek"] = False
     if clip := _clip(item):
         view["music"] = clip
     return view
@@ -552,8 +563,11 @@ async def place_wager(run: dict, item_id: str, amount: int, *, read_aloud: bool 
     # the reading should be over. Only for a page that knows to ask for the answers - one loaded before this existed
     # (a game carried across an update of the server) gets its question at once, as it always did.
     starts = _now() + timedelta(seconds=reading_seconds(item["payload"].get("text")) if read_aloud else 0)
-    return await db.fetchrow("update run_items set wager = $2, served_at = $3 where id = $1 returning *",
-                             item_id, amount, starts)
+    updated = await db.fetchrow(
+        "update run_items set wager = $2, served_at = $3 where id = $1 and wager is null and answered_at is null returning *",
+        item_id, amount, starts,
+    )
+    return updated or await _current_item(run, item_id)
 
 
 async def start_clock(run: dict, item_id: str) -> dict:
@@ -584,6 +598,7 @@ async def use_lifeline(run: dict, item_id: str, kind: str, hint_writer=None) -> 
     question = await db.fetchrow("select * from questions where id = $1", item["question_id"])
     patch: dict[str, Any] = {}
     thinking = timedelta()
+    extra_limit_sec = 0
     charge = True
 
     if kind == "fifty":
@@ -605,7 +620,7 @@ async def use_lifeline(run: dict, item_id: str, kind: str, hint_writer=None) -> 
         if not excerpt.strip():                   # a hand-written question with no passage behind it
             raise GameError("There is no passage to peek at for this one. Try another lifeline.")
         patch["peek"] = excerpt[:700]
-        thinking = timedelta(seconds=PEEK_GRACE_SEC)   # reading grace so peeking does not drain the clock
+        extra_limit_sec = PEEK_GRACE_SEC          # extend time_limit_sec directly so early Peeks never lose grace
     else:
         asked = _now()
         raw_hint = await hint_writer(question) if hint_writer else "Think about what the report said on this."
@@ -640,9 +655,10 @@ async def use_lifeline(run: dict, item_id: str, kind: str, hint_writer=None) -> 
             await tx.execute("update runs set lifelines = $2 where id = $1", run["id"], remaining)
         return await tx.fetchrow(
             "update run_items set payload = $2, points_multiplier = $3,"
-            " lifelines_used = array_append(lifelines_used, $4), served_at = served_at + $5"
+            " lifelines_used = array_append(lifelines_used, $4), served_at = served_at + $5,"
+            " time_limit_sec = case when time_limit_sec > 0 then time_limit_sec + $6 else time_limit_sec end"
             " where id = $1 and answered_at is null returning *",
-            item_id, merged_payload, multiplier, kind, thinking)
+            item_id, merged_payload, multiplier, kind, thinking, extra_limit_sec)
 
 
 def _excerpt(passage: str, quote: str, radius: int = 320) -> str:
@@ -757,6 +773,15 @@ async def submit_answer(run: dict, rules: dict, item_id: str, choice: int | None
             payload = dict(item["payload"])
             if strike_restored:
                 payload["strike_restored"] = True
+            # Save score breakdown so the UI can show why a player earned those points (speed + streak + multiplier).
+            if correct and points > 0 and locked_run["mode"] in ("show", "sudden_death", "jukebox") and item["slot"] not in ("final", "fact_fake"):
+                prior_streak_bonus = 10 * min(locked_run["streak"], 5) if (item["slot"] != "music" or locked_run["mode"] != "sudden_death") else 0
+                if item["slot"] == "second_chance":
+                    prior_streak_bonus = round(prior_streak_bonus * float(item["points_multiplier"]))
+                speed_points = max(0, points - prior_streak_bonus)
+                payload["breakdown"] = {"speed": speed_points, "streak": prior_streak_bonus}
+            elif locked_run["mode"] == "speed" and not correct:
+                payload["breakdown"] = {"penaltySec": int(rules["speed"]["wrong_penalty_sec"])}
 
             saved = await tx.fetchrow(
                 "update run_items set answered_at = $2, selected_index = $3, is_correct = $4, timed_out = $5,"
@@ -834,6 +859,8 @@ async def _reveal(item: dict, run: dict, rules: dict) -> dict:
                 result["music"]["previewUrl"] = payload["preview_url"]
     if payload.get("explain"):
         result["explanation"] = payload["explain"]
+    if payload.get("breakdown"):
+        result["breakdown"] = payload["breakdown"]
     return result
 
 
@@ -848,11 +875,16 @@ def run_state(run: dict, rules: dict) -> dict:
         # so the card never eats into the player's answering time.
         "nextRound": run["plan"][0]["name"] if run["plan"] else None,
     }
+    if run["mode"] == "straight":
+        state["passMark"] = int(rules["straight"]["pass_mark"])
+        state["reportAnswered"] = int(run.get("report_answered") or 0)
+        state["reportCorrect"] = int(run.get("report_correct") or 0)
     if run["mode"] == "sudden_death":
         state["strikes"] = run["strikes"]
         state["maxStrikes"] = int(rules["sudden_death"]["strikes"])
     if run["mode"] == "speed":
         state["clockSec"] = int(rules["speed"]["clock_sec"])
+        state["wrongPenaltySec"] = int(rules["speed"]["wrong_penalty_sec"])
         if run["deadline_at"]:
             state["deadlineAt"] = run["deadline_at"].isoformat()
             state["remainingMs"] = max(0, int((run["deadline_at"] - _now()).total_seconds() * 1000))

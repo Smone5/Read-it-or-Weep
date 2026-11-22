@@ -85,7 +85,7 @@ export function buildShareText(opts: {
   const statsLine = `${summary.accuracy}% accuracy${summary.streakMax > 1 ? ` · x${summary.streakMax} streak` : ''}`
   const link = includeLink
     ? buildChallengeUrl(slug, {
-        score: summary.score,
+        score: summary.mode === 'straight' ? summary.accuracy : summary.score,
         playerName,
         badge,
         mode: summary.mode,

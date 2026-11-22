@@ -103,9 +103,12 @@ async def leaderboard(quiz_id: str, mode: str, team: str | None = None, limit: i
     my_index = next((idx for idx, e in enumerate(entries) if e["you"]), None)
     mine = dict(entries[my_index]) if my_index is not None else None
     if mine is not None and my_index is not None and my_index > 0:
-        ahead = entries[my_index - 1]
-        mine["gapToNext"] = max(0, ahead["score"] - mine["score"])
-        mine["aheadName"] = ahead["name"]
+        ahead = next((e for e in reversed(entries[:my_index]) if e["score"] > mine["score"]), None)
+        if ahead is not None:
+            mine["gapToNext"] = ahead["score"] - mine["score"]
+            mine["aheadName"] = ahead["name"]
+        else:
+            mine["tied"] = True
 
     needle = (query or "").strip().lower()
     matched = (
@@ -123,23 +126,32 @@ async def leaderboard(quiz_id: str, mode: str, team: str | None = None, limit: i
     your_runs: list[dict] = []
     if player_id:
         recent = await db.fetch(
-            "select id, score, badge, passed, streak_max, correct_answers, questions_answered, finished_at from runs"
+            "select id, score, badge, passed, streak_max, correct_answers, questions_answered,"
+            " report_correct, report_answered, music_correct, music_answered, finished_at from runs"
             " where quiz_id = $1 and player_id = $2 and mode = $3 and status = 'completed'"
             " order by finished_at desc limit 8", quiz_id, player_id, mode)
         best_score = max((r["score"] for r in recent), default=None)
         if mine and best_score is not None:
             best_score = max(best_score, mine["score"])
-        your_runs = [{
-            "id": str(r["id"]),
-            "score": r["score"],
-            "badge": r["badge"],
-            "passed": r["passed"],
-            "streakMax": r["streak_max"],
-            "correct": r["correct_answers"],
-            "answered": r["questions_answered"],
-            "finishedAt": r["finished_at"].isoformat() if r["finished_at"] else None,
-            "isBest": best_score is not None and r["score"] == best_score,
-        } for r in recent]
+        your_runs = []
+        for r in recent:
+            if mode == "jukebox":
+                c, a = int(r["music_correct"] or 0), int(r["music_answered"] or 0)
+            else:
+                c, a = int(r["report_correct"] or 0), int(r["report_answered"] or 0)
+            if a == 0:
+                c, a = int(r["correct_answers"] or 0), int(r["questions_answered"] or 0)
+            your_runs.append({
+                "id": str(r["id"]),
+                "score": r["score"],
+                "badge": r["badge"],
+                "passed": r["passed"],
+                "streakMax": r["streak_max"],
+                "correct": c,
+                "answered": a,
+                "finishedAt": r["finished_at"].isoformat() if r["finished_at"] else None,
+                "isBest": best_score is not None and r["score"] == best_score,
+            })
     teams = await db.fetch(
         "select p.team, round(avg(b.score))::int as average, count(*) as players from quiz_best_runs b"
         " join players p on p.id = b.player_id where b.quiz_id = $1 and b.mode = $2 and p.team is not null"
@@ -180,9 +192,10 @@ async def run_summary(run: dict, rules: dict) -> dict:
         " where ri.run_id = $1 and ri.answered_at is not null order by ri.position", run["id"])
     per_section: dict[str, dict] = {}
     review = []
+    seen_review_qids: set[str] = set()
     results_grid: list[bool] = []
     for item in items:
-        if run["mode"] != "jukebox" and item["slot"] in ("music", "jargon", "song_or_jargon"):
+        if run["mode"] != "jukebox" and item["slot"] in ("music", "jargon", "song_or_jargon", "second_chance"):
             continue
         results_grid.append(bool(item["is_correct"]))
         if item["section_id"]:
@@ -191,6 +204,11 @@ async def run_summary(run: dict, rules: dict) -> dict:
             entry["answered"] += 1
             entry["correct"] += int(bool(item["is_correct"]))
         if not item["is_correct"]:
+            qid = item.get("question_id")
+            if qid and qid in seen_review_qids:
+                continue
+            if qid:
+                seen_review_qids.add(qid)
             options = item["payload"]["options"]
             chosen = item["selected_index"]
             review.append({
@@ -254,31 +272,43 @@ async def quiz_overview(quiz_id: str) -> dict[str, Any]:
     row = await db.fetchrow(
         "select"
         " (select count(*) from questions where quiz_id = $1 and status = 'approved') as approved,"
+        " (select count(*) from questions where quiz_id = $1 and status = 'approved' and kind = 'mcq') as approved_mcq,"
+        " (select count(*) from questions where quiz_id = $1 and status = 'approved' and kind = 'mcq' and origin = 'manual') as approved_manual_mcq,"
+        " (select count(*) from questions where quiz_id = $1 and status = 'approved' and kind = 'mcq' and origin = 'generated') as approved_ai_mcq,"
         " (select count(*) from questions where quiz_id = $1 and status = 'pending') as pending,"
         " (select count(*) from questions where quiz_id = $1 and origin = 'manual') as manual,"
         " (select count(*) from questions where quiz_id = $1 and flag_count > 0 and status <> 'rejected') as flagged,"
         " (select count(distinct player_id) from runs where quiz_id = $1) as players,"
         " (select count(*) from runs where quiz_id = $1 and status = 'completed') as games,"
+        " (select count(*) from live_sessions where quiz_id = $1) as live_sessions,"
         " (select count(*) from documents where quiz_id = $1) as documents", quiz_id)
     return dict(row)
 
 
 async def quiz_overviews(quiz_ids: list[str]) -> dict[str, dict[str, int]]:
-    """Batch overview counts for every quiz in 3 queries instead of 7 × N."""
+    """Batch overview counts for every quiz in 4 queries instead of 11 × N."""
     if not quiz_ids:
         return {}
-    empty = {"approved": 0, "pending": 0, "manual": 0, "flagged": 0, "players": 0, "games": 0, "documents": 0}
+    empty = {
+        "approved": 0, "approved_mcq": 0, "approved_manual_mcq": 0, "approved_ai_mcq": 0,
+        "pending": 0, "manual": 0, "flagged": 0, "players": 0, "games": 0, "live_sessions": 0, "documents": 0,
+    }
     out = {qid: dict(empty) for qid in quiz_ids}
     q_rows = await db.fetch(
         "select quiz_id,"
         " count(*) filter (where status = 'approved') as approved,"
+        " count(*) filter (where status = 'approved' and kind = 'mcq') as approved_mcq,"
+        " count(*) filter (where status = 'approved' and kind = 'mcq' and origin = 'manual') as approved_manual_mcq,"
+        " count(*) filter (where status = 'approved' and kind = 'mcq' and origin = 'generated') as approved_ai_mcq,"
         " count(*) filter (where status = 'pending') as pending,"
         " count(*) filter (where origin = 'manual') as manual,"
         " count(*) filter (where flag_count > 0 and status <> 'rejected') as flagged"
         " from questions where quiz_id = any($1::uuid[]) group by quiz_id", quiz_ids)
     for r in q_rows:
         out[r["quiz_id"]].update({
-            "approved": r["approved"], "pending": r["pending"], "manual": r["manual"], "flagged": r["flagged"],
+            "approved": r["approved"], "approved_mcq": r["approved_mcq"],
+            "approved_manual_mcq": r["approved_manual_mcq"], "approved_ai_mcq": r["approved_ai_mcq"],
+            "pending": r["pending"], "manual": r["manual"], "flagged": r["flagged"],
         })
     r_rows = await db.fetch(
         "select quiz_id, count(distinct player_id) as players,"
@@ -286,6 +316,11 @@ async def quiz_overviews(quiz_ids: list[str]) -> dict[str, dict[str, int]]:
         " from runs where quiz_id = any($1::uuid[]) group by quiz_id", quiz_ids)
     for r in r_rows:
         out[r["quiz_id"]].update({"players": r["players"], "games": r["games"]})
+    l_rows = await db.fetch(
+        "select quiz_id, count(*) as live_sessions from live_sessions where quiz_id = any($1::uuid[]) group by quiz_id",
+        quiz_ids)
+    for r in l_rows:
+        out[r["quiz_id"]]["live_sessions"] = r["live_sessions"]
     d_rows = await db.fetch(
         "select quiz_id, count(*) as documents from documents where quiz_id = any($1::uuid[]) group by quiz_id",
         quiz_ids)

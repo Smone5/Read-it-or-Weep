@@ -7,7 +7,7 @@ import { ChoiceGroup, ConfirmDialog, CopyButton, Field, Note, Panel, SaveBar } f
 import { useNotify } from '../context'
 import { fromLocalInput, isThisSite, isWorking, onThisSite, plural, QUIZ_STATUS, toLocalInput } from '../format'
 import { paths } from '../paths'
-import type { Quiz, QuizPatch, QuizStatus } from '../types'
+import type { QuestionSources, Quiz, QuizOverview, QuizPatch, QuizStatus } from '../types'
 import { useQuiz } from './context'
 
 export default function OverviewTab() {
@@ -28,10 +28,17 @@ export default function OverviewTab() {
 
 // ---- getting a new quiz ready --------------------------------------------------------
 
+function playableMcqCount(overview: QuizOverview, source?: QuestionSources): number {
+  if (source === 'manual' && overview.approved_manual_mcq !== undefined) return overview.approved_manual_mcq
+  if (source === 'ai' && overview.approved_ai_mcq !== undefined) return overview.approved_ai_mcq
+  return overview.approved_mcq ?? overview.approved
+}
+
 function GettingReady() {
   const { detail } = useQuiz()
-  const { quiz, overview, documents } = detail
+  const { quiz, overview, documents, rules } = detail
   const working = documents.some(isWorking)
+  const playableMcq = playableMcqCount(overview, rules.question_sources)
   const steps = [
     {
       done: overview.documents > 0 && !working,
@@ -45,12 +52,14 @@ function GettingReady() {
       action: 'Go to Report',
     },
     {
-      done: overview.approved >= 3,
+      done: playableMcq >= 3,
       title: 'Check the questions',
       note:
         overview.approved + overview.pending === 0
           ? 'They appear once a report has been read. You can also write your own.'
-          : `${plural(overview.approved, 'question')} live${overview.pending ? `, ${overview.pending} waiting for your review` : ''}.`,
+          : playableMcq < 3 && overview.approved >= 3
+            ? `${plural(playableMcq, 'live multiple-choice question')} eligible (${overview.approved} live total). At least 3 multiple-choice questions are needed to open.`
+            : `${plural(overview.approved, 'question')} live${overview.pending ? `, ${overview.pending} waiting for your review` : ''}.`,
       to: paths.quiz(quiz.id, 'questions'),
       action: 'Go to Questions',
     },
@@ -64,6 +73,17 @@ function GettingReady() {
   ]
   return (
     <Panel title="Getting this quiz ready" description="It is a draft, so only signed-in admins can play it for now.">
+      {overview.documents === 0 && (
+        <div className="mb-4">
+          <Note tone="info">
+            Uploading a confidential report? Review{' '}
+            <a href="#confidentiality-panel" className="ad-link font-semibold">
+              Report access &amp; confidentiality
+            </a>{' '}
+            below (Unlisted, Confidential voice mode, Purge source file) before Step 1.
+          </Note>
+        </div>
+      )}
       <ol className="grid gap-3">
         {steps.map((step, index) => (
           <li key={step.title} className="flex flex-wrap items-start gap-x-3 gap-y-1">
@@ -475,10 +495,11 @@ function DetailsForm() {
         </div>
       </Panel>
 
-      <Panel
-        title="Report access & confidentiality"
-        description="Control how players read the original report and keep sensitive documents private."
-      >
+      <div id="confidentiality-panel">
+        <Panel
+          title="Report access & confidentiality"
+          description="Control how players read the original report and keep sensitive documents private."
+        >
         <div className="grid gap-4">
           <Field
             label="External report link (recommended)"
@@ -563,6 +584,7 @@ function DetailsForm() {
           </label>
         </div>
       </Panel>
+      </div>
 
       <SaveBar dirty={dirty} saving={saving} error={error} onDiscard={() => set(detailsOf(quiz, rules))} />
     </form>

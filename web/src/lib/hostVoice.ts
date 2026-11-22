@@ -12,7 +12,7 @@
 
 import { Mic, micSupported } from './mic'
 import { duckMusic, setVoiceOver } from './music'
-import { audioMode, duckEffects, hostAudioContext, soundOn } from './sound'
+import { audioMode, blip, duckEffects, hostAudioContext, onSoundChange, soundOn } from './sound'
 import { trace } from './trace'
 
 export type TalkState = 'idle' | 'listening' | 'thinking'
@@ -56,12 +56,16 @@ type Line = {
   gaps: number
   /** Pieces that arrived while the phone had his audio asleep: played as soon as it wakes. */
   waiting?: ArrayBuffer[]
+  /** Decoded buffers queued during a future hold so holdUntil(0) can release them immediately. */
+  heldBuffers?: AudioBuffer[]
+  /** Progressive caption reveal timer for ElevenLabs full-line text chunks. */
+  revealTimer?: number
 }
 
 type Incoming = { type: string; id?: number; cue?: string; delta?: string; voice?: boolean; talk?: boolean; sampleRate?: number }
 
-const START_TIMEOUT_MS = 5000 // a line that has not begun by now would arrive too late to be wanted
-const CONNECT_TIMEOUT_MS = 8000 // ...with more patience for the very first line, while the host is still arriving
+const START_TIMEOUT_MS = 9000 // generous enough for cold LLM + ElevenLabs synthesis without false revivals
+const CONNECT_TIMEOUT_MS = 10000 // ...with more patience for the very first line, while the host is still arriving
 const FADE_SEC = 0.12 // cutting the host off: a quick fade, not a click
 // The opening's handover from the theme to the host. The music starts down LEAD_IN_SEC before his first word, so it
 // is nearly out of the way when he speaks, and his voice comes up from about half volume: a crossfade you can hear,
@@ -76,6 +80,21 @@ const VOICE_FADE_SEC = 0.7
 const TOUCH = typeof window !== 'undefined' && window.matchMedia?.('(hover: none) and (pointer: coarse)').matches
 const LEVELLER_TRIM = TOUCH ? 1 : 0.7
 const voiceBuses = new WeakMap<AudioContext, AudioNode>()
+let activeAnalyser: AnalyserNode | null = null
+let analyserData: Uint8Array<ArrayBuffer> | null = null
+
+/** Live 0..1 amplitude of the host's voice bus for animating the CRT vocal meter. */
+export function getHostVoiceLevel(): number {
+  if (!activeAnalyser || !analyserData) return 0
+  activeAnalyser.getByteTimeDomainData(analyserData)
+  let sum = 0
+  for (let i = 0; i < analyserData.length; i += 1) {
+    const v = (analyserData[i] - 128) / 128
+    sum += v * v
+  }
+  const rms = Math.sqrt(sum / analyserData.length)
+  return Math.min(1, rms * 4.2)
+}
 
 function voiceBus(context: AudioContext): AudioNode {
   const known = voiceBuses.get(context)
@@ -93,7 +112,17 @@ function voiceBus(context: AudioContext): AudioNode {
   trim.gain.value = LEVELLER_TRIM
   lowCut.connect(leveller)
   leveller.connect(trim)
-  trim.connect(context.destination)
+  if (typeof context.createAnalyser === 'function') {
+    const analyser = context.createAnalyser()
+    analyser.fftSize = 256
+    analyser.smoothingTimeConstant = 0.65
+    trim.connect(analyser)
+    analyser.connect(context.destination)
+    activeAnalyser = analyser
+    analyserData = new Uint8Array(new ArrayBuffer(analyser.fftSize))
+  } else {
+    trim.connect(context.destination)
+  }
   voiceBuses.set(context, lowCut)
   return lowCut
 }
@@ -136,6 +165,9 @@ export class HostVoice {
   private talking = false
   private replyId = 0
   private waking = false
+  private stopSoundListener: (() => void) | null = null
+  private serverVoiceSupported = false
+  private serverTalkSupported = false
   private onVisibility = () => {
     // Switching to another tab (e.g. an external YouTube clip) should immediately hush the host.
     if (document.hidden && this.busy) this.skip()
@@ -151,6 +183,21 @@ export class HostVoice {
     if (this.closed) return
     document.removeEventListener('visibilitychange', this.onVisibility)
     document.addEventListener('visibilitychange', this.onVisibility)
+    this.stopSoundListener?.()
+    this.stopSoundListener = onSoundChange((on) => {
+      if (this.closed) return
+      this.voice = on && this.serverVoiceSupported
+      this.canTalk = on && this.serverTalkSupported && micSupported()
+      this.listener.onTalk?.('idle', this.canTalk)
+      this.send({ type: 'voice', enabled: on })
+      if (!on) {
+        // Immediately silence active/scheduled audio buffers while letting the game continue smoothly.
+        this.silence()
+      } else {
+        const ctx = hostAudioContext(this.sampleRate)
+        if (ctx.state !== 'running' && ctx.state !== 'closed') void ctx.resume().catch(() => undefined)
+      }
+    })
     this.ready = false
     this.listener.onStatus?.('connecting')
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -230,7 +277,31 @@ export class HostVoice {
   holdUntil(at: number) {
     for (const id of this.holds.keys()) this.holds.set(id, at)
     const line = this.arriving
-    if (line && !line.heard && line.notBefore) line.notBefore = at
+    if (line && !line.live && line.notBefore) {
+      line.notBefore = at
+      // If buffers were already scheduled far in the future and music was cancelled (at === 0), reschedule right away!
+      if (at === 0 && line.heard && line.heldBuffers?.length) {
+        window.clearTimeout(line.leadTimer)
+        window.clearTimeout(line.speakTimer)
+        line.sources.forEach((source) => {
+          source.onended = null
+          try {
+            source.stop()
+          } catch {
+            /* already stopped */
+          }
+        })
+        line.sources.clear()
+        const buffers = line.heldBuffers.splice(0)
+        line.nextStart = 0
+        line.heard = false
+        line.seconds = 0
+        const context = hostAudioContext(this.sampleRate)
+        if (context.state === 'running') {
+          buffers.forEach((buf) => this.scheduleBuffer(line, buf, context))
+        }
+      }
+    }
     trace('host.hold', at ? { inMs: Math.round(at - Date.now()) } : { released: true })
   }
 
@@ -273,14 +344,19 @@ export class HostVoice {
     audioMode('talk')
     this.mix()
     this.send({ type: 'talk.start' })
-    this.listener.onTalk?.('listening', true)
+    this.listener.onTalk?.('thinking', true) // show connecting state until mic stream is actually live
     const mic = new Mic()
     this.mic = mic
     try {
       await mic.start((chunk) => {
         if (this.talking && this.socket?.readyState === WebSocket.OPEN) this.socket.send(chunk)
       })
-      if (!this.talking) await mic.stop() // they let go before the microphone was ready
+      if (!this.talking) {
+        await mic.stop() // they let go before the microphone was ready
+        return
+      }
+      blip('mic')
+      this.listener.onTalk?.('listening', true)
     } catch (error) {
       this.talking = false
       this.mic = null
@@ -329,6 +405,8 @@ export class HostVoice {
   close() {
     this.closed = true
     document.removeEventListener('visibilitychange', this.onVisibility)
+    this.stopSoundListener?.()
+    this.stopSoundListener = null
     window.clearTimeout(this.reconnectTimer)
     this.talking = false
     void this.mic?.stop()
@@ -394,9 +472,11 @@ export class HostVoice {
     if (message.type === 'ready') {
       this.ready = true
       this.readyAt = Date.now()
-      this.voice = Boolean(message.voice)
+      this.serverVoiceSupported = Boolean(message.voice) || !soundOn()
+      this.serverTalkSupported = Boolean(message.talk) || (!soundOn() && 'runId' in this.target)
+      this.voice = Boolean(message.voice) && soundOn()
       this.sampleRate = message.sampleRate ?? 24000
-      this.canTalk = Boolean(message.talk) && micSupported()
+      this.canTalk = Boolean(message.talk) && soundOn() && micSupported()
       this.listener.onStatus?.('ready')
       this.listener.onTalk?.('idle', this.canTalk)
     } else if (message.type === 'line.start') {
@@ -489,12 +569,41 @@ export class HostVoice {
     context.addEventListener('statechange', onState)
   }
 
+  private revealLineText(line: Line) {
+    window.clearInterval(line.revealTimer)
+    const full = line.text
+    const reduced = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    const words = full.split(/\s+/).filter(Boolean)
+    if (reduced || words.length <= 5 || !this.audible()) {
+      this.setLine(full)
+      return
+    }
+    // Reveal full-block ElevenLabs captions progressively at natural speech pace (~3.3 words/sec)
+    // so punchlines land with the voice instead of spoiling upfront.
+    let shown = Math.min(3, words.length)
+    this.setLine(words.slice(0, shown).join(' '))
+    const msPerWord = Math.max(110, Math.min(260, Math.round(((line.seconds || words.length / 3.4) * 900) / words.length)))
+    line.revealTimer = window.setInterval(() => {
+      if (line.dropped) {
+        window.clearInterval(line.revealTimer)
+        return
+      }
+      shown = Math.min(words.length, shown + 1)
+      this.setLine(words.slice(0, shown).join(' '))
+      if (shown >= words.length) window.clearInterval(line.revealTimer)
+    }, msPerWord)
+  }
+
   private play(line: Line, data: ArrayBuffer, context: AudioContext) {
     const samples = new Int16Array(data, 0, Math.floor(data.byteLength / 2))
     if (!samples.length) return
     const buffer = context.createBuffer(1, samples.length, this.sampleRate)
     const channel = buffer.getChannelData(0)
     for (let i = 0; i < samples.length; i += 1) channel[i] = samples[i] / 32768
+    this.scheduleBuffer(line, buffer, context)
+  }
+
+  private scheduleBuffer(line: Line, buffer: AudioBuffer, context: AudioContext) {
     if (!line.gain) {
       line.gain = context.createGain()
       line.gain.connect(voiceBus(context))
@@ -510,6 +619,7 @@ export class HostVoice {
     const hold = held ? Math.max(LEAD_IN_SEC, ((line.notBefore ?? 0) - Date.now()) / 1000) : 0
     const startAt = onTime ? line.nextStart : context.currentTime + Math.max(0.12, hold)
     if (!onTime && line.heard) line.gaps += 1
+    if (line.notBefore && !line.live) (line.heldBuffers ??= []).push(buffer)
     source.start(startAt)
     line.nextStart = startAt + buffer.duration
     line.seconds += buffer.duration
@@ -524,10 +634,11 @@ export class HostVoice {
       const begin = () => {
         if (line.dropped) return
         line.live = true
+        line.heldBuffers = undefined
         this.listener.onSpeaking(true)
         duckEffects(true)
         trace('host.audio', { id: line.id })
-        this.setLine(line.text)
+        this.revealLineText(line)
         this.mix() // his voice is about to sound: the soundtrack dips now, not before
       }
       if (held) {
@@ -555,6 +666,8 @@ export class HostVoice {
     window.clearTimeout(line.readTimer)
     window.clearTimeout(line.speakTimer)
     window.clearTimeout(line.leadTimer)
+    window.clearInterval(line.revealTimer)
+    if (line.text) this.setLine(line.text)
     trace('host.done', { id: line.id, words: line.text.split(/\s+/).filter(Boolean).length, seconds: Math.round(line.seconds * 10) / 10, gaps: line.gaps, text: line.text })
     if (this.sounding.size === 0) {
       this.listener.onSpeaking(false)
@@ -583,14 +696,17 @@ export class HostVoice {
 
   private drop(line: Line) {
     line.dropped = true
+    line.heldBuffers = undefined
     window.clearTimeout(line.readTimer)
     window.clearTimeout(line.speakTimer)
     window.clearTimeout(line.leadTimer)
+    window.clearInterval(line.revealTimer)
     const gain = line.gain
     if (!gain) return
     const now = gain.context.currentTime
+    const current = gain.gain.value
     gain.gain.cancelScheduledValues(now)
-    gain.gain.setValueAtTime(gain.gain.value, now)
+    gain.gain.setValueAtTime(current, now)
     gain.gain.linearRampToValueAtTime(0, now + FADE_SEC)
     line.sources.forEach((source) => {
       source.onended = null

@@ -370,17 +370,21 @@ def build_structure(parsed: ParsedDocument, filename: str = "") -> StructuredDoc
                 recent_text.append(block.caption or "A table")
                 continue
             if block.kind in ("image", "chart"):
-                if block.kind == "chart" and block.text:
+                cleaned = usable_images.get(id(block))
+                # Only create a separate text chart chunk when no rendered chart image is available; otherwise
+                # include the chart data in the image's context so we never double-generate questions on the same chart.
+                if block.kind == "chart" and block.text and cleaned is None:
                     flush()
                     text = (f"{block.caption}\n" if block.caption and block.caption not in block.text else "") + block.text
                     chunks.append(Chunk(ordinal=len(chunks), section=section_index, kind="chart",
                                         heading_path=path(), text=text, token_count=approx_tokens(text)))
-                cleaned = usable_images.get(id(block))
                 if cleaned is None:
                     continue
                 context_parts = [f"Section: {path()}"]
                 if block.caption:
                     context_parts.append(f"Caption: {block.caption}")
+                if block.kind == "chart" and block.text:
+                    context_parts.append("Chart data:\n" + block.text[:500])
                 if recent_text:
                     context_parts.append("Text before the picture: " + " ".join(recent_text[-2:])[-600:])
                 item = ImageItem(ordinal=len(images), section=section_index, data=cleaned.data, mime=cleaned.mime,

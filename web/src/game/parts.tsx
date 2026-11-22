@@ -192,6 +192,10 @@ export function TimerBar({ timerKey, totalMs, remainingMs, running, hold = false
       frozenAt.current = Math.max(0, endsAt.current - performance.now())
       return
     }
+    if (frozenAt.current !== null) {
+      endsAt.current = performance.now() + frozenAt.current
+      frozenAt.current = null
+    }
     let frame = 0
     let lastSecond = -1
     let done = false
@@ -238,16 +242,17 @@ export function TimerBar({ timerKey, totalMs, remainingMs, running, hold = false
   )
 }
 
-/** Counts a deadline down to zero (used for the Speed Run clock). */
-export function useDeadline(deadlineIso: string | undefined, onZero: () => void): number {
-  const [left, setLeft] = useState(() => (deadlineIso ? Math.max(0, new Date(deadlineIso).getTime() - Date.now()) : 0))
+/** Counts a server-provided remaining duration down to zero without trusting client wall-clock skew (Speed Run). */
+export function useDeadline(remainingMs: number | undefined, resetKey: string | undefined, onZero: () => void): number {
+  const [left, setLeft] = useState(() => (remainingMs !== undefined ? Math.max(0, remainingMs) : 0))
   const callback = useRef(onZero)
   callback.current = onZero
   useEffect(() => {
-    if (!deadlineIso) return
+    if (remainingMs === undefined || !resetKey) return
+    const target = performance.now() + Math.max(0, remainingMs)
     let fired = false
     const update = () => {
-      const remaining = Math.max(0, new Date(deadlineIso).getTime() - Date.now())
+      const remaining = Math.max(0, target - performance.now())
       setLeft(remaining)
       if (remaining <= 0 && !fired) {
         fired = true
@@ -255,9 +260,9 @@ export function useDeadline(deadlineIso: string | undefined, onZero: () => void)
       }
     }
     update()
-    const id = window.setInterval(update, 200)
+    const id = window.setInterval(update, 150)
     return () => window.clearInterval(id)
-  }, [deadlineIso])
+  }, [remainingMs, resetKey])
   return left
 }
 
@@ -394,7 +399,7 @@ export function PictureView({ image, secondsLeft, caption, wide = false }: Pictu
           </span>
           <button
             type="button"
-            className="inline-flex min-h-[34px] items-center gap-1.5 rounded-[3px] border border-white/25 bg-white/10 px-2.5 text-xs font-bold tracking-wider text-white uppercase hover:bg-white/20"
+            className="inline-flex min-h-[44px] items-center gap-1.5 rounded-[3px] border border-white/25 bg-white/10 px-3 text-xs font-bold tracking-wider text-white uppercase hover:bg-white/20 sm:min-h-[36px]"
             onClick={() => setOpen(true)}
             aria-label="Open the picture full screen"
             title="Full screen"
@@ -576,6 +581,30 @@ export function RollingScore({
 }
 
 export function Hud({ state, clockMs, position }: { state: RunState; clockMs?: number; position?: string }) {
+  if (state.mode === 'straight') {
+    const answered = state.reportAnswered ?? state.answered
+    const correct = state.reportCorrect ?? state.correct
+    const pct = answered > 0 ? Math.round((100 * correct) / answered) : null
+    const passMark = state.passMark ?? 80
+    return (
+      <div className="flex min-w-0 flex-wrap items-end justify-between gap-x-3 gap-y-1.5">
+        <div className="hud">
+          Correct
+          <b className="tabular-nums" style={{ color: pct !== null && pct >= passMark ? 'var(--good)' : 'var(--accent-text)' }}>
+            {correct}/{answered}
+          </b>
+        </div>
+        <div className="hud text-center">
+          Pass mark<b className="tabular-nums">{passMark}%</b>
+        </div>
+        {position && (
+          <div className="hud text-right">
+            Question<b>{position}</b>
+          </div>
+        )}
+      </div>
+    )
+  }
   return (
     <div className="flex min-w-0 flex-wrap items-end justify-between gap-x-3 gap-y-1.5">
       <div className="hud">
@@ -611,7 +640,7 @@ export function Hud({ state, clockMs, position }: { state: RunState; clockMs?: n
       )}
       {position && (
         <div className="hud text-right">
-          {state.mode === 'show' || state.mode === 'straight' || state.mode === 'jukebox' ? 'Question' : 'Answered'}<b>{position}</b>
+          {state.mode === 'show' || state.mode === 'jukebox' ? 'Question' : 'Answered'}<b>{position}</b>
         </div>
       )}
     </div>
@@ -802,14 +831,14 @@ export function HighScores({ board, compact = false, minimal = false, onOpenFull
                   Your standing · of {totalPlayers}
                 </p>
                 <p className="mt-0.5 text-sm text-ink">
-                  {board.you.rank === 1 ? (
+                  {board.you.rank === 1 || board.you.tied ? (
                     <span className="inline-flex items-center gap-1.5 font-semibold" style={{ color: 'var(--rank-1)' }}>
-                      <IconCrown size={13} /> Leading the board!
+                      <IconCrown size={13} /> {board.you.tied ? 'Tied for #1!' : 'Leading the board!'}
                     </span>
                   ) : board.you.gapToNext !== undefined ? (
                     <>
                       <b style={{ color: 'var(--accent-text)' }}>{formatScore(board.you.gapToNext)}</b> pts behind{' '}
-                      {board.you.aheadName ?? `#${board.you.rank - 1}`} (#{board.you.rank - 1})
+                      {board.you.aheadName ?? `#${board.you.rank - 1}`}
                     </>
                   ) : (
                     `Rank #${board.you.rank} of ${totalPlayers}`

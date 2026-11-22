@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import logging
 import re
 import time
@@ -14,6 +15,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field
 
 import db
+from config import config
 from dependencies import current_player, optional_player
 from security import TokenError, issue_player_token, read_admin_token, sign_media
 from services import eleven, bank, engine, favorites, host_samples, host_service, music_service, settings_store, stats
@@ -25,15 +27,29 @@ router = APIRouter(prefix="/api", tags=["play"])
 # A bounded in-memory brake on abuse. Generous, because a whole office can share one IP address.
 _hits: dict[str, deque] = defaultdict(deque)
 _MAX_THROTTLE_KEYS = 4000
+_TRUSTED_NETS = [ipaddress.ip_network(cidr, strict=False) for cidr in config.trusted_proxies]
+
+
+def _is_trusted_proxy(host: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(addr in net for net in _TRUSTED_NETS)
 
 
 def _client_ip(request: Request) -> str:
     host = request.client.host if request.client else "unknown"
-    # Only trust X-Forwarded-For when the immediate peer is a local reverse proxy / tunnel.
-    if host in ("127.0.0.1", "::1"):
-        fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-        if fwd:
-            return fwd
+    # Trust X-Forwarded-For only when the immediate peer is a configured proxy/tunnel/private ALB.
+    if _is_trusted_proxy(host):
+        raw = request.headers.get("x-forwarded-for") or ""
+        hops = [part.strip() for part in raw.split(",") if part.strip()]
+        # Walk right-to-left to find the first untrusted client hop (prevents client-supplied header spoofing).
+        for hop in reversed(hops):
+            if not _is_trusted_proxy(hop):
+                return hop
+        if hops:
+            return hops[0]
     return host
 
 
@@ -41,9 +57,7 @@ def throttle(request: Request, bucket: str, limit: int, window: int = 60) -> Non
     throttle_key(f"{bucket}:{_client_ip(request)}", limit, window)
 
 
-def throttle_key(key: str, limit: int, window: int = 60) -> None:
-    """The same brake for anything that should be counted by something other than the caller's address."""
-    now = time.monotonic()
+def _prune_throttle(key: str, window: int, now: float) -> deque:
     if len(_hits) > _MAX_THROTTLE_KEYS:
         stale = [k for k, dq in list(_hits.items()) if not dq or now - dq[-1] > 3600]
         for k in stale[: len(stale)]:
@@ -53,8 +67,31 @@ def throttle_key(key: str, limit: int, window: int = 60) -> None:
     hits = _hits[key]
     while hits and now - hits[0] > window:
         hits.popleft()
+    return hits
+
+
+def throttle_key(key: str, limit: int, window: int = 60) -> None:
+    """The same brake for anything that should be counted by something other than the caller's address."""
+    now = time.monotonic()
+    hits = _prune_throttle(key, window, now)
     if len(hits) >= limit:
         raise HTTPException(429, "Too many requests. Give it a moment and try again.")
+    hits.append(now)
+
+
+def check_failed_code_throttle(request: Request, bucket: str, limit: int = 20, window: int = 300) -> None:
+    """Refuse further access-code tries from an IP that has already racked up too many *wrong* guesses."""
+    key = f"{bucket}:{_client_ip(request)}"
+    hits = _prune_throttle(key, window, time.monotonic())
+    if len(hits) >= limit:
+        raise HTTPException(429, "Too many wrong access codes. Wait a few minutes and try again.")
+
+
+def record_failed_code(request: Request, bucket: str, window: int = 300) -> None:
+    """Count only failed access-code attempts so valid corporate-NAT logins never self-DoS."""
+    key = f"{bucket}:{_client_ip(request)}"
+    now = time.monotonic()
+    hits = _prune_throttle(key, window, now)
     hits.append(now)
 
 
@@ -70,6 +107,21 @@ async def _is_admin(token: str | None) -> bool:
 
 def _quiz_is_restricted(quiz: dict) -> bool:
     return bool(quiz.get("access_code")) or bool(quiz.get("allowed_email_domains"))
+
+
+def quiz_grant(quiz: dict) -> str:
+    return f"{quiz['id']}:{quiz.get('access_version') or 1}"
+
+
+def merged_grants(existing_player: dict | None, player_id: str, quiz: dict, *, grant_access: bool) -> list[str]:
+    grants: list[str] = []
+    if existing_player and existing_player.get("id") == player_id:
+        grants.extend(sorted(existing_player.get("_quiz_grants") or ()))
+    if grant_access and quiz.get("access_code"):
+        grant = quiz_grant(quiz)
+        if grant not in grants:
+            grants.append(grant)
+    return grants
 
 
 def _email_allowed(quiz: dict, email: str) -> bool:
@@ -93,6 +145,9 @@ async def has_quiz_access(quiz: dict, player: dict | None, *, is_admin: bool = F
         return False
     if not _email_allowed(quiz, player["email"]):
         return False
+    if quiz.get("access_code"):
+        if quiz_grant(quiz) not in (player.get("_quiz_grants") or set()):
+            return False
     if not _quiz_is_restricted(quiz):
         return True
     return bool(await db.fetchval(
@@ -229,8 +284,11 @@ async def quiz_info(slug: str, request: Request, player: dict | None = Depends(o
 
 async def _player_view(player: dict, quiz: dict, rules: dict) -> dict:
     unfinished = await db.fetchrow(
-        "select id, mode from runs where player_id = $1 and quiz_id = $2 and status = 'in_progress'"
+        "select * from runs where player_id = $1 and quiz_id = $2 and status = 'in_progress'"
         " and started_at > now() - interval '2 hours' order by started_at desc limit 1", player["id"], quiz["id"])
+    if unfinished is not None and _speed_clock_expired(unfinished):
+        await engine.finish_run(unfinished, rules, abandoned=False)
+        unfinished = None
     best = await db.fetch("select mode, max(score) as score from runs where player_id = $1 and quiz_id = $2"
                           " and status = 'completed' group by mode", player["id"], quiz["id"])
     return {"id": player["id"], "name": player["name"], "email": player["email"], "team": player["team"],
@@ -307,25 +365,32 @@ async def set_favourite_artist(body: FavouriteBody, request: Request, player: di
 
 
 @router.post("/quiz/{slug}/join")
-async def join(slug: str, body: JoinRequest, request: Request, x_admin_token: str | None = Header(default=None)) -> dict:
+async def join(slug: str, body: JoinRequest, request: Request,
+               existing: dict | None = Depends(optional_player),
+               x_admin_token: str | None = Header(default=None)) -> dict:
     throttle(request, "join", 120)
+    admin = await _is_admin(x_admin_token)
     quiz = await find_quiz(slug, x_admin_token)
     email = body.email.strip().lower()
-    if not _email_allowed(quiz, email):
+    if not admin and not _email_allowed(quiz, email):
         raise HTTPException(403, "That email address is not eligible for this quiz. Use your work email.")
-    if quiz["access_code"]:
-        throttle(request, f"join-code:{quiz['id']}", 20)
+    if not admin and quiz["access_code"]:
+        code_bucket = f"join-code:{quiz['id']}"
+        check_failed_code_throttle(request, code_bucket)
         given = (body.accessCode or "").strip().lower()
         expected = quiz["access_code"].strip().lower()
         if not hmac.compare_digest(given, expected):
+            record_failed_code(request, code_bucket)
             raise HTTPException(403, "That access code is not right. Check the invitation.")
     team = body.team if (body.team and (not quiz["teams"] or body.team in quiz["teams"])) else None
     if quiz["teams"] and not team:
         raise HTTPException(422, "Pick your team.")
     player = await upsert_player(body.name, email, team)
     await record_quiz_membership(quiz["id"], player["id"])
+    grants = merged_grants(existing, player["id"], quiz, grant_access=True)
     rules = await settings_store.quiz_rules(quiz)
-    return {"token": issue_player_token(player["id"]), "player": await _player_view(player, quiz, rules)}
+    return {"token": issue_player_token(player["id"], quiz_grants=grants),
+            "player": await _player_view(player, quiz, rules)}
 
 
 @router.get("/quiz/{slug}/leaderboard")
@@ -413,6 +478,8 @@ async def start_run(slug: str, body: StartRun, request: Request, player: dict = 
 @router.get("/runs/{run_id}")
 async def resume_run(run_id: uuid.UUID, player: dict = Depends(current_player)) -> dict:
     run, _, rules = await _load_run(run_id, player)
+    if run["status"] == "in_progress" and _speed_clock_expired(run):
+        run = await engine.finish_run(run, rules, abandoned=False)
     return await _turn(run, rules, deal=False)
 
 
@@ -610,11 +677,12 @@ async def flag_question(body: FlagBody, request: Request, player: dict = Depends
                              str(body.itemId), player["id"])
     if item is None or not item["question_id"]:
         raise HTTPException(404, "We could not find that question.")
-    already = await db.fetchval("select 1 from question_flags where question_id = $1 and player_id = $2",
-                                item["question_id"], player["id"])
-    if not already:
-        await db.execute("insert into question_flags (question_id, player_id, reason) values ($1,$2,$3)",
-                         item["question_id"], player["id"], body.reason)
+    inserted = await db.fetchval(
+        "insert into question_flags (question_id, player_id, reason) values ($1,$2,$3)"
+        " on conflict (question_id, player_id) do nothing returning 1",
+        item["question_id"], player["id"], body.reason,
+    )
+    if inserted:
         await db.execute("update questions set flag_count = flag_count + 1 where id = $1", item["question_id"])
         await stats.note_question_health(item["question_id"])
     return {"ok": True}

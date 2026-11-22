@@ -30,6 +30,7 @@ class ChartData:
     title: str | None
     series: list[Series] = field(default_factory=list)
     horizontal: bool = False
+    stacked: bool = False
     category_axis: str | None = None
     value_axis: str | None = None
 
@@ -63,7 +64,18 @@ class ChartData:
                 ax.pie([v for _, v in pairs], labels=[f"{c}\n{_fmt(v)}" for c, v in pairs], startangle=90,
                        colors=_PALETTE, wedgeprops={"width": width, "edgecolor": "white"},
                        textprops={"fontsize": 12})
-            elif self.kind in ("line", "area", "scatter"):
+            elif self.kind == "scatter":
+                numeric_x = all(_number(c) is not None for s in self.series for c in s.categories if c)
+                for i, s in enumerate(self.series):
+                    color = _PALETTE[i % len(_PALETTE)]
+                    xs = [(_number(c) if numeric_x else float(idx)) for idx, c in enumerate(s.categories)]
+                    pts = [(x, y) for x, y in zip(xs, s.values) if x is not None and y is not None]
+                    if pts:
+                        ax.scatter([p[0] for p in pts], [p[1] for p in pts], s=55, color=color, alpha=0.88, label=s.name)
+                if not numeric_x:
+                    ax.set_xticks(range(len(categories)), categories, rotation=0 if len(categories) <= 8 else 45,
+                                  ha="center" if len(categories) <= 8 else "right")
+            elif self.kind in ("line", "area"):
                 for i, s in enumerate(self.series):
                     ys = [v if v is not None else float("nan") for v in s.values]
                     color = _PALETTE[i % len(_PALETTE)]
@@ -78,19 +90,37 @@ class ChartData:
                                             ha="center", fontsize=11)
                 ax.set_xticks(range(len(categories)), categories, rotation=0 if len(categories) <= 8 else 45,
                               ha="center" if len(categories) <= 8 else "right")
-            else:  # bar / column
+            else:  # bar / column (grouped or stacked)
                 count = max(len(self.series), 1)
-                width = 0.8 / count
-                for i, s in enumerate(self.series):
-                    positions = [x - 0.4 + width * (i + 0.5) for x in range(len(s.values))]
-                    values = [v or 0 for v in s.values]
-                    color = _PALETTE[i % len(_PALETTE)]
-                    if self.horizontal:
-                        bars = ax.barh(positions, values, height=width, color=color, label=s.name)
-                    else:
-                        bars = ax.bar(positions, values, width=width, color=color, label=s.name)
-                    if len(categories) * count <= 16:
-                        ax.bar_label(bars, labels=[_fmt(v) for v in values], fontsize=11, padding=2)
+                if self.stacked and count > 1:
+                    n_cats = max((len(s.values) for s in self.series), default=0)
+                    pos_base = [0.0] * n_cats
+                    neg_base = [0.0] * n_cats
+                    for i, s in enumerate(self.series):
+                        values = [float(v or 0.0) for v in s.values]
+                        bases = [pos_base[j] if values[j] >= 0 else neg_base[j] for j in range(len(values))]
+                        color = _PALETTE[i % len(_PALETTE)]
+                        if self.horizontal:
+                            ax.barh(range(len(values)), values, left=bases, height=0.65, color=color, label=s.name)
+                        else:
+                            ax.bar(range(len(values)), values, bottom=bases, width=0.65, color=color, label=s.name)
+                        for j, val in enumerate(values):
+                            if val >= 0:
+                                pos_base[j] += val
+                            else:
+                                neg_base[j] += val
+                else:
+                    width = 0.8 / count
+                    for i, s in enumerate(self.series):
+                        positions = [x - 0.4 + width * (i + 0.5) for x in range(len(s.values))]
+                        values = [v or 0 for v in s.values]
+                        color = _PALETTE[i % len(_PALETTE)]
+                        if self.horizontal:
+                            bars = ax.barh(positions, values, height=width, color=color, label=s.name)
+                        else:
+                            bars = ax.bar(positions, values, width=width, color=color, label=s.name)
+                        if len(categories) * count <= 16:
+                            ax.bar_label(bars, labels=[_fmt(v) for v in values], fontsize=11, padding=2)
                 if self.horizontal:
                     ax.set_yticks(range(len(categories)), categories)
                     ax.invert_yaxis()
@@ -174,8 +204,13 @@ def parse_chart_xml(xml: bytes) -> ChartData | None:
                 "area": "area", "scatter": "scatter", "radar": "line", "bubble": "scatter"}.get(base, "bar")
         if result is None:
             direction = plot.find(C + "barDir")
-            result = ChartData(kind=kind, title=_rich_text(chart.find(C + "title")),
-                               horizontal=direction is not None and direction.get("val") == "bar")
+            grouping = plot.find(C + "grouping")
+            result = ChartData(
+                kind=kind,
+                title=_rich_text(chart.find(C + "title")),
+                horizontal=direction is not None and direction.get("val") == "bar",
+                stacked=grouping is not None and grouping.get("val") in ("stacked", "percentStacked"),
+            )
         for index, ser in enumerate(plot.findall(C + "ser")):
             name = next(iter(_points(ser.find(C + "tx"))), "") or f"Series {len(result.series) + 1}"
             categories = _points(ser.find(C + "cat")) or _points(ser.find(C + "xVal"))

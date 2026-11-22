@@ -46,13 +46,14 @@ export default function LiveTab() {
   }
 
   const musicInLive = rules.music_enabled && rules.live.music_rounds > 0
+  const wantsMusicDecade = rules.music_enabled && (rules.live.music_rounds > 0 || rules.after_party)
 
   const start = async () => {
     if (starting) return
     setStarting(true)
     setError(null)
     try {
-      const game = await call<LiveCreated>(`/quizzes/${quiz.id}/live`, { method: 'POST', body: musicInLive && decade ? { decade } : {} })
+      const game = await call<LiveCreated>(`/quizzes/${quiz.id}/live`, { method: 'POST', body: wantsMusicDecade && decade ? { decade } : {} })
       setLiveGame(game)
       setReplacing(false)
       notify(`Live game ${game.code} is ready.`)
@@ -87,14 +88,18 @@ export default function LiveTab() {
         <ul className="list-disc space-y-1 pl-5 text-sm">
           <li>
             {rules.live.questions} questions, {rules.live.timer_sec} seconds each
-            {musicInLive ? `, with ${plural(rules.live.music_rounds, 'music break')}` : ', no music'}.
+            {musicInLive
+              ? `, with ${plural(rules.live.music_rounds, 'music break')}${rules.after_party ? ' and after-party music' : ''}`
+              : wantsMusicDecade
+                ? ', with after-party music at the end'
+                : ', no music'}.
           </li>
           <li>
             {rules.live.head_start > 0
               ? `People who are already “ready” from the pre-read start with ${rules.live.head_start} points.`
               : 'Nobody gets a head start for doing the pre-read.'}
           </li>
-          <li>Pinned questions are always included, then the ones people found hardest in the pre-read.</li>
+          <li>Pinned questions are always included, followed by a balanced easy → medium → hard mix across sections (favoring topics people missed in the pre-read).</li>
           <li>
             Players join with a code, not the play link, so it works whatever the quiz's status is.{' '}
             <Link className="ad-link" to={paths.quiz(quiz.id, 'play-styles')}>
@@ -104,7 +109,7 @@ export default function LiveTab() {
         </ul>
 
         <div className="mt-4 flex flex-wrap items-end gap-3">
-          {musicInLive && (
+          {wantsMusicDecade && (
             <Field label="Music from" className="w-full sm:w-56">
               {(props) => (
                 <select className="field" {...props} value={decade} onChange={(event) => setDecade(event.target.value)} disabled={starting}>
@@ -206,7 +211,7 @@ export default function LiveTab() {
               </table>
             </div>
             <p className="mt-2 text-xs text-muted">
-              The big-screen link of an earlier game cannot be shown again. If you have lost it for a game that has not finished, start a new one.
+              Lost the big-screen tab for a game that is still running? Use “Reopen big screen” to generate a fresh host link (this immediately disconnects any older host tab).
             </p>
           </>
         )}
@@ -227,10 +232,8 @@ export default function LiveTab() {
         }}
       >
         <p>
-          Game <strong>{liveGame?.code}</strong> stays valid, but its big-screen link will be replaced on this page by the new game's link and
-          cannot be shown again.
+          Game <strong>{liveGame?.code}</strong> stays active, and you can reopen its big screen anytime from the Earlier live games list below while it is still running.
         </p>
-        <p>If you still need it, copy the big-screen link first.</p>
       </ConfirmDialog>
 
       <Dialog open={viewing !== null} onClose={() => setViewing(null)} title={viewing ? `Results of game ${viewing.code}` : 'Results'} wide>
@@ -276,11 +279,11 @@ function ReadyGame({ game }: { game: LiveCreated }) {
 
       <div className="mt-4">
         <Note tone="warn" role="status">
-          <strong className="block">The big-screen link is shown only once</strong>
+          <strong className="block">Keep the big-screen link private</strong>
           <p className="mt-1">
-            It contains the key that controls the game, so anyone who has it can run the game: open it only on the computer connected to the big
-            screen, and do not share it with players. It stays here until you leave this quiz or reload the page. After that it cannot be shown
-            again and you would have to start a new game.
+            It contains the key that controls the game, so anyone who has it can run the room: open it only on the computer connected to the big
+            screen, and do not share it with players. If you close or lose the tab while the game is still running, use “Reopen big screen” below to
+            generate a fresh host link.
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
             <div className="min-w-0 flex-1 basis-56">

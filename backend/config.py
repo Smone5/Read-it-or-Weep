@@ -32,6 +32,9 @@ class Config:
     public_base_url: str = field(default_factory=lambda: _env("PUBLIC_BASE_URL", "http://localhost:8100").rstrip("/"))
     web_base_url: str = field(default_factory=lambda: _env("WEB_BASE_URL", "").rstrip("/"))
     cors_origins: list[str] = field(default_factory=lambda: _env_list("CORS_ORIGINS"))
+    trusted_proxies: list[str] = field(
+        default_factory=lambda: _env_list("TRUSTED_PROXIES", "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16")
+    )
     web_dist_dir: str = field(default_factory=lambda: _env("WEB_DIST_DIR", str(BACKEND_DIR.parent / "web" / "dist")))
 
     # First admin, created at start-up if no admin exists yet.

@@ -12,17 +12,17 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { IconBolt, IconCheck, IconCrown, IconPlay, IconStar } from '../components/Icons'
 import { NowPlaying } from '../components/NowPlaying'
-import { FullScreenMessage, SoundToggle, Spinner, Stage } from '../components/ui'
-import { formatScore, HostBox, LETTERS, TONE_INKS, TONES } from '../game/parts'
+import { FullScreenMessage, Modal, SoundToggle, Spinner, Stage } from '../components/ui'
+import { formatScore, HostBox, LETTERS, RollingScore, TONE_INKS, TONES } from '../game/parts'
 import { VideoClipCard } from '../game/VideoClipCard'
 import { startParty, stopJukebox } from '../lib/jukebox'
 import { api } from '../lib/api'
 import { HostVoice } from '../lib/hostVoice'
 import { fadeOutMusic, musicElement, playClip, preloadClip, resumeClip, stopMusic, unlockMusic } from '../lib/music'
-import { play, preloadSounds, unlockAudio } from '../lib/sound'
+import { blip, play, preloadSounds, unlockAudio } from '../lib/sound'
 import { applyBranding, applyDecade } from '../lib/theme'
 import { trace } from '../lib/trace'
-import type { Branding, LiveState } from '../lib/types'
+import type { Branding, LiveState, VideoClip } from '../lib/types'
 import { useLive, useTicker } from './useLive'
 
 function readKey(code: string): string | null {
@@ -50,10 +50,16 @@ export default function HostScreen() {
   const { code: rawCode = '' } = useParams()
   const code = rawCode.toUpperCase()
   const [hostKey] = useState(() => readKey(code))
-  const { state, error, until, headers } = useLive({ code, hostKey, enabled: Boolean(hostKey) })
+  const { state, error, connected, until, headers } = useLive({ code, hostKey, enabled: Boolean(hostKey) })
   const [branding, setBranding] = useState<Branding | null>(null)
   const [qr, setQr] = useState('')
   const [busy, setBusy] = useState(false)
+  const [welcoming, setWelcoming] = useState(false)
+  const [audioStarted, setAudioStarted] = useState(false)
+  const [confirmEnd, setConfirmEnd] = useState(false)
+  const [theaterVideo, setTheaterVideo] = useState<VideoClip | null>(null)
+  const [rematching, setRematching] = useState(false)
+  const [rematchError, setRematchError] = useState('')
   const [hostLine, setHostLine] = useState('')
   const [hostSpeaking, setHostSpeaking] = useState(false)
   const [showQr, setShowQr] = useState(false)
@@ -61,6 +67,9 @@ export default function HostScreen() {
   const seen = useRef('')
   const wasLocked = useRef(true)
   const unlockedAt = useRef(0)
+  const welcomeSkipRef = useRef<(() => void) | null>(null)
+  const prevPlayersRef = useRef(0)
+  const lastTickSecRef = useRef(-1)
   const joinUrl = `${window.location.origin}/live/${code}`
   useTicker(state?.status === 'question')
 
@@ -74,6 +83,7 @@ export default function HostScreen() {
     void QRCode.toDataURL(joinUrl, { width: 420, margin: 1 }).then(setQr)
     preloadSounds()
     return () => {
+      welcomeSkipRef.current?.()
       voice.current?.close()
       stopMusic()
       stopJukebox(0)
@@ -81,56 +91,132 @@ export default function HostScreen() {
     }
   }, [code, joinUrl])
 
+  const ensureAudio = useCallback(() => {
+    unlockAudio()
+    unlockMusic()
+    if (!voice.current && hostKey) {
+      voice.current = new HostVoice({ liveCode: code, hostKey }, { onLine: setHostLine, onSpeaking: setHostSpeaking })
+      voice.current.connect()
+    }
+    setAudioStarted(true)
+    return voice.current
+  }, [code, hostKey])
+
   const send = useCallback(
-    (action: 'next' | 'end' | 'open') =>
-      fetch(`/api/live/${code}/control`, { method: 'POST', headers: { ...headers(), 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) }).catch(() => undefined),
+    (action: 'next' | 'end' | 'open' | 'extend', expected?: { status?: string; index?: number }) =>
+      fetch(`/api/live/${code}/control`, {
+        method: 'POST',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          ...(expected?.status ? { expectedStatus: expected.status } : {}),
+          ...(expected?.index !== undefined ? { expectedIndex: expected.index } : {}),
+        }),
+      }).catch(() => undefined),
     [code, headers],
   )
 
   const question = state?.status === 'question' ? state.question : undefined
   const locked = Boolean(question) && until(question?.opensAt) > 0 // on screen, being read out; phones not open yet
+  const qSeconds = question && !locked ? Math.ceil(Math.max(0, until(question.endsAt)) / 1000) : -1
 
   useEffect(() => {
     if (wasLocked.current && !locked && state?.status === 'question') {
       unlockedAt.current = performance.now()
+      blip('unlock')
     }
     wasLocked.current = locked
   }, [locked, state?.status])
 
+  useEffect(() => {
+    if (state?.status !== 'question' || locked) {
+      lastTickSecRef.current = -1
+      return
+    }
+    if (qSeconds > 0 && qSeconds <= 5 && qSeconds !== lastTickSecRef.current) {
+      lastTickSecRef.current = qSeconds
+      play(qSeconds <= 3 ? 'fasttick' : 'tick')
+    }
+  }, [state?.status, locked, qSeconds])
+
+  useEffect(() => {
+    if (!state) return
+    if (state.status === 'lobby' && state.players > prevPlayersRef.current && audioStarted) {
+      play('click')
+    }
+    prevPlayersRef.current = state.players
+  }, [state?.status, state?.players, audioStarted])
+
   const control = useCallback(
-    async (action: 'next' | 'end') => {
+    async (action: 'next' | 'end' | 'extend') => {
+      // Pressing Next/Space while the welcome intro is speaking skips straight to Question 1.
+      if (action === 'next' && welcoming) {
+        welcomeSkipRef.current?.()
+        return
+      }
       if (busy) return
       // Guard against a Spacebar / clicker race right after auto-open so we never skip straight to Reveal with 0 answers.
       if (action === 'next' && state?.status === 'question' && !locked && performance.now() - unlockedAt.current < 2500) {
         return
       }
       setBusy(true)
-      unlockAudio()
-      unlockMusic()
-      if (!voice.current && hostKey) {
-        voice.current = new HostVoice({ liveCode: code, hostKey }, { onLine: setHostLine, onSpeaking: setHostSpeaking })
-        voice.current.connect()
-      }
-      const host = voice.current
+      const host = ensureAudio()
       try {
-        if (action === 'next' && state?.status === 'lobby') {
-          // The welcome is heard over the lobby; the first question follows it.
+        if (action === 'extend') {
+          await send('extend', { status: 'question', index: state?.index })
+        } else if (action === 'next' && state?.status === 'lobby') {
+          // The welcome is heard over the lobby; pressing Space/Next again skips it immediately.
+          setWelcoming(true)
           host?.cue('live_welcome')
-          if (host) await Promise.race([host.whenQuiet(), pause(WELCOME_WAIT_MS)])
-          await send('next')
+          if (host) {
+            await Promise.race([
+              host.whenQuiet(),
+              pause(WELCOME_WAIT_MS),
+              new Promise<void>((resolve) => {
+                welcomeSkipRef.current = resolve
+              }),
+            ])
+            welcomeSkipRef.current = null
+            host.skip()
+          }
+          setWelcoming(false)
+          await send('next', { status: 'lobby', index: state.index })
         } else if (action === 'next' && locked) {
           host?.skip() // "Start the clock": no need to hear the rest of the question
-          await send('open')
+          await send('open', { status: 'question', index: state?.index })
         } else {
           host?.skip() // moving on: the host stops rather than talk over the next screen
-          await send(action)
+          await send(action, action === 'next' && state ? { status: state.status, index: state.index } : undefined)
         }
       } finally {
+        welcomeSkipRef.current = null
+        setWelcoming(false)
         setBusy(false)
       }
     },
-    [busy, code, hostKey, locked, send, state?.status],
+    [busy, ensureAudio, locked, send, state, welcoming],
   )
+
+  const startRematch = useCallback(async () => {
+    if (rematching) return
+    setRematching(true)
+    setRematchError('')
+    try {
+      const response = await fetch(`/api/live/${code}/rematch`, {
+        method: 'POST',
+        headers: headers(),
+      })
+      if (!response.ok) {
+        const detail = (await response.json().catch(() => null))?.detail
+        throw new Error(detail || 'Could not start a rematch.')
+      }
+      const next = (await response.json()) as { code: string; hostKey: string }
+      window.location.assign(`/host/${next.code}#k=${encodeURIComponent(next.hostKey)}`)
+    } catch (caught) {
+      setRematchError((caught as Error).message)
+      setRematching(false)
+    }
+  }, [code, headers, rematching])
 
   // React to each phase change exactly once: sounds, the host's line, the music clip.
   useEffect(() => {
@@ -139,6 +225,7 @@ export default function HostScreen() {
     const marker = `${state.status}:${state.index}`
     if (marker === seen.current) return
     seen.current = marker
+    setTheaterVideo(null)
     trace('live', { phase: marker })
     const host = voice.current
     const current = state.question
@@ -151,7 +238,7 @@ export default function HostScreen() {
       void Promise.all([pause(MIN_LEAD_MS), host?.whenQuiet()]).then(() => {
         if (seen.current !== marker) return
         trace('live.open')
-        void send('open')
+        void send('open', { status: 'question', index: state.index })
       })
     } else if (state.status === 'reveal') {
       play('rimshot')
@@ -164,17 +251,20 @@ export default function HostScreen() {
         })
     } else if (state.status === 'scoreboard') {
       fadeOutMusic()
+      play('levelup')
       host?.cue('live_scoreboard')
     } else if (state.status === 'finished') {
       fadeOutMusic()
       window.setTimeout(() => {
         if (seen.current === marker) play('cheer')
       }, 1050)
-      host?.cue('live_final')
+      window.setTimeout(() => {
+        if (seen.current === marker) voice.current?.cue('live_final')
+      }, 1550)
       // Once the winner has been crowned, music for the room: hits from the game's decade.
       const party = state.afterParty
       if (party) {
-        void Promise.all([pause(2200), Promise.race([host?.whenQuiet(), pause(15000)])]).then(() => {
+        void Promise.all([pause(3200), Promise.race([voice.current?.whenQuiet() ?? pause(0), pause(15000)])]).then(() => {
           if (seen.current === marker) startParty(party.tracks)
         })
       }
@@ -193,8 +283,12 @@ export default function HostScreen() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLButtonElement) return
-      if ([' ', 'Enter', 'ArrowRight', 'PageDown'].includes(event.key) && state && state.status !== 'finished') {
+      if (confirmEnd || theaterVideo || document.querySelector('dialog[open]')) return
+      const target = event.target
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return
+      const isClicker = event.key === 'PageDown' || event.key === 'ArrowRight'
+      if (!isClicker && (target instanceof HTMLButtonElement || target instanceof HTMLAnchorElement)) return
+      if ((isClicker || event.key === ' ' || event.key === 'Enter') && state && state.status !== 'finished') {
         if (state.status === 'lobby' && !state.players) return
         event.preventDefault()
         void control('next')
@@ -202,7 +296,7 @@ export default function HostScreen() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [control, state])
+  }, [control, state, confirmEnd, theaterVideo])
 
   if (!hostKey) {
     return <FullScreenMessage title="Big screen link needed">Open the big screen from the admin page's Live tab. That link carries the key that controls the game.</FullScreenMessage>
@@ -214,7 +308,7 @@ export default function HostScreen() {
   }
 
   const nextLabel: Record<string, string> = {
-    lobby: busy ? 'Here we go…' : state.players ? 'Start the game' : 'Waiting for players…',
+    lobby: welcoming ? 'Skip intro' : busy ? 'Starting…' : state.players ? 'Start the game' : 'Waiting for players…',
     question: locked ? 'Start the clock' : 'Reveal now',
     reveal: 'Scoreboard',
     scoreboard: state.index + 1 >= state.total ? 'Final results' : 'Next question',
@@ -223,16 +317,26 @@ export default function HostScreen() {
   return (
     <Stage>
       <div className="mx-auto flex w-full max-w-[1500px] flex-1 flex-col gap-3 lg:h-[calc(100dvh-26px)] lg:gap-4 lg:overflow-hidden">
-        <header className="flex flex-none items-center gap-4">
+        <header className="flex flex-none flex-wrap items-center gap-3 lg:gap-4">
           <div className="min-w-0 flex-1">
             <p className="pixel truncate text-[10px] text-muted lg:text-xs">{branding?.companyName} · {state.quizTitle}</p>
             <p className="pixel neon truncate text-sm lg:text-xl">{branding?.gameTitle ?? 'Live game'}</p>
           </div>
+          {!connected && (
+            <span className="chip" style={{ borderColor: 'var(--bad)', color: 'var(--bad)' }} role="status">
+              Reconnecting…
+            </span>
+          )}
+          {!audioStarted && state.status !== 'lobby' && (
+            <button type="button" className="btn btn-accent btn-sm min-h-[44px]" onClick={() => ensureAudio()}>
+              Enable room audio
+            </button>
+          )}
           {state.status !== 'lobby' && state.status !== 'finished' && (
             <div className="relative flex-none">
               <button
                 type="button"
-                className="btn btn-ghost btn-sm text-xs"
+                className="btn btn-ghost btn-sm min-h-[44px] text-xs"
                 onClick={() => setShowQr((v) => !v)}
                 title="Show late-join QR code"
               >
@@ -254,33 +358,100 @@ export default function HostScreen() {
         <main className="flex min-h-0 flex-1 flex-col">
           {state.status === 'lobby' && <LobbyView state={state} qr={qr} joinUrl={joinUrl} />}
           {(state.status === 'question' || state.status === 'reveal') && state.question && (
-            <QuestionView state={state} until={until} onVideoStart={() => voice.current?.skip()} />
+            <QuestionView
+              state={state}
+              until={until}
+              busy={busy}
+              onExtend={() => void control('extend')}
+              onVideoStart={() => voice.current?.skip()}
+              onOpenVideo={(video) => {
+                voice.current?.skip()
+                setTheaterVideo(video)
+              }}
+            />
           )}
           {state.status === 'scoreboard' && <Scoreboard state={state} />}
           {state.status === 'finished' && <Finale state={state} />}
         </main>
 
-        <footer className="flex flex-none items-end gap-4">
+        <footer className="flex flex-none flex-wrap items-end gap-4">
           <div className="min-w-0 flex-1">
             <HostBox name={branding?.host.name ?? 'Host'} line={hostLine} speaking={hostSpeaking} />
           </div>
           {state.status === 'finished' && (
-            <div className="w-[min(46%,600px)] flex-none">
-              <NowPlaying large decade={state.afterParty?.decade} />
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="w-[min(42vw,520px)] flex-none">
+                <NowPlaying large decade={state.afterParty?.decade} />
+              </div>
+              <div className="flex flex-col items-end gap-1">
+                <button
+                  type="button"
+                  className="btn btn-primary btn-lg"
+                  disabled={rematching}
+                  onClick={() => void startRematch()}
+                >
+                  {rematching ? 'Opening room…' : <>Play again <IconPlay size={14} /></>}
+                </button>
+                {rematchError && <p className="text-xs" style={{ color: 'var(--bad)' }}>{rematchError}</p>}
+              </div>
             </div>
           )}
           {state.status !== 'finished' && (
             <>
-              <button className="btn btn-ghost" disabled={busy} onClick={() => window.confirm('End the live game now?') && void control('end')}>End</button>
-              <button className="btn btn-primary btn-lg" disabled={busy || (state.status === 'lobby' && !state.players)} onClick={() => void control('next')}>
+              <button
+                type="button"
+                className="btn btn-ghost min-h-[44px]"
+                disabled={busy && !welcoming}
+                onClick={() => setConfirmEnd(true)}
+              >
+                End
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-lg"
+                disabled={(busy && !welcoming) || (state.status === 'lobby' && !state.players)}
+                onClick={() => void control('next')}
+              >
                 <span>{nextLabel[state.status]}</span>
-                {!(state.status === 'lobby' && (!state.players || busy)) && <IconPlay size={14} />}
+                {!(state.status === 'lobby' && !state.players) && (!busy || welcoming) && <IconPlay size={14} />}
                 <span className="kbd">SPACE</span>
               </button>
             </>
           )}
         </footer>
       </div>
+
+      <Modal open={confirmEnd} onClose={() => setConfirmEnd(false)} label="End live game">
+        <h2 className="text-base">End the live game?</h2>
+        <p className="mt-2 text-sm text-muted">
+          Everyone in room <b>{state.code}</b> will jump straight to final results.
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" className="btn btn-primary" autoFocus onClick={() => setConfirmEnd(false)}>
+            Keep playing
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => {
+              setConfirmEnd(false)
+              void control('end')
+            }}
+          >
+            End game
+          </button>
+        </div>
+      </Modal>
+
+      <Modal open={Boolean(theaterVideo)} onClose={() => setTheaterVideo(null)} wide label="Video clip">
+        {theaterVideo && (
+          <VideoClipCard
+            video={theaterVideo}
+            autoPlay
+            onPlayStart={() => voice.current?.skip()}
+          />
+        )}
+      </Modal>
     </Stage>
   )
 }
@@ -301,7 +472,7 @@ function LobbyView({ state, qr, joinUrl }: { state: LiveState; qr: string; joinU
         <div className="flex flex-wrap items-baseline justify-between gap-3">
           <h2 className="text-sm lg:text-xl">In the room</h2>
           <p className="pixel inline-flex items-center gap-1.5 text-[10px] text-muted lg:text-xs">
-            <IconStar size={12} style={{ color: 'var(--accent)' }} /> = did the pre-read{state.headStart ? ` (+${state.headStart} head start)` : ''}
+            <IconStar size={12} style={{ color: 'var(--accent-text)' }} /> = did the pre-read{state.headStart ? ` (+${state.headStart} head start)` : ''}
           </p>
         </div>
         {roster.length === 0 ? (
@@ -309,8 +480,12 @@ function LobbyView({ state, qr, joinUrl }: { state: LiveState; qr: string; joinU
         ) : (
           <ul className="mt-5 flex flex-wrap content-start gap-2.5 lg:gap-3">
             {roster.map((person, index) => (
-              <li key={`${person.name}-${index}`} className="zoom-in inline-flex items-center gap-1.5 rounded-sm border-2 px-3 py-1.5 text-base lg:text-2xl" style={{ borderColor: person.prepared ? 'var(--accent)' : 'var(--line)', background: 'color-mix(in oklab, var(--page) 60%, transparent)' }}>
-                {person.prepared && <IconStar size={16} style={{ color: 'var(--accent)' }} />}
+              <li
+                key={person.id ?? `${person.name}-${index}`}
+                className="zoom-in inline-flex items-center gap-1.5 rounded-sm border-2 px-3 py-1.5 text-base lg:text-2xl"
+                style={{ borderColor: person.prepared ? 'var(--accent)' : 'var(--line)', background: 'color-mix(in oklab, var(--page) 60%, transparent)' }}
+              >
+                {person.prepared && <IconStar size={16} style={{ color: 'var(--accent-text)' }} />}
                 {person.name}
               </li>
             ))}
@@ -324,19 +499,29 @@ function LobbyView({ state, qr, joinUrl }: { state: LiveState; qr: string; joinU
 function QuestionView({
   state,
   until,
+  busy,
+  onExtend,
   onVideoStart,
+  onOpenVideo,
 }: {
   state: LiveState
   until: (iso: string | null | undefined) => number
+  busy: boolean
+  onExtend: () => void
   onVideoStart?: () => void
+  onOpenVideo?: (video: VideoClip) => void
 }) {
   const question = state.question!
   const reveal = state.status === 'reveal' ? state.reveal : undefined
   const opensIn = until(question.opensAt)
   const left = Math.max(0, until(question.endsAt))
   const seconds = Math.ceil(left / 1000)
+  const totalMs = Math.max(question.limitSec * 1000, left, 1)
   const answered = state.answersIn ?? 0
+  const answerRatio = state.players > 0 ? Math.min(1, answered / state.players) : 0
+  const totalVotes = reveal ? reveal.counts.reduce((sum, n) => sum + n, 0) : 0
   const most = reveal ? Math.max(1, ...reveal.counts) : 1
+  const correctPct = reveal && totalVotes > 0 ? Math.round((100 * (reveal.counts[reveal.correctIndex] ?? 0)) / totalVotes) : null
   const pictureUrl = reveal?.imageUrl ?? question.imageUrl
   const hasPicture = Boolean(pictureUrl)
 
@@ -371,22 +556,65 @@ function QuestionView({
   }, [question.kind, question.number])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 lg:gap-5">
-      <div className="flex flex-none items-center justify-between gap-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 lg:gap-4">
+      <div className="flex flex-none flex-wrap items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-2">
           <span className="chip lg:text-xs">Question {question.number} of {state.total}</span>
           {question.doublePoints && <span className="chip chip-accent lg:text-xs"><IconBolt size={12} /> 2× DOUBLE POINTS</span>}
           {question.section && <span className="chip chip-accent lg:text-xs">{question.section}</span>}
+          {correctPct !== null && (
+            <span
+              className="chip lg:text-xs"
+              style={{
+                borderColor: correctPct >= 50 ? 'var(--good)' : 'var(--bad)',
+                color: correctPct >= 50 ? 'var(--good)' : 'var(--bad)',
+              }}
+            >
+              {correctPct}% got it ({reveal!.counts[reveal!.correctIndex]}/{totalVotes})
+            </span>
+          )}
         </div>
         {!reveal && (
-          <div className="flex items-center gap-5">
-            <div className="hud text-right">Answers in<b className="!text-xl lg:!text-3xl">{answered}/{state.players}</b></div>
-            <div className="pixel grid h-16 w-16 place-items-center rounded border-4 text-xl tabular-nums lg:h-20 lg:w-20 lg:text-3xl" style={{ borderColor: seconds <= 5 && opensIn <= 0 ? 'var(--bad)' : 'var(--accent)', color: seconds <= 5 && opensIn <= 0 ? 'var(--bad)' : 'var(--accent-text)' }}>
+          <div className="flex items-center gap-4 lg:gap-5">
+            <div className="hud min-w-[118px] text-right">
+              Answers in<b className="!text-xl lg:!text-3xl">{answered}/{state.players}</b>
+              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
+                <div
+                  className="h-full origin-left transition-transform duration-300"
+                  style={{ transform: `scaleX(${answerRatio})`, background: answerRatio >= 1 ? 'var(--good)' : 'var(--accent)' }}
+                />
+              </div>
+            </div>
+            {opensIn <= 0 && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm min-h-[44px] tabular-nums"
+                disabled={busy}
+                onClick={onExtend}
+                title="Add 15 seconds to the room clock"
+              >
+                +15s
+              </button>
+            )}
+            <div
+              className={`pixel grid h-16 w-16 place-items-center rounded border-4 text-xl tabular-nums lg:h-20 lg:w-20 lg:text-3xl ${seconds <= 5 && opensIn <= 0 ? 'blink' : ''}`}
+              style={{ borderColor: seconds <= 5 && opensIn <= 0 ? 'var(--bad)' : 'var(--accent)', color: seconds <= 5 && opensIn <= 0 ? 'var(--bad)' : 'var(--accent-text)' }}
+            >
               {opensIn > 0 ? '…' : seconds}
             </div>
           </div>
         )}
       </div>
+
+      {!reveal && opensIn <= 0 && (
+        <div className="timer-track flex-none" role="timer" aria-label={`${seconds} seconds remaining`}>
+          <div
+            className="timer-fill"
+            data-urgent={seconds <= 5}
+            style={{ transform: `scaleX(${Math.max(0, Math.min(1, left / totalMs))})` }}
+          />
+        </div>
+      )}
 
       <div className={`grid min-h-0 flex-1 items-center gap-5 ${hasPicture ? 'lg:grid-cols-2' : ''}`}>
         <div className="min-h-0">
@@ -398,7 +626,7 @@ function QuestionView({
               <div>
                 <p className="pixel neon-accent text-sm lg:text-xl">{opensIn > 0 ? 'Get ready to listen' : clipPlaying ? 'Listen up' : 'Clip paused'}</p>
                 {opensIn <= 0 && !clipPlaying && question.previewUrl && (
-                  <button type="button" className="btn btn-accent btn-sm mt-2" onClick={() => void resumeClip().catch(() => void playClip(question.previewUrl!))}>
+                  <button type="button" className="btn btn-accent btn-sm mt-2 min-h-[44px]" onClick={() => void resumeClip().catch(() => void playClip(question.previewUrl!))}>
                     <IconPlay size={12} /> Replay clip
                   </button>
                 )}
@@ -420,7 +648,16 @@ function QuestionView({
             </div>
           )}
           {reveal?.explanation && <p className="rise mt-4 text-lg text-muted lg:text-2xl">{reveal.explanation}</p>}
-          {reveal?.video && <div className="mt-3 max-w-lg"><VideoClipCard video={reveal.video} compact onPlayStart={onVideoStart} /></div>}
+          {reveal?.video && (
+            <div className="mt-3 max-w-lg">
+              <VideoClipCard
+                video={reveal.video}
+                compact
+                onPlayStart={onVideoStart}
+                onOpenTheater={onOpenVideo ? () => onOpenVideo(reveal.video!) : undefined}
+              />
+            </div>
+          )}
         </div>
         {hasPicture && (
           <div className="picture-frame overflow-hidden rounded-[6px] border-4 bg-white" style={{ borderColor: 'var(--accent)', boxShadow: '0 0 0 2px #000, 5px 5px 0 2px #000' }}>
@@ -439,6 +676,8 @@ function QuestionView({
         <div className="grid flex-none gap-3 sm:grid-cols-2 lg:gap-4">
           {question.options.map((option, index) => {
             const right = reveal && index === reveal.correctIndex
+            const votes = reveal ? reveal.counts[index] ?? 0 : 0
+            const pct = reveal && totalVotes > 0 ? Math.round((100 * votes) / totalVotes) : 0
             return (
               <div
                 key={index}
@@ -449,16 +688,17 @@ function QuestionView({
                 {reveal && (
                   <span
                     className="absolute inset-0 origin-left bg-black/22 transition-transform duration-700"
-                    style={{ transform: `scaleX(${barsReady ? reveal.counts[index] / most : 0})` }}
+                    style={{ transform: `scaleX(${barsReady ? votes / most : 0})` }}
                     aria-hidden
                   />
                 )}
-                <span className="pixel relative grid h-10 w-10 flex-none place-items-center rounded-sm bg-black/25 text-base lg:h-12 lg:w-12 lg:text-xl">{LETTERS[index]}</span>
+                <span className="pixel relative grid h-10 w-10 flex-none place-items-center rounded-sm bg-black/30 text-base lg:h-12 lg:w-12 lg:text-xl">{LETTERS[index]}</span>
                 <span className="relative min-w-0 flex-1 break-words">{option}</span>
                 {reveal && (
-                  <span className="pixel relative inline-flex items-center gap-1.5 text-sm tabular-nums lg:text-xl">
-                    {right && <IconCheck size={18} />}
-                    {reveal.counts[index]}
+                  <span className="pixel relative inline-flex flex-none items-center gap-1.5 rounded-sm bg-black/35 px-2.5 py-1 text-xs tabular-nums text-white lg:text-base">
+                    {right && <IconCheck size={16} />}
+                    <span>{votes}</span>
+                    {totalVotes > 0 && <span className="opacity-85">({pct}%)</span>}
                   </span>
                 )}
               </div>
@@ -481,6 +721,7 @@ function BigScreenRow({
 }) {
   const rankColor = row.rank === 1 ? 'var(--rank-1)' : row.rank === 2 ? 'var(--rank-2)' : row.rank === 3 ? 'var(--rank-3)' : 'var(--muted)'
   const share = top > 0 ? Math.max(0.04, row.score / top) : 0
+  const startScore = Math.max(0, row.score - (row.roundPoints ?? 0))
   return (
     <li
       className={`rise sb-row ${dense ? 'px-3.5 py-2.5 lg:px-4 lg:py-3' : 'px-4 py-3 lg:px-5 lg:py-3.5'}`}
@@ -510,8 +751,8 @@ function BigScreenRow({
           </span>
           {row.streak >= 3 && (
             <span
-              className="inline-flex flex-none items-center gap-0.5 rounded-sm bg-black/45 px-1.5 py-0.5 text-xs font-bold lg:text-sm"
-              style={{ color: 'var(--accent)' }}
+              className="inline-flex flex-none items-center gap-0.5 rounded-sm bg-black/65 px-1.5 py-0.5 text-xs font-bold lg:text-sm"
+              style={{ color: '#ffb020' }}
             >
               <IconBolt size={12} />x{row.streak}
             </span>
@@ -530,9 +771,9 @@ function BigScreenRow({
       <div className="flex flex-none flex-col items-end">
         <span
           className={`sb-score ${dense ? '!text-xl lg:!text-2xl' : '!text-2xl lg:!text-3xl'}`}
-          style={{ color: row.rank === 1 ? '#ffd60a' : 'var(--ink)' }}
+          style={{ color: row.rank === 1 ? 'var(--rank-1)' : 'var(--ink)' }}
         >
-          {formatScore(row.score)}
+          <RollingScore value={row.score} from={startScore} format="comma" durationMs={650} />
         </span>
         {row.roundPoints !== undefined && row.roundPoints > 0 && (
           <span className="text-xs font-bold tabular-nums lg:text-sm" style={{ color: 'var(--good)' }}>
@@ -571,15 +812,15 @@ function Scoreboard({ state }: { state: LiveState }) {
       {twoCol ? (
         <div className="mx-auto grid w-full max-w-6xl gap-2.5 lg:grid-cols-2 lg:gap-x-6">
           <ol className="grid content-start gap-2.5">
-            {leftCol.map((row) => <BigScreenRow key={row.rank} row={row} top={top} dense />)}
+            {leftCol.map((row) => <BigScreenRow key={`${row.rank}-${row.name}`} row={row} top={top} dense />)}
           </ol>
           <ol className="grid content-start gap-2.5">
-            {rightCol.map((row) => <BigScreenRow key={row.rank} row={row} top={top} dense />)}
+            {rightCol.map((row) => <BigScreenRow key={`${row.rank}-${row.name}`} row={row} top={top} dense />)}
           </ol>
         </div>
       ) : (
         <ol className="mx-auto grid w-full max-w-4xl gap-3">
-          {leftCol.map((row) => <BigScreenRow key={row.rank} row={row} top={top} dense={false} />)}
+          {leftCol.map((row) => <BigScreenRow key={`${row.rank}-${row.name}`} row={row} top={top} dense={false} />)}
         </ol>
       )}
 
@@ -606,15 +847,17 @@ function Finale({ state }: { state: LiveState }) {
   const podium = [second, first, third]
   const heights = ['h-24 lg:h-36', 'h-36 lg:h-48', 'h-16 lg:h-24']
   const missed = state.roomMissed ?? []
+  const confettiFired = useRef(false)
 
   useEffect(() => {
-    if (!first || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    if (!first || confettiFired.current || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    confettiFired.current = true
     const timer = window.setTimeout(() => {
       const colors = [getComputedStyle(document.documentElement).getPropertyValue('--brand').trim() || '#6d5ef8', '#ffb020', '#ffffff', '#2fbf71']
       void confetti({ particleCount: 130, spread: 85, origin: { x: 0.3, y: 0.45 }, colors, shapes: ['square'], scalar: 1.05 })
     }, 1150)
     return () => window.clearTimeout(timer)
-  }, [first])
+  }, [first?.name, state.code])
 
   return (
     <div className="grid min-h-0 flex-1 items-center gap-6 lg:grid-cols-2 lg:gap-8">
@@ -625,7 +868,7 @@ function Finale({ state }: { state: LiveState }) {
             person ? (
               <div key={index} className="flex w-28 flex-col items-center lg:w-44">
                 <div className="zoom-in flex w-full flex-col items-center" style={{ animationDelay: `${[0.5, 1.1, 0][index]}s` }}>
-                  {index === 1 && <IconCrown size={28} className="mb-1" style={{ color: '#ffd60a' }} />}
+                  {index === 1 && <IconCrown size={28} className="mb-1" style={{ color: 'var(--rank-1)' }} />}
                   <p className="w-full max-w-full truncate text-lg font-bold lg:text-2xl">{person.name}</p>
                   <p className="mb-2 font-bold tabular-nums lg:text-xl" style={{ color: 'var(--accent-text)' }}>{formatScore(person.score)}</p>
                 </div>
@@ -650,7 +893,7 @@ function Finale({ state }: { state: LiveState }) {
         {runnersUp.length > 0 && (
           <ol className="mt-5 grid w-full max-w-xl grid-cols-2 gap-1.5 text-left">
             {runnersUp.map((row) => (
-              <li key={row.rank} className="sb-row !py-1.5 !px-2.5">
+              <li key={`${row.rank}-${row.name}`} className="sb-row !py-1.5 !px-2.5">
                 <span className="sb-rank !h-6 !min-w-[32px] !text-[9px]">#{row.rank}</span>
                 <span className="min-w-0 flex-1 truncate text-sm font-bold lg:text-base">{row.name}</span>
                 <span className="sb-score !text-sm lg:!text-base">{formatScore(row.score)}</span>

@@ -29,9 +29,9 @@ import { ErrorNote, Modal, SoundToggle } from '../components/ui'
 import { VideoClipCard } from './VideoClipCard'
 import { api, ApiError, onConnectionTrouble, session } from '../lib/api'
 import type { HostVoice } from '../lib/hostVoice'
-import { cueJukebox, jukeboxMix, musicOn, onJukeboxChange, setJukeboxLevel, type JukeboxState } from '../lib/jukebox'
+import { cueJukebox, jukeboxMix, musicOn, onJukeboxChange, setJukeboxLevel, toggleJukebox, type JukeboxState } from '../lib/jukebox'
 import { fadeOutMusic, preloadClip, stopMusic } from '../lib/music'
-import { blip, buzz, play } from '../lib/sound'
+import { blip, buzz, play, soundOn, unlockAudio } from '../lib/sound'
 import { trace } from '../lib/trace'
 import type { Item, ModeId, Reveal, RunState, Summary, Turn } from '../lib/types'
 import { AnswerList, FactFakeButtons, HostBox, Hud, MusicPlayer, PictureView, TimerBar, useDeadline, type TalkControl } from './parts'
@@ -40,6 +40,8 @@ type Props = {
   firstTurn: Turn
   /** True when picking a game back up after a reload: skip the welcome. */
   resumed?: boolean
+  /** True when this player has completed a game before: snappier opening hold. */
+  returning?: boolean
   hostName: string
   hostLine: string
   hostSpeaking: boolean
@@ -125,8 +127,14 @@ function openingCard(state: RunState, first?: Item): Card {
   return { kicker: 'Get ready', title: state.modeName, blurb: round || MODE_BLURB[state.mode] }
 }
 
-function roundCard(next: Item, mode: ModeId): Card {
-  if (next.slot === 'music' && mode === 'sudden_death') return { kicker: 'Bonus', title: 'Music Break', blurb: 'Name that tune · win back a life' }
+function roundCard(next: Item, mode: ModeId, strikes = 0): Card {
+  if (next.slot === 'music' && mode === 'sudden_death') {
+    return {
+      kicker: 'Bonus',
+      title: 'Music Break',
+      blurb: strikes > 0 ? 'Name that tune · win back a life' : 'Name that tune · bonus +75 pts',
+    }
+  }
   const kicker = mode === 'show' || mode === 'jukebox' ? `Round ${next.round.number}` : 'Get ready'
   return { kicker, title: next.round.name, blurb: ROUND_BLURB[next.round.name] ?? '' }
 }
@@ -153,7 +161,7 @@ const LIFELINES: { kind: 'fifty' | 'peek' | 'hint'; label: string; cost: string;
 
 const FLAG_REASONS = ['The marked answer is wrong', 'More than one answer fits', 'The question is unclear', 'Something else']
 
-export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeaking, hostTone = 'accent', host, talk, onDone }: Props) {
+export default function Play({ firstTurn, resumed, returning = false, hostName, hostLine, hostSpeaking, hostTone = 'accent', host, talk, onDone }: Props) {
   const [state, setState] = useState<RunState>(firstTurn.state)
   const [item, setItem] = useState<Item | null>(null)
   const [phase, setPhase] = useState<Phase>('card')
@@ -174,6 +182,10 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   const [banner, setBanner] = useState('')
   const [scorePop, setScorePop] = useState<{ id: number; text: string; tone: 'good' | 'bad' } | null>(null)
   const [flash, setFlash] = useState<{ id: number; tone: 'good' | 'bad' } | null>(null)
+  const [jukeboxNeedsTap, setJukeboxNeedsTap] = useState(false)
+  const [isDesktopLg, setIsDesktopLg] = useState(() =>
+    typeof window !== 'undefined' ? window.matchMedia('(min-width: 1024px)').matches : true,
+  )
   const roundRef = useRef('')
   const doneRef = useRef(false)
   const aliveRef = useRef(true)
@@ -181,12 +193,34 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   const movingRef = useRef(false)
   const skipRef = useRef<(() => void) | null>(null)
   const welcomeRef = useRef(0) // the welcome line's number (0: no host to open the show)
+  const sfxTimersRef = useRef<number[]>([])
+  const lightningStatsRef = useRef<{ asked: number; correct: number }>({ asked: 0, correct: 0 })
   // The final question is read out before its answers appear (its clock waits on the server: see engine.place_wager).
   const [reading, setReading] = useState(false)
   const readingRef = useRef(false)
   const readTimer = useRef(0)
   const stopOpeningWatch = useRef<() => void>(() => undefined)
   const revealRef = useRef<HTMLElement>(null)
+
+  const clearSfxTimers = useCallback(() => {
+    sfxTimersRef.current.forEach((id) => window.clearTimeout(id))
+    sfxTimersRef.current = []
+  }, [])
+  const queueSfxTimer = useCallback((fn: () => void, ms: number) => {
+    const id = window.setTimeout(() => {
+      sfxTimersRef.current = sfxTimersRef.current.filter((t) => t !== id)
+      if (aliveRef.current) fn()
+    }, ms)
+    sfxTimersRef.current.push(id)
+  }, [])
+
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1024px)')
+    const onChange = () => setIsDesktopLg(mq.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+  useEffect(() => onJukeboxChange((jb) => setJukeboxNeedsTap(Boolean(jb.active && jb.needsTap))), [])
 
   const runId = state.runId
   const mode = state.mode
@@ -278,12 +312,13 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   // On a phone the explanation lands below the answers: wait for the 350ms pop/shake animation
   // before scrolling it into view (skip in quick auto-advancing rounds), and return to top on new questions.
   useEffect(() => {
+    const behavior: ScrollBehavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'
     if (phase === 'reveal') {
       if (quick) return
-      const timer = window.setTimeout(() => revealRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 360)
+      const timer = window.setTimeout(() => revealRef.current?.scrollIntoView({ behavior, block: 'center' }), 360)
       return () => window.clearTimeout(timer)
     }
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    window.scrollTo({ top: 0, behavior })
   }, [phase, item?.id, quick])
 
   const finish = useCallback(async () => {
@@ -327,8 +362,12 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
     setSecondsLeft(null)
     if (next.round.name !== roundRef.current) {
       roundRef.current = next.round.name
-      setBanner(next.round.name) // a new level that did not get a title card
-      window.setTimeout(() => setBanner(''), 1800)
+      const levelDetail =
+        mode === 'sudden_death' && next.round.number > 1
+          ? `${next.round.name} · ${(1 + 0.1 * (next.round.number - 1)).toFixed(1)}x pts · ${next.timeLimitSec}s clock`
+          : next.round.name
+      setBanner(levelDetail) // a new level that did not get a title card
+      queueSfxTimer(() => setBanner((cur) => (cur === levelDetail ? '' : cur)), 2400)
     }
     setPhase(next.needsWager ? 'wager' : 'question')
     if (!next.music) blip('question') // a clip is its own arrival
@@ -377,6 +416,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   /** A title card: the host introduces what is coming, and only then does the question (and its clock) appear. */
   const introduce = useCallback(
     async (next: Item, opening: boolean) => {
+      const prevRound = roundRef.current
       roundRef.current = next.round.name
       setItem(next)
       setClipOver(false)
@@ -385,7 +425,14 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       setFlagging(false)
       setQuitting(false)
       setError('')
-      setCard(opening ? openingCard(state, next) : roundCard(next, mode))
+      const nextCard = opening ? openingCard(state, next) : roundCard(next, mode, state.strikes ?? 0)
+      if (!opening && prevRound === 'Lightning Round' && lightningStatsRef.current.asked > 0) {
+        const { correct, asked } = lightningStatsRef.current
+        setBanner(`Lightning Round: ${correct}/${asked} right!`)
+        queueSfxTimer(() => setBanner((cur) => (cur.startsWith('Lightning Round:') ? '' : cur)), 2600)
+        lightningStatsRef.current = { asked: 0, correct: 0 }
+      }
+      setCard(nextCard)
       setOpening(opening)
       setHandover(null)
       setTitleUp(false)
@@ -398,10 +445,11 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         titleTimer.current = window.setTimeout(() => setTitleUp(true), STING_GAP_MS)
         if (hostReacts) host?.cue('round', next.id)
       }
+      const noHostFloor = mode === 'straight' ? 0 : mode === 'speed' ? 1200 : returning ? 1800 : NO_HOST_OPENING_MS
       const why = await hostBeat(
         opening ? HOST_LATE_OPENING_MS : HOST_LATE_MS,
         opening ? MAX_OPENING_MS : MAX_INTRO_MS,
-        opening && !welcomeRef.current ? NO_HOST_OPENING_MS : MIN_CARD_MS,
+        opening && !welcomeRef.current ? noHostFloor : mode === 'straight' ? 700 : MIN_CARD_MS,
       )
       if (opening) stopOpeningWatch.current() // the opening is over: its moment no longer depends on the music
       if (!aliveRef.current || doneRef.current) return
@@ -477,12 +525,13 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         if (!resumed) {
           play('levelup')
           const tapped = Date.now()
-          const expectMusic = musicOn() && mode !== 'straight'
-          const welcome = host?.cue('welcome', undefined, { notBefore: expectMusic ? tapped + openingThemeMs() : 0 }) ?? 0
+          const expectMusic = musicOn() && soundOn() && mode !== 'straight'
+          const themeHoldMs = mode === 'speed' ? 1400 : returning ? Math.min(2600, openingThemeMs()) : openingThemeMs()
+          const welcome = host?.cue('welcome', undefined, { notBefore: expectMusic ? tapped + themeHoldMs : 0 }) ?? 0
           welcomeRef.current = welcome
           trace('opening')
           if (welcome && host && expectMusic) {
-            // His first word waits for the theme: openingThemeMs() after its first note, if that is later than
+            // His first word waits for the theme: themeHoldMs after its first note, if that is later than
             // planned. With no music coming, he need not wait at all.
             let anchored = false
             const anchor = (at: number) => {
@@ -494,11 +543,10 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
             let jukeboxNow: JukeboxState | null = null
             const unsubscribe = onJukeboxChange((jukebox) => {
               jukeboxNow = jukebox
-              const theme = openingThemeMs()
-              if (jukebox.playing) anchor(Math.min(tapped + theme + OPENING_SLACK_MS, Math.max(tapped + theme, Date.now() + theme)))
+              if (jukebox.playing) anchor(Math.min(tapped + themeHoldMs + OPENING_SLACK_MS, Math.max(tapped + themeHoldMs, Date.now() + themeHoldMs)))
             })
             const noMusic = window.setTimeout(() => {
-              if (!(jukeboxNow?.active && musicOn())) anchor(0)
+              if (!(jukeboxNow?.active && musicOn() && soundOn())) anchor(0)
             }, NO_MUSIC_AFTER_MS)
             stopOpeningWatch.current = () => {
               unsubscribe()
@@ -513,6 +561,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
       // (The opening's watch on the music is not stopped here: in development React runs this cleanup once straight
       // after mounting. It stops itself once the theme starts, or after NO_MUSIC_AFTER_MS at the latest.)
       aliveRef.current = false
+      clearSfxTimers()
       window.clearTimeout(titleTimer.current)
       window.clearTimeout(readTimer.current)
     }
@@ -521,13 +570,14 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
 
   const advance = useCallback(() => {
     if (!reveal || movingRef.current) return
+    clearSfxTimers()
     host?.skip() // the player has moved on, so the host stops – cleanly – rather than talk over what comes next
     fadeOutMusic()
     if (!quick || reveal.finished) setLeaving(true) // the quick-fire rounds keep their bed steady
     trace('advance')
     if (reveal.finished) void finish()
     else void pull()
-  }, [reveal, host, finish, pull, quick])
+  }, [reveal, host, finish, pull, quick, clearSfxTimers])
 
   const submit = useCallback(
     async (choice: number | null) => {
@@ -543,28 +593,38 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         // A hint or a reply about this question is out of date once it has been answered, and would hold up his
         // reaction: stop it, so the answer's sting plays at full.
         if (host?.busy) host.skip()
+        const prevStreak = state.streak
         setReveal(result)
         setState(result.state)
         setPhase('reveal')
+        if (item.slot === 'fact_fake' && mode === 'show') {
+          lightningStatsRef.current.asked += 1
+          if (result.correct) lightningStatsRef.current.correct += 1
+        }
         trace('reveal', { correct: result.correct, timedOut: result.timedOut })
         play(result.correct ? 'correct' : 'wrong')
         buzz(result.correct ? 30 : [60, 40, 60])
         const burstId = Date.now()
         setFlash({ id: burstId, tone: result.correct ? 'good' : 'bad' })
-        window.setTimeout(() => setFlash((now) => (now?.id === burstId ? null : now)), 600)
+        queueSfxTimer(() => setFlash((now) => (now?.id === burstId ? null : now)), 600)
+        const penaltySec = result.breakdown?.penaltySec
         if (result.points !== 0) {
           const text = result.points > 0 ? `+${result.points}` : String(result.points)
           setScorePop({ id: burstId, text, tone: result.points > 0 ? 'good' : 'bad' })
-          window.setTimeout(() => setScorePop((now) => (now?.id === burstId ? null : now)), 1350)
+          queueSfxTimer(() => setScorePop((now) => (now?.id === burstId ? null : now)), 1350)
+        } else if (penaltySec && !result.correct) {
+          setScorePop({ id: burstId, text: `−${penaltySec}s`, tone: 'bad' })
+          queueSfxTimer(() => setScorePop((now) => (now?.id === burstId ? null : now)), 1100)
         }
-        if (result.strikeRestored) window.setTimeout(() => play('cheer'), 380)
-        if (result.correct && STREAKS_WORTH_SHOUTING.includes(result.state.streak)) {
+        if (result.strikeRestored) queueSfxTimer(() => play('cheer'), 380)
+        // Require the streak to have actually increased (prevents Lightning Round from re-firing an unchanged streak!).
+        if (result.correct && result.state.streak > prevStreak && STREAKS_WORTH_SHOUTING.includes(result.state.streak)) {
           const streak = result.state.streak
           setBanner(`${streak} in a row!`)
           setBigMoment(true) // the music swells with the fanfare
-          window.setTimeout(() => setBigMoment(false), 2600)
-          window.setTimeout(() => blip(streak >= 5 ? 'bigstreak' : 'streak'), 300) // just after the "correct" sound
-          window.setTimeout(() => setBanner((current) => (current === `${streak} in a row!` ? '' : current)), 2400)
+          queueSfxTimer(() => setBigMoment(false), 2600)
+          queueSfxTimer(() => blip(streak >= 5 ? 'bigstreak' : 'streak'), 300) // just after the "correct" sound
+          queueSfxTimer(() => setBanner((current) => (current === `${streak} in a row!` ? '' : current)), 2400)
           if (streak >= 5 && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
             const colors = [getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#ffb020', '#ffffff', '#2fbf71']
             void confetti({ particleCount: 55, spread: 62, origin: { y: 0.25 }, colors, shapes: ['square'], scalar: 0.8 })
@@ -602,9 +662,13 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
     return () => window.clearTimeout(timer)
   }, [phase, item?.id, hasClip, clipStarted])
 
-  const clockMs = useDeadline(mode === 'speed' ? state.deadlineAt : undefined, () => {
-    if (phase === 'question' && !busy) void pull()
-  })
+  const clockMs = useDeadline(
+    mode === 'speed' ? state.remainingMs : undefined,
+    mode === 'speed' && state.deadlineAt ? `${runId}:${state.deadlineAt}:${state.answered}` : undefined,
+    () => {
+      if (phase === 'question' && !busy) void pull()
+    },
+  )
 
   // Speed Run final-10s urgency ticks + haptics so the race feels electric down to the buzzer.
   const speedSecLeft = mode === 'speed' && state.deadlineAt ? Math.ceil(clockMs / 1000) : null
@@ -689,20 +753,21 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
   }
 
   /** The answers are wanted now: the reading is over, or skipped. The server starts the clock (never later than planned). */
-  const startClock = async (itemId: string) => {
-    if (!readingRef.current) return
+  const startClock = async (itemId: string, force = false) => {
+    if (!force && !readingRef.current) return
     readingRef.current = false
     window.clearTimeout(readTimer.current)
+    setError('')
     try {
       const opened = await api<{ item: Item; state: RunState }>(`/api/runs/${runId}/start-clock`, { body: { itemId }, retry: RETRY })
       if (!aliveRef.current) return
       setItem(opened.item)
       setState(opened.state)
+      blip('question')
     } catch (caught) {
       setError((caught as Error).message)
     }
     setReading(false)
-    blip('question')
     trace('read.end')
   }
 
@@ -810,8 +875,8 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
           key={scorePop.id}
           className="score-pop pixel pointer-events-none fixed left-1/2 top-16 z-[48] rounded-[4px] border-2 bg-black/90 px-3 py-1.5 text-sm sm:top-20 sm:text-base"
           style={{
-            borderColor: scorePop.tone === 'good' ? 'var(--good)' : 'var(--bad)',
-            color: scorePop.tone === 'good' ? 'var(--good)' : 'var(--bad)',
+            borderColor: scorePop.tone === 'good' ? '#32e875' : '#ff4d6d',
+            color: scorePop.tone === 'good' ? '#32e875' : '#ff4d6d',
             boxShadow: '3px 3px 0 #000',
           }}
           aria-hidden
@@ -825,6 +890,18 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         <div className="flex items-center justify-between gap-2 sm:order-2 sm:justify-end">
           <span className="pixel truncate text-[10px] text-muted sm:hidden">{state.modeName}</span>
           <div className="flex items-center gap-1.5 sm:gap-2">
+            {jukeboxNeedsTap && soundOn() && musicOn() && (
+              <button
+                type="button"
+                className="btn btn-accent btn-sm"
+                onClick={() => {
+                  unlockAudio()
+                  toggleJukebox()
+                }}
+              >
+                Tap for music
+              </button>
+            )}
             <SoundToggle />
             <button className="btn btn-ghost btn-sm" onClick={() => setQuitting(true)} aria-label="Quit this game" title="Quit">
               <IconClose size={14} />
@@ -869,7 +946,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
             className="card rise flex flex-1 flex-col items-center justify-center gap-5 p-6 text-center"
             style={{
               borderColor: 'var(--accent)',
-              boxShadow: 'inset 0 0 0 3px #090716, inset 0 0 0 5px color-mix(in oklab, var(--accent) 55%, transparent), 0 0 36px color-mix(in oklab, var(--accent) 18%, transparent)',
+              boxShadow: 'inset 0 0 0 3px var(--page), inset 0 0 0 5px color-mix(in oklab, var(--accent) 55%, transparent), 0 0 36px color-mix(in oklab, var(--accent) 18%, transparent)',
             }}
           >
             <p className="chip chip-accent"><IconChip size={13} /> Final wager</p>
@@ -907,7 +984,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
           </div>
         )}
 
-        {(phase === 'question' || phase === 'reveal') && item && (item.options || reading) && (
+        {(phase === 'question' || phase === 'reveal') && item && (item.options || reading || error) && (
           <div className={hasPicture ? 'grid items-start gap-4 lg:grid-cols-12 lg:gap-5' : 'flex flex-col gap-3'}>
             {shownImage && (
               <div className="lg:col-span-6 lg:sticky lg:top-4">
@@ -916,7 +993,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
                   image={shownImage}
                   secondsLeft={phase === 'question' && item.timeLimitSec > 0 ? secondsLeft : null}
                   caption={phase === 'question' ? item.text : null}
-                  wide
+                  wide={isDesktopLg}
                 />
               </div>
             )}
@@ -951,6 +1028,13 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
                     <p className="pixel blink text-[10px] text-muted" role="status">{hostName} reads the question…</p>
                     <button className="btn btn-ghost btn-sm" onClick={skipReading}>
                       Skip <IconPlay size={11} />
+                    </button>
+                  </div>
+                )}
+                {!reading && !item.options && error && (
+                  <div className="mt-4 flex justify-end">
+                    <button type="button" className="btn btn-primary btn-sm" onClick={() => void startClock(item.id, true)}>
+                      Load answers <IconPlay size={11} />
                     </button>
                   </div>
                 )}
@@ -992,18 +1076,19 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
               )}
 
               {canUseLifelines && (
-                <div className="flex flex-wrap gap-2" aria-label="Lifelines">
+                <div className="flex flex-wrap items-center gap-2" aria-label="Lifelines">
                   {LIFELINES.filter((l) => l.kind in state.lifelines).map((lifeline) => {
                     const left = state.lifelines[lifeline.kind] ?? 0
                     const used = item.lifelinesUsed.includes(lifeline.kind)
+                    const unavailable = lifeline.kind === 'peek' && item.canPeek === false
                     return (
                       <button
                         key={lifeline.kind}
                         className="btn btn-ghost btn-sm"
-                        disabled={busy || left <= 0 || used}
+                        disabled={busy || left <= 0 || used || unavailable}
                         onClick={() => void useLifeline(lifeline.kind)}
-                        title={lifeline.help}
-                        aria-label={`${lifeline.label}: ${lifeline.help} (${left} left)`}
+                        title={unavailable ? 'No hidden source passage for this question' : lifeline.help}
+                        aria-label={`${lifeline.label}: ${unavailable ? 'Not available on this question' : lifeline.help} (${left} left)`}
                       >
                         {lifeline.kind === 'fifty' ? <IconSplit size={13} /> : lifeline.kind === 'peek' ? <IconBook size={13} /> : <IconBulb size={13} />}
                         <span>{lifeline.label}</span>
@@ -1013,6 +1098,9 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
                       </button>
                     )
                   })}
+                  {mode === 'show' && Object.values(state.lifelines).some((v) => v > 0) && (
+                    <span className="text-xs text-muted">+40 pts each if saved</span>
+                  )}
                 </div>
               )}
 
@@ -1022,9 +1110,24 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
                     <h3 className="text-sm sm:text-base" style={{ color: reveal.correct ? 'var(--good)' : 'var(--bad)' }}>
                       {reveal.correct ? 'Correct!' : reveal.timedOut ? 'Out of time' : 'Wrong'}
                     </h3>
-                    <span className="pixel text-xs tabular-nums" style={{ color: reveal.points > 0 ? 'var(--good)' : reveal.points < 0 ? 'var(--bad)' : 'var(--muted)' }}>
-                      {reveal.points > 0 ? '+' : ''}{reveal.points}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {reveal.correct && reveal.breakdown && (reveal.breakdown.speed || reveal.breakdown.streak) ? (
+                        <span className="text-xs tabular-nums text-muted">
+                          {reveal.breakdown.speed ? `+${reveal.breakdown.speed} speed` : ''}
+                          {reveal.breakdown.speed && reveal.breakdown.streak ? ' · ' : ''}
+                          {reveal.breakdown.streak ? `+${reveal.breakdown.streak} streak` : ''}
+                        </span>
+                      ) : null}
+                      {!reveal.correct && reveal.breakdown?.penaltySec ? (
+                        <span className="pixel text-xs tabular-nums" style={{ color: 'var(--bad)' }}>
+                          −{reveal.breakdown.penaltySec}s
+                        </span>
+                      ) : (
+                        <span className="pixel text-xs tabular-nums" style={{ color: reveal.points > 0 ? 'var(--good)' : reveal.points < 0 ? 'var(--bad)' : 'var(--muted)' }}>
+                          {reveal.points > 0 ? '+' : ''}{reveal.points}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   {reveal.strikeRestored && <p className="pixel mt-2 text-[10px]" style={{ color: 'var(--good)' }}>Extra life!</p>}
                   {!quick && (
@@ -1085,7 +1188,7 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
               Edit ↗
             </a>
           )}
-          <button className="btn btn-primary btn-lg flex-1" disabled={moving} onClick={advance} autoFocus>
+          <button className="btn btn-primary btn-lg flex-1" disabled={moving} onClick={advance}>
             <span>{error ? 'Try again' : last ? 'See results' : 'Next'}</span>
             <IconPlay size={14} />
             <span className="kbd">SPACE</span>

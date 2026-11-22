@@ -12,12 +12,16 @@ type Props = {
   video: VideoClip
   compact?: boolean
   onPlayStart?: () => void
+  /** Optional hook so clipped layouts (e.g. big-screen HostScreen) can open the clip in a Theater modal instead of inline. */
+  onOpenTheater?: () => void
+  /** Start directly in the embedded iframe (used inside the Theater modal). */
+  autoPlay?: boolean
 }
 
 const YT_ORIGINS = new Set(['https://www.youtube-nocookie.com', 'https://www.youtube.com'])
 
-export function VideoClipCard({ video, compact = false, onPlayStart }: Props) {
-  const [playing, setPlaying] = useState(false)
+export function VideoClipCard({ video, compact = false, onPlayStart, onOpenTheater, autoPlay = false }: Props) {
+  const [playing, setPlaying] = useState(autoPlay)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const lockedRef = useRef(false)
 
@@ -28,8 +32,8 @@ export function VideoClipCard({ video, compact = false, onPlayStart }: Props) {
   }
 
   useEffect(() => {
-    setPlaying(false)
-  }, [video.videoId, video.startSec])
+    setPlaying(autoPlay)
+  }, [video.videoId, video.startSec, autoPlay])
 
   useEffect(() => {
     if (!playing) {
@@ -84,20 +88,22 @@ export function VideoClipCard({ video, compact = false, onPlayStart }: Props) {
               target="_blank"
               rel="noopener noreferrer"
               onClick={() => onPlayStart?.()}
-              className="inline-flex min-h-[36px] items-center gap-1 rounded px-2 text-xs font-semibold hover:underline"
+              className="inline-flex min-h-[44px] items-center gap-1 rounded px-2.5 text-xs font-semibold hover:underline"
               style={{ color: 'var(--accent-text)' }}
             >
               YouTube <IconExternal size={12} />
             </a>
-            <button
-              type="button"
-              onClick={() => setPlaying(false)}
-              className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded border border-line bg-surface text-muted hover:text-ink"
-              aria-label="Close video player"
-              title="Close video and resume music"
-            >
-              <IconClose size={14} />
-            </button>
+            {!autoPlay && (
+              <button
+                type="button"
+                onClick={() => setPlaying(false)}
+                className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded border border-line bg-surface text-muted hover:text-ink"
+                aria-label="Close video player"
+                title="Close video and resume music"
+              >
+                <IconClose size={14} />
+              </button>
+            )}
           </div>
         </div>
         <div className="relative aspect-video w-full bg-black">
@@ -111,8 +117,10 @@ export function VideoClipCard({ video, compact = false, onPlayStart }: Props) {
             referrerPolicy="strict-origin-when-cross-origin"
             onLoad={() => {
               try {
-                iframeRef.current?.contentWindow?.postMessage(
-                  JSON.stringify({ event: 'listening' }),
+                const win = iframeRef.current?.contentWindow
+                win?.postMessage(JSON.stringify({ event: 'listening' }), 'https://www.youtube-nocookie.com')
+                win?.postMessage(
+                  JSON.stringify({ event: 'command', func: 'addEventListener', args: ['onStateChange'] }),
                   'https://www.youtube-nocookie.com',
                 )
               } catch {
@@ -125,6 +133,11 @@ export function VideoClipCard({ video, compact = false, onPlayStart }: Props) {
     )
   }
 
+  const handlePlay = () => {
+    if (onOpenTheater) onOpenTheater()
+    else setPlaying(true)
+  }
+
   return (
     <div
       className={`relative z-[41] mt-3 flex items-center gap-3 rounded-[6px] border border-line bg-surface-2 ${compact ? 'p-2' : 'p-2.5'}`}
@@ -132,7 +145,7 @@ export function VideoClipCard({ video, compact = false, onPlayStart }: Props) {
       {canEmbed ? (
         <button
           type="button"
-          onClick={() => setPlaying(true)}
+          onClick={handlePlay}
           className="group relative flex-none overflow-hidden rounded-[4px] border border-line bg-black focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           style={{ width: compact ? 88 : 112, height: compact ? 50 : 63 }}
           aria-label={`Play ${video.title}`}

@@ -261,12 +261,20 @@ def summary_badge_info(run: dict[str, Any], rules: dict[str, Any]) -> dict[str, 
     info = evaluate_run(run, rules)
     stored = run.get("badge")
     if stored and stored != info["label"]:
+        if stored == "Last One Standing":
+            return {
+                "label": stored, "tier": 6, "tone": "gold", "icon": "crown",
+                "description": "Cleared the bank with strikes to spare — undefeated.",
+                "nextLabel": None, "nextHint": "Top survival rank achieved!",
+            }
         meta = _LEGACY_META.get(stored)
         if meta:
             tier, tone, icon, desc = meta
             return {
                 "label": stored, "tier": tier, "tone": tone, "icon": icon,
-                "description": desc, "nextLabel": info["nextLabel"], "nextHint": info["nextHint"],
+                "description": desc,
+                "nextLabel": None if tier >= 6 else info["nextLabel"],
+                "nextHint": "Top rank achieved!" if tier >= 6 else info["nextHint"],
             }
         info["label"] = stored
     return info

@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import Header, HTTPException, status
 
 import db
-from security import TokenError, read_admin_token, read_player_token
+from security import TokenError, read_admin_token, read_player_claims
 
 
 def _bearer(authorization: str | None) -> str | None:
@@ -18,12 +18,13 @@ async def current_player(authorization: str | None = Header(default=None)) -> di
     if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Join the quiz first.")
     try:
-        player_id = read_player_token(token)
+        player_id, grants = read_player_claims(token)
     except TokenError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
     player = await db.fetchrow("select * from players where id = $1", player_id)
     if player is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Join the quiz first.")
+    player["_quiz_grants"] = grants
     return player
 
 
@@ -32,9 +33,13 @@ async def optional_player(authorization: str | None = Header(default=None)) -> d
     if not token:
         return None
     try:
-        return await db.fetchrow("select * from players where id = $1", read_player_token(token))
+        player_id, grants = read_player_claims(token)
     except TokenError:
         return None
+    player = await db.fetchrow("select * from players where id = $1", player_id)
+    if player is not None:
+        player["_quiz_grants"] = grants
+    return player
 
 
 async def current_admin(authorization: str | None = Header(default=None)) -> dict:

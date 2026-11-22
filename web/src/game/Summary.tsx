@@ -122,8 +122,9 @@ export default function Summary({
   const isCompleted = summary.status === 'completed'
   const answeredAny = summary.report.answered + summary.music.answered > 0
   const quitEmpty = !isCompleted && !answeredAny
-  const isNewBest = Boolean(summary.personalBest && summary.score > 0 && isCompleted)
-  const beatChallenge = Boolean(matchingChallenge && isCompleted && summary.score > matchingChallenge.score)
+  const isNewBest = Boolean(summary.personalBest && summary.score > 0 && isCompleted && summary.mode !== 'straight')
+  const challengeScore = summary.mode === 'straight' ? summary.accuracy : summary.score
+  const beatChallenge = Boolean(matchingChallenge && isCompleted && challengeScore > matchingChallenge.score)
   const failed = summary.mode === 'straight' && summary.passed === false
   const jukebox = summary.mode === 'jukebox'
   const completed = isCompleted && !failed
@@ -140,7 +141,10 @@ export default function Summary({
     (isCompleted && tier >= 5) ||
     (isNewBest && tier >= 3)
   const previousBest = summary.previousBest
-  const bestDelta = previousBest !== null && previousBest !== undefined ? summary.score - previousBest : null
+  const bestDelta =
+    isCompleted && summary.mode !== 'straight' && previousBest !== null && previousBest !== undefined
+      ? summary.score - previousBest
+      : null
   const canCertificate = !jukebox && completed && (summary.readiness.ready || summary.passed === true)
 
   const tabs = useMemo(() => {
@@ -338,17 +342,18 @@ export default function Summary({
       </span>
     )
   } else if (matchingChallenge && isCompleted) {
+    const unit = summary.mode === 'straight' ? '%' : ' pts'
     hookNode = beatChallenge ? (
       <span className="font-semibold" style={{ color: 'var(--good)' }}>
-        Beat {matchingChallenge.by} by +{(summary.score - matchingChallenge.score).toLocaleString()} pts!
+        Beat {matchingChallenge.by} by +{(challengeScore - matchingChallenge.score).toLocaleString()}{unit}!
       </span>
-    ) : summary.score === matchingChallenge.score ? (
+    ) : challengeScore === matchingChallenge.score ? (
       <span className="font-semibold" style={{ color: 'var(--accent-text)' }}>
-        Tied {matchingChallenge.by} at {matchingChallenge.score.toLocaleString()} pts — run it back!
+        Tied {matchingChallenge.by} at {matchingChallenge.score.toLocaleString()}{unit} — run it back!
       </span>
     ) : (
       <span className="text-muted">
-        Only <b style={{ color: 'var(--accent-text)' }}>{(matchingChallenge.score - summary.score).toLocaleString()} pts</b> shy of {matchingChallenge.by} ({matchingChallenge.score.toLocaleString()})
+        Only <b style={{ color: 'var(--accent-text)' }}>{(matchingChallenge.score - challengeScore).toLocaleString()}{unit}</b> shy of {matchingChallenge.by} ({matchingChallenge.score.toLocaleString()}{unit})
       </span>
     )
   } else if (isNewBest) {
@@ -366,7 +371,11 @@ export default function Summary({
   } else if (jukebox) {
     hookNode = (
       <span className="text-muted">
-        {summary.accuracy >= 70 ? 'Ear of a pro — take that momentum into the report.' : 'Warmed up — ready to take on the report.'}
+        {summary.badgeInfo?.nextLabel && summary.badgeInfo?.nextHint
+          ? <>Next DJ rank: <b style={{ color: 'var(--accent-text)' }}>{summary.badgeInfo.nextHint}</b></>
+          : summary.accuracy >= 70
+            ? 'Ear of a pro — take that momentum into the report.'
+            : 'Warmed up — ready to take on the report.'}
       </span>
     )
   } else if (summary.badgeInfo?.nextHint) {
@@ -449,11 +458,20 @@ export default function Summary({
           ) : summary.mode === 'straight' ? (
             <>
               <h1 className="neon mt-2 text-3xl tabular-nums sm:text-4xl">
-                <span className="sr-only">{failed ? 'Quiz score: ' : 'Passed with '}</span>
+                <span className="sr-only">
+                  {!isCompleted ? 'Incomplete quiz score: ' : failed ? 'Quiz score: ' : 'Passed with '}
+                </span>
                 {summary.accuracy}%
               </h1>
-              <p className="mt-2 text-sm font-bold" style={{ color: failed ? 'var(--bad)' : 'var(--good)' }}>
-                {failed ? `Need ${summary.passMark}% to pass` : 'Passed!'}
+              <p
+                className="mt-2 text-sm font-bold"
+                style={{ color: !isCompleted ? 'var(--muted)' : failed ? 'var(--bad)' : 'var(--good)' }}
+              >
+                {!isCompleted
+                  ? 'Ended early · finish all questions to earn a pass'
+                  : failed
+                    ? `Need ${summary.passMark}% to pass`
+                    : 'Passed!'}
               </p>
             </>
           ) : (
@@ -503,7 +521,7 @@ export default function Summary({
         )}
 
         {/* Primary CTA + Quiet Secondary Actions */}
-        <div className="mt-4 flex flex-col gap-3">
+        <div className="mt-4 flex flex-col gap-2.5">
           <button
             type="button"
             className="btn btn-primary btn-lg w-full"
@@ -511,35 +529,61 @@ export default function Summary({
           >
             {primaryCtaLabel} <IconPlay size={14} />
           </button>
+          {isCompleted && !jukebox && !summary.readiness.ready && sectionsToReview.length > 0 && summary.mode !== 'speed' && (
+            <p className="text-center text-xs text-muted">
+              Next run targets your {sectionsToReview.length} remaining section{sectionsToReview.length === 1 ? '' : 's'}
+            </p>
+          )}
 
           <div
             className={`grid gap-2 border-t border-line pt-3 ${
-              isCompleted && jukebox && onPlayReport
+              isCompleted && shareable
                 ? 'grid-cols-2 sm:grid-cols-3'
                 : isCompleted
                   ? 'grid-cols-2'
                   : 'grid-cols-1'
             }`}
           >
-            {isCompleted && jukebox && onPlayReport && (
+            {isCompleted && jukebox && onPlayReport ? (
               <button type="button" className="btn btn-ghost btn-sm" onClick={onPlayAgain}>
                 Spin again
               </button>
+            ) : (
+              <button type="button" className="btn btn-ghost btn-sm" onClick={onMainMenu}>
+                Main menu
+              </button>
             )}
-            <button type="button" className="btn btn-ghost btn-sm" onClick={onMainMenu}>
-              Main menu
-            </button>
+            {isCompleted && shareable && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => void copyScore()}
+                title="Copy a spoiler-free score & challenge link"
+              >
+                Challenge
+              </button>
+            )}
             {isCompleted && (
               <button
                 type="button"
-                className={`btn btn-sm ${beatChallenge ? 'btn-accent' : 'btn-ghost'} ${jukebox && onPlayReport ? 'col-span-2 sm:col-span-1' : ''}`}
+                className={`btn btn-sm ${beatChallenge ? 'btn-accent' : 'btn-ghost'} ${shareable ? 'col-span-2 sm:col-span-1' : ''}`}
                 onClick={() => setShareOpen(true)}
               >
                 <IconTrophy size={13} style={{ color: beatChallenge ? undefined : 'var(--accent-text)' }} />
                 <span>{shareCtaLabel}</span>
               </button>
             )}
+            {isCompleted && jukebox && onPlayReport && (
+              <button type="button" className="btn btn-ghost btn-sm col-span-2 sm:col-span-3" onClick={onMainMenu}>
+                Main menu
+              </button>
+            )}
           </div>
+          {!shareOpen && shareNote && (
+            <p className="text-center text-xs font-medium" style={{ color: 'var(--good)' }} role="status" aria-live="polite">
+              {shareNote}
+            </p>
+          )}
         </div>
       </section>
 
@@ -606,7 +650,11 @@ export default function Summary({
                         ? 'Ready for the meeting!'
                         : `Clear ${sectionsNeeded} more section${sectionsNeeded === 1 ? '' : 's'} to be ready`}
                     </p>
-                    <p className="text-xs text-muted">Cumulative progress across all your runs on this report</p>
+                    <p className="text-xs text-muted">
+                      {summary.mode === 'speed'
+                        ? 'Speed Run tests quick recall and does not update Readiness — play Game Show or Straight Quiz to clear sections'
+                        : 'Cumulative progress across all your runs on this report'}
+                    </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-3 text-xs font-semibold">
                     {reportUrl && (

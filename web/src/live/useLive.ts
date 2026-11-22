@@ -50,9 +50,37 @@ export function useLive({ code, hostKey, enabled }: Options) {
   }, [code, headers, accept])
 
   useEffect(() => {
+    latestVersion.current = -1
+    lastMessage.current = 0
+  }, [code])
+
+  useEffect(() => {
     if (!enabled) return
     let stopped = false
     let controller: AbortController | null = null
+    let attempt = 0
+    let wakeReconnect: (() => void) | null = null
+
+    const sleepWithWake = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const id = window.setTimeout(() => {
+          wakeReconnect = null
+          resolve()
+        }, ms)
+        wakeReconnect = () => {
+          window.clearTimeout(id)
+          wakeReconnect = null
+          resolve()
+        }
+      })
+
+    const onResume = () => {
+      if (document.hidden) return
+      void refresh()
+      wakeReconnect?.()
+    }
+    window.addEventListener('online', onResume)
+    document.addEventListener('visibilitychange', onResume)
 
     const stream = async () => {
       while (!stopped) {
@@ -63,21 +91,36 @@ export function useLive({ code, hostKey, enabled }: Options) {
             setError('No live game with that code.')
             return
           }
+          if (response.status === 401 || response.status === 403) {
+            setError('Session access expired or was taken over on another screen. Refresh or rejoin to continue.')
+            return
+          }
           if (!response.ok || !response.body) throw new Error('stream unavailable')
+          attempt = 0
           setConnected(true)
+          lastMessage.current = Date.now()
           const reader = response.body.getReader()
           const decoder = new TextDecoder()
           let buffer = ''
           for (;;) {
             const { value, done } = await reader.read()
             if (done) break
+            lastMessage.current = Date.now()
             buffer += decoder.decode(value, { stream: true })
             let boundary = buffer.indexOf('\n\n')
             while (boundary >= 0) {
               const chunk = buffer.slice(0, boundary)
               buffer = buffer.slice(boundary + 2)
-              const data = chunk.split('\n').filter((line) => line.startsWith('data: ')).map((line) => line.slice(6)).join('')
-              if (data) accept(JSON.parse(data) as LiveState)
+              if (chunk.trim().startsWith(':')) {
+                lastMessage.current = Date.now()
+              } else {
+                const data = chunk
+                  .split('\n')
+                  .filter((line) => line.startsWith('data: '))
+                  .map((line) => line.slice(6))
+                  .join('')
+                if (data) accept(JSON.parse(data) as LiveState)
+              }
               boundary = buffer.indexOf('\n\n')
             }
           }
@@ -85,19 +128,27 @@ export function useLive({ code, hostKey, enabled }: Options) {
           /* fall through to reconnect */
         }
         setConnected(false)
-        if (!stopped) await new Promise((resolve) => setTimeout(resolve, 1500))
+        if (!stopped) {
+          const base = Math.min(15000, 1000 * 2 ** Math.min(attempt, 4))
+          const jitter = Math.round(Math.random() * 600)
+          attempt += 1
+          await sleepWithWake(base + jitter)
+        }
       }
     }
 
     void refresh()
     void stream()
     const poll = window.setInterval(() => {
-      if (Date.now() - lastMessage.current > 3500) void refresh()
-    }, 2000)
+      if (Date.now() - lastMessage.current > 6000) void refresh()
+    }, 2500)
     return () => {
       stopped = true
+      wakeReconnect?.()
       controller?.abort()
       window.clearInterval(poll)
+      window.removeEventListener('online', onResume)
+      document.removeEventListener('visibilitychange', onResume)
     }
   }, [code, enabled, headers, refresh, accept])
 

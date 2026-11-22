@@ -248,17 +248,41 @@ async def _move(session: dict, **changes: Any) -> dict:
 
 
 async def _reveal_question(session: dict) -> dict:
-    """Move a question to reveal and reset streaks for anyone who sat the question out."""
-    prior_version = session["version"]
-    q_index = session["current_index"]
-    updated = await _move(session, status="reveal", phase_started_at=_now(), phase_ends_at=None)
-    if updated["version"] > prior_version and updated["status"] == "reveal" and q_index >= 0:
-        await db.execute(
-            "update live_participants set streak = 0 where session_id = $1"
-            " and id not in (select participant_id from live_answers where session_id = $1 and question_index = $2)",
-            session["id"], q_index,
+    """Atomically move a question to reveal, commit scores/streaks for that question, and reset non-answerers' streaks.
+
+    Committing participant scores inside the reveal transaction (rather than on submit) eliminates both
+    the last-millisecond answer-vs-reveal race and the mid-question phone score spoiler.
+    """
+    async with db.transaction() as tx:
+        locked = await tx.fetchrow("select * from live_sessions where id = $1 for update", session["id"])
+        if locked is None or locked["status"] != "question":
+            return locked or await load(session["code"], fresh=True)
+        q_index = locked["current_index"]
+        updated = await tx.fetchrow(
+            "update live_sessions set status = 'reveal', phase_started_at = $2, phase_ends_at = null,"
+            " version = version + 1 where id = $1 returning *",
+            locked["id"], _now(),
         )
-        _public_snap.pop(session["id"], None)
+        if q_index >= 0:
+            # Apply points and streaks for everyone who answered this question.
+            await tx.execute(
+                "update live_participants lp set"
+                " score = lp.score + la.points,"
+                " correct_count = lp.correct_count + case when la.is_correct then 1 else 0 end,"
+                " streak = case when la.is_correct then lp.streak + 1 else 0 end"
+                " from live_answers la"
+                " where la.session_id = $1 and la.question_index = $2 and la.participant_id = lp.id",
+                locked["id"], q_index,
+            )
+            # Reset streaks for anyone who sat the question out.
+            await tx.execute(
+                "update live_participants set streak = 0 where session_id = $1"
+                " and id not in (select participant_id from live_answers where session_id = $1 and question_index = $2)",
+                locked["id"], q_index,
+            )
+    _recent.pop(session["code"], None)
+    _public_snap.pop(session["id"], None)
+    _counts.pop(session["id"], None)
     return updated
 
 
@@ -326,14 +350,30 @@ async def _count_answers(session: dict) -> tuple[int, int]:
     return row["answered"], row["joined"]
 
 
-async def control(session: dict, action: str) -> dict:
+async def control(
+    session: dict,
+    action: str,
+    *,
+    expected_status: str | None = None,
+    expected_index: int | None = None,
+) -> dict:
     session = await load(session["code"], fresh=True)
     status, index, total = session["status"], session["current_index"], len(session["items"])
     if action == "end":
         return await _move(session, status="finished", finished_at=_now(), phase_ends_at=None)
     if action == "open":
         return await _open_question(session)
+    if action == "extend":
+        if status != "question" or session["phase_ends_at"] is None:
+            return session
+        # Add 15 seconds to the active countdown so presenters can handle room discussions smoothly.
+        new_end = max(_now(), session["phase_ends_at"]) + timedelta(seconds=15)
+        return await _move(session, phase_ends_at=new_end)
     if action == "next":
+        if expected_status is not None and status != expected_status:
+            return session
+        if expected_index is not None and index != expected_index:
+            return session
         if status == "lobby":
             return await _start_question(session, 0)
         if status == "question":
@@ -372,49 +412,63 @@ async def join(session: dict, player: dict) -> dict:
     return participant
 
 
-async def answer(session: dict, player: dict, choice: int) -> dict:
+async def answer(session: dict, player: dict, choice: int, *, expected_index: int | None = None) -> dict:
     session = await tick(await load(session["code"], fresh=True))
-    if session["status"] != "question":
-        raise LiveError("Too late – that question has closed.", 409)
     now = _now()
-    if now < session["phase_started_at"]:
-        raise LiveError("Not open yet.", 425)
-    index = session["current_index"]
-    item = session["items"][index]
-    if not (0 <= choice < len(item["options"])):
-        raise LiveError("That is not one of the options.")
-    elapsed = (now - session["phase_started_at"]).total_seconds()
-    fraction = max(0.0, min(1.0, 1 - elapsed / max(1, int(item["limit"]))))
-    correct = choice == item["correct_index"]
-    mult = 2 if is_double_points(index, len(session["items"])) else 1
     async with db.transaction() as tx:
+        locked = await tx.fetchrow("select * from live_sessions where id = $1 for update", session["id"])
+        if locked is None or locked["status"] != "question":
+            raise LiveError("Too late – that question has closed.", 409)
+        index = locked["current_index"]
+        if expected_index is not None and expected_index != index:
+            raise LiveError("That question has already moved on.", 409)
+        if now < locked["phase_started_at"]:
+            raise LiveError("Not open yet.", 425)
+        item = locked["items"][index]
+        if not (0 <= choice < len(item["options"])):
+            raise LiveError("That is not one of the options.")
+        elapsed = max(0.0, (now - locked["phase_started_at"]).total_seconds())
+        fraction = max(0.0, min(1.0, 1 - elapsed / max(1, int(item["limit"]))))
+        correct = choice == item["correct_index"]
+        mult = 2 if is_double_points(index, len(locked["items"])) else 1
         participant = await tx.fetchrow(
             "select * from live_participants where session_id = $1 and player_id = $2 for update",
-            session["id"], player["id"],
+            locked["id"], player["id"],
         )
         if participant is None:
             raise LiveError("Join the game first.", 403)
+        # Scores are applied atomically in _reveal_question so no player sees a mid-question score spoiler.
         points = (500 + round(500 * fraction) + 100 * min(participant["streak"], 5)) * mult if correct else 0
+        time_ms = int(elapsed * 1000)
         inserted = await tx.fetchrow(
             "insert into live_answers (session_id, participant_id, question_index, selected_index, is_correct, time_ms, points)"
-            " values ($1,$2,$3,$4,$5,$6,$7) on conflict (session_id, participant_id, question_index) do nothing returning id",
-            session["id"], participant["id"], index, choice, correct, int(elapsed * 1000), points)
-        if inserted:
-            await tx.execute(
-                "update live_participants set score = score + $2, correct_count = correct_count + $3,"
-                " streak = case when $4 then streak + 1 else 0 end where id = $1",
-                participant["id"], points, int(correct), correct)
+            " values ($1,$2,$3,$4,$5,$6,$7) on conflict (session_id, participant_id, question_index) do nothing"
+            " returning selected_index, time_ms",
+            locked["id"], participant["id"], index, choice, correct, time_ms, points)
+        if inserted is None:
+            existing = await tx.fetchrow(
+                "select selected_index, time_ms from live_answers"
+                " where session_id = $1 and participant_id = $2 and question_index = $3",
+                locked["id"], participant["id"], index,
+            )
+            chosen = existing["selected_index"] if existing else choice
+            locked_ms = int(existing["time_ms"]) if existing and existing["time_ms"] is not None else time_ms
+        else:
+            chosen = inserted["selected_index"]
+            locked_ms = int(inserted["time_ms"])
     if inserted:
         _counts.pop(session["id"], None)
-    return {"locked": True, "selectedIndex": choice}
+    answered, joined = await _answer_counts(locked)
+    return {"locked": True, "selectedIndex": chosen, "timeMs": locked_ms, "answersIn": answered, "players": joined}
 
 
 # --------------------------------------------------------------------------- state for screens
 
 async def _standings(session_id: str) -> list[dict]:
     rows = await db.fetch(
-        "select id, player_id, display_name, team, score, correct_count, streak, head_start from live_participants"
-        " where session_id = $1 order by score desc, joined_at asc", session_id)
+        "select id, player_id, display_name, team, score, correct_count, streak, head_start, joined_at"
+        " from live_participants where session_id = $1 order by score desc, correct_count desc, joined_at asc",
+        session_id)
     for rank, row in enumerate(rows, start=1):
         row["rank"] = rank
     return rows
@@ -539,8 +593,9 @@ async def state(session: dict, *, host: bool, player: dict | None) -> dict:
         view["you"] = None
 
     if status == "lobby":
-        view["roster"] = [{"name": s["display_name"], "team": s["team"], "prepared": s["head_start"] > 0}
-                          for s in standings][:120 if host else 30]
+        roster_rows = sorted(standings, key=lambda s: s["joined_at"])
+        view["roster"] = [{"id": str(s["id"]), "name": s["display_name"], "team": s["team"], "prepared": s["head_start"] > 0}
+                          for s in roster_rows][:120 if host else 30]
         view["headStart"] = int(session["settings"].get("head_start", 0))
         return view
 
@@ -560,13 +615,18 @@ async def state(session: dict, *, host: bool, player: dict | None) -> dict:
         mine = None
         if me:
             mine = await db.fetchrow(
-                "select selected_index, is_correct, points from live_answers where session_id = $1"
+                "select selected_index, is_correct, points, time_ms from live_answers where session_id = $1"
                 " and participant_id = $2 and question_index = $3", session["id"], me["id"], index)
         if status == "question":
+            answered_count, _ = await _answer_counts(session)
             if host:
-                view["answersIn"] = (await _answer_counts(session))[0]
+                view["answersIn"] = answered_count
             elif mine:
-                view["yourAnswer"] = {"selectedIndex": mine["selected_index"]}
+                view["answersIn"] = answered_count
+                view["yourAnswer"] = {
+                    "selectedIndex": mine["selected_index"],
+                    "timeMs": int(mine["time_ms"]) if mine["time_ms"] is not None else None,
+                }
         else:
             reveal_obj: dict[str, Any] = {
                 "correctIndex": item["correct_index"], "counts": snap.get("counts", [0] * len(item["options"])),
@@ -583,8 +643,21 @@ async def state(session: dict, *, host: bool, player: dict | None) -> dict:
                                        "artworkUrl": item["music"]["artwork_url"]}
             view["reveal"] = reveal_obj
             if not host:
-                view["yourAnswer"] = ({"selectedIndex": mine["selected_index"], "correct": mine["is_correct"],
-                                       "points": mine["points"]} if mine else {"selectedIndex": None, "correct": False, "points": 0})
+                fastest = snap.get("fastest")
+                is_fastest = bool(
+                    mine and mine["is_correct"] and fastest and me
+                    and fastest["name"] == me["display_name"]
+                    and mine["time_ms"] is not None and int(mine["time_ms"]) == fastest["timeMs"]
+                )
+                view["yourAnswer"] = (
+                    {
+                        "selectedIndex": mine["selected_index"], "correct": mine["is_correct"],
+                        "points": mine["points"],
+                        "timeMs": int(mine["time_ms"]) if mine["time_ms"] is not None else None,
+                        "isFastest": is_fastest,
+                    }
+                    if mine else {"selectedIndex": None, "correct": False, "points": 0}
+                )
         return view
 
     round_points_by_id: dict[str, int] = snap.get("roundPoints", {})

@@ -96,11 +96,18 @@ type AudioSession = { type: string }
  */
 export function audioMode(mode: 'playback' | 'talk') {
   const session = (navigator as Navigator & { audioSession?: AudioSession }).audioSession
-  if (!session) return
-  try {
-    session.type = mode === 'talk' ? 'play-and-record' : 'playback'
-  } catch {
-    /* not supported here */
+  if (session) {
+    try {
+      session.type = mode === 'talk' ? 'play-and-record' : 'playback'
+    } catch {
+      /* not supported here */
+    }
+  }
+  // Returning from play-and-record on iOS Safari can briefly interrupt Web Audio contexts; nudge them awake.
+  if (mode === 'playback') {
+    for (const ctx of [context, voiceContext]) {
+      if (ctx && ctx.state !== 'running' && ctx.state !== 'closed') void ctx.resume().catch(() => undefined)
+    }
   }
 }
 
@@ -131,6 +138,8 @@ function keepAwake() {
     }
   }
   window.addEventListener('pointerdown', wake, { passive: true, capture: true })
+  window.addEventListener('touchend', wake, { passive: true, capture: true })
+  window.addEventListener('click', wake, { passive: true, capture: true })
   document.addEventListener('visibilitychange', () => !document.hidden && wake())
 }
 
@@ -230,12 +239,14 @@ export function play(name: Sfx) {
 // building. They are made on the spot rather than loaded, so they are never late, and they go
 // through the same bus as the recorded effects, so they too drop under the host.
 
-export type Blip = 'question' | 'streak' | 'bigstreak'
+export type Blip = 'question' | 'streak' | 'bigstreak' | 'mic' | 'unlock'
 
 const BLIPS: Record<Blip, { notes: number[]; stepSec: number; lengthSec: number; volume: number }> = {
   question: { notes: [523.25, 783.99], stepSec: 0.07, lengthSec: 0.09, volume: 0.1 }, // C5 G5: "here it comes"
   streak: { notes: [523.25, 659.25, 783.99, 1046.5], stepSec: 0.075, lengthSec: 0.12, volume: 0.12 }, // a rising chord
   bigstreak: { notes: [523.25, 659.25, 783.99, 1046.5, 1318.51, 1567.98], stepSec: 0.07, lengthSec: 0.15, volume: 0.13 },
+  mic: { notes: [659.25, 880], stepSec: 0.05, lengthSec: 0.065, volume: 0.08 }, // crisp walkie-talkie chirp once mic is live
+  unlock: { notes: [587.33, 880], stepSec: 0.055, lengthSec: 0.08, volume: 0.1 }, // phone-unlock sting on live big screen
 }
 
 export function blip(name: Blip) {

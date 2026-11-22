@@ -7,7 +7,7 @@ import {
   setMusicVolume,
   type JukeboxState,
 } from '../lib/jukebox'
-import { onSoundChange, setSoundOn, soundOn } from '../lib/sound'
+import { onSoundChange, setSoundOn, soundOn, unlockAudio } from '../lib/sound'
 import type { Branding } from '../lib/types'
 import { IconClose, IconExternal, IconSoundOff, IconSoundOn } from './Icons'
 
@@ -81,62 +81,76 @@ export function ErrorNote({ children }: { children: ReactNode }) {
   )
 }
 
-export function Modal({ open, onClose, children, wide }: { open: boolean; onClose: () => void; children: ReactNode; wide?: boolean }) {
+export function Modal({
+  open,
+  onClose,
+  children,
+  wide,
+  label = 'Dialog',
+}: {
+  open: boolean
+  onClose: () => void
+  children: ReactNode
+  wide?: boolean
+  label?: string
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!open) return
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const focusables = () =>
-      Array.from(
-        panelRef.current?.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ) ?? [],
-      )
-    const first = focusables()[0]
-    if (first) first.focus()
-    else panelRef.current?.focus()
+  const pressedOutside = useRef(false)
 
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation()
-        onClose()
-        return
-      }
-      if (event.key === 'Tab') {
-        const list = focusables()
-        if (!list.length) return
-        const head = list[0]
-        const tail = list[list.length - 1]
-        if (event.shiftKey && document.activeElement === head) {
-          event.preventDefault()
-          tail.focus()
-        } else if (!event.shiftKey && document.activeElement === tail) {
-          event.preventDefault()
-          head.focus()
-        }
-      }
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (!dialog) return
+    if (open) {
+      if (!dialog.open) dialog.showModal()
+    } else if (dialog.open) {
+      dialog.close()
     }
-    window.addEventListener('keydown', onKey)
-    const previousOverflow = document.documentElement.style.overflow
-    document.documentElement.style.overflow = 'hidden'
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      document.documentElement.style.overflow = previousOverflow
-      if (previousFocus && document.contains(previousFocus)) previousFocus.focus()
-    }
-  }, [open, onClose])
+  }, [open])
+
   if (!open) return null
+
+  const isOutsidePanel = (clientX: number, clientY: number) => {
+    const panel = panelRef.current
+    if (!panel) return false
+    const r = panel.getBoundingClientRect()
+    return clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom
+  }
+
   return (
-    <div className="fixed inset-0 z-50 grid place-items-end sm:place-items-center" role="dialog" aria-modal="true">
-      <button aria-label="Close" tabIndex={-1} className="absolute inset-0 cursor-default bg-black/65" onClick={onClose} />
-      <div
-        ref={panelRef}
-        tabIndex={-1}
-        className={`card rise relative max-h-[92dvh] w-full overflow-y-auto rounded-b-none p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:rounded-b-[var(--radius)] sm:pb-5 ${wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'}`}
-      >
-        {children}
+    <dialog
+      ref={dialogRef}
+      aria-label={label}
+      {...({ closedby: 'any' } as Record<string, string>)}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      onClose={() => {
+        if (open) onClose()
+      }}
+      onPointerDown={(event) => {
+        pressedOutside.current = isOutsidePanel(event.clientX, event.clientY)
+      }}
+      onPointerUp={(event) => {
+        // Light-dismiss fallback for browsers without native closedby="any" (e.g. Safari):
+        // require both press and release outside the panel so drag-selections never dismiss.
+        if (pressedOutside.current && isOutsidePanel(event.clientX, event.clientY)) {
+          onClose()
+        }
+        pressedOutside.current = false
+      }}
+      className="modal-dialog fixed inset-0 z-50 m-0 h-dvh max-h-none w-screen max-w-none bg-transparent p-0 text-ink backdrop:bg-black/65"
+    >
+      <div className="grid h-full w-full place-items-end sm:place-items-center sm:p-4">
+        <div
+          ref={panelRef}
+          className={`card rise relative max-h-[92dvh] w-full overflow-y-auto rounded-b-none p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:rounded-b-[var(--radius)] sm:pb-5 ${wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'}`}
+        >
+          {children}
+        </div>
       </div>
-    </div>
+    </dialog>
   )
 }
 
@@ -184,7 +198,8 @@ export function SoundToggle({ showSong = true }: { showSong?: boolean }) {
   const toggleOpen = () => {
     if (!open && box.current) {
       const rect = box.current.getBoundingClientRect()
-      setOpenUp(window.innerHeight - rect.bottom < 280 && rect.top > 280)
+      const spaceBelow = window.innerHeight - rect.bottom
+      setOpenUp(spaceBelow < 290 && rect.top > spaceBelow)
     }
     setOpen((prev) => !prev)
   }
@@ -204,7 +219,7 @@ export function SoundToggle({ showSong = true }: { showSong?: boolean }) {
       </button>
       {open && (
         <div
-          className={`card rise absolute right-0 z-[60] w-64 max-w-[calc(100vw-2rem)] p-3.5 text-left ${openUp ? 'bottom-full mb-2' : 'top-full mt-2'}`}
+          className={`card rise absolute right-0 z-[60] max-h-[min(78dvh,22rem)] w-64 max-w-[calc(100vw-1.5rem)] overflow-y-auto p-3.5 text-left ${openUp ? 'bottom-full mb-2' : 'top-full mt-2'}`}
           role="dialog"
           aria-label="Sound and music volume"
         >
@@ -258,11 +273,12 @@ export function SoundToggle({ showSong = true }: { showSong?: boolean }) {
             value={on ? level : 0}
             onChange={(event) => {
               const next = Number(event.target.value)
+              if (next > 0) unlockAudio()
               if (!on && next > 0) setOn(true)
               setMusicVolume(next)
             }}
             aria-valuetext={words}
-            className="mt-1 min-h-[40px] w-full cursor-pointer"
+            className="mt-1 min-h-[44px] w-full cursor-pointer"
             style={{ accentColor: 'var(--accent)' }}
           />
           <div className="-mt-1 flex justify-between text-[12px] text-muted" aria-hidden>
@@ -272,14 +288,24 @@ export function SoundToggle({ showSong = true }: { showSong?: boolean }) {
 
           <div className="mt-3 grid gap-2">
             {on && (
-              <button type="button" className="btn btn-ghost btn-sm w-full" onClick={() => setMusicOn(level === 0)}>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm w-full"
+                onClick={() => {
+                  if (level === 0) unlockAudio()
+                  setMusicOn(level === 0)
+                }}
+              >
                 {level > 0 ? 'Turn music off' : 'Turn music on'}
               </button>
             )}
             <button
               type="button"
               className={`btn btn-sm w-full ${on ? 'btn-ghost' : 'btn-primary'}`}
-              onClick={() => setOn(!on)}
+              onClick={() => {
+                if (!on) unlockAudio()
+                setOn(!on)
+              }}
             >
               {on ? 'Mute all sound' : 'Unmute sound'}
             </button>
