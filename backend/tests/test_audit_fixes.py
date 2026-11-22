@@ -233,3 +233,12 @@ async def test_host_persona_and_sudden_death_stakes_are_accurate(monkeypatch):
     got_life = await host_service.describe_cue("result", run=run, player=player, item_id="item-1")
     assert got_life is not None
     assert "life back" in got_life.lower()
+
+
+def test_tidy_line_strips_broken_here_we_opening_stub():
+    assert host_service.tidy_line("[building] Here we... [announcing, big] Read It or Weep!") == "[announcing, big] Read It or Weep!"
+    assert host_service.tidy_line("[building] Here we... Read It or Weep!") == "[building] Read It or Weep!"
+    assert host_service.tidy_line("Here we… Read It or Weep!") == "Read It or Weep!"
+    # Complete sentences remain untouched.
+    assert host_service.tidy_line("[dramatic] Here we are at the final question.") == "[dramatic] Here we are at the final question."
+    assert len(host_service._OPENING_STARTERS) >= 5

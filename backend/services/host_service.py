@@ -173,9 +173,10 @@ def _performance_notes(name: str, manner: str, warm: bool, style: str | None) ->
         "- A beat of silence is \"...\" in the text. Put one before a punchline.\n"
         "- A sound you make can be a tag on its own - [laughs], [chuckles], [sighs], [scoffs] - at most one a line.\n"
         "- Never a sound effect such as [applause], [drumroll] or [buzzer]: the game plays its own.\n"
-        "- The name of a round is a TITLE. Give it a run-up and its own beat, announced: \"[building] It's the... "
-        "[announcing, big] Warm-Up Round!\", \"[building] Hold on to something... [announcing] the Lightning Round!\" - "
-        "a different run-up every time, never the same one twice in a row."
+        "- The name of a round is a TITLE. Give it a crisp, complete lead-in and its own beat, announced: "
+        "\"[building] Time for [announcing, big] the Warm-Up Round!\", \"[building] Brace yourself for [announcing] "
+        "the Lightning Round!\" - a different lead-in every time, never the same one twice in a row, and never a "
+        "cut-off fragment like \"Here we...\"."
         + ("\n- At this sarcasm setting the teasing is gone: you are on their side, delighted when they get one right "
            "and sympathetic when they do not. Keep all of the energy and the timing." if warm else "")
         + (f"\n- {name} in particular: {style}" if style else ""))
@@ -507,10 +508,27 @@ def _opening_angles(run: dict, player: dict | None, quiz: dict, returning: bool)
     return angles
 
 
+_OPENING_STARTERS = [
+    "Open with a brisk live-on-air cue in your own words (lights up, mics hot, showtime), then announce the show title.",
+    "Open with a playful mock-formal broadcast greeting in your own words, then announce the show title.",
+    "Open with a cheeky one-line tease about finding out who actually paid attention, then drop the show title.",
+    "Open with punchy game-show energy and a complete welcome phrase in your own words, then announce the show title.",
+    "Open deadpan and conversational — straight into the stakes of tonight's game — then name the show.",
+    "Open with a theatrical prime-time announcer setup (mock-grand studio or imaginary audience), then name the show.",
+    "Open with a crisp, upbeat ready-set beat (complete sentence, never a clipped stub), then announce the show title.",
+]
+
+
 async def _opening_angle(run: dict, player: dict | None, quiz: dict, returning: bool) -> str:
     """One thing to make this opening about, different each game."""
     import random as _random
     return _random.choice(_opening_angles(run, player, quiz, returning))
+
+
+def _opening_starter() -> str:
+    """Rotate opening shapes so consecutive games never fall into the same cliché lead-in."""
+    import random as _random
+    return _random.choice(_OPENING_STARTERS)
 
 
 async def _welcome(run: dict, player: dict | None, name: str) -> str:
@@ -546,13 +564,14 @@ async def _welcome(run: dict, player: dict | None, name: str) -> str:
         "select host_opening from runs where player_id = $1 and host_opening is not null and id <> $2"
         " order by started_at desc limit 3", run["player_id"], run["id"])] if player else []
     angle = await _opening_angle(run, player, quiz, returning)
+    starter = _opening_starter()
 
     # Spoken words: a first game gets the full opening (about 20 to 25 seconds), a returning player a short one.
     # Measured: asked for "50 to 70 words", the writer gave 94 to 115 - so the limit is stated as a hard one, and
     # WrittenHostVoice asks for one rewrite of anything well over it.
-    limit = {("show", False): 65, ("show", True): 35, ("sudden_death", False): 55, ("sudden_death", True): 30,
-             ("speed", False): 40, ("speed", True): 20, ("straight", False): 35, ("straight", True): 20,
-             ("jukebox", False): 45, ("jukebox", True): 25}[
+    limit = {("show", False): 65, ("show", True): 42, ("sudden_death", False): 55, ("sudden_death", True): 35,
+             ("speed", False): 40, ("speed", True): 26, ("straight", False): 35, ("straight", True): 24,
+             ("jukebox", False): 45, ("jukebox", True): 32}[
         (run["mode"] if run["mode"] in ("show", "sudden_death", "speed", "straight", "jukebox") else "show", returning)]
     if run["mode"] == "speed":
         ending = "the rules in one breath" if not returning else "a one-line reminder of the rules"
@@ -565,15 +584,13 @@ async def _welcome(run: dict, player: dict | None, name: str) -> str:
                   else "a quick \"you know the drill\" reminder of one or two rules")
         # A Sudden Death game's card says "Sudden Death", not its first level: the opening ends on the game's name.
         title = "Sudden Death" if run["mode"] == "sudden_death" else first
-        finish = (f"Lead into the first round with a run-up and end on its name as a title - \"{title}!\" - and stop. "
+        finish = (f"Lead cleanly into the first round and end on its name as a title - \"{title}!\" - and stop. "
                   "The first question appears as you finish.")
     parts = [
         "Open the show. This is the big opening, the one moment you take your time - but it must never drag: "
         f"{limit} spoken words AT MOST, in four to six short beats. Count them.",
-        "You start over the theme music as it fades down, so your first two or three words are half heard: begin with "
-        "a building run-up in your own words (never a name - not the show's, not yours, not theirs - and not a word "
-        "about the music), then open the "
-        "show by name, like the top of a broadcast. Then, in this order: "
+        f"{starter} Never start with \"Here we...\", \"Here we go\", or any unfinished sentence fragment — every "
+        "beat must be a complete phrase (and do not comment on the theme music). Then, in this order: "
         + ("introduce yourself in a line; " if not returning else "welcome them back - you have met before; ")
         + f"introduce tonight's contestant like a contestant on a show; then {ending}, in plain words, as a host "
         "talks - never as a list; then tonight's angle as one joke, so the run-up into the game starts from a laugh. "
@@ -583,8 +600,10 @@ async def _welcome(run: dict, player: dict | None, name: str) -> str:
         "The facts, for you (use what helps, never recite them):\n" + "\n".join(f"- {fact}" for fact in facts),
     ]
     if recent:
-        parts.append("Your last openings for this contestant. This one must be completely different - not their jokes, "
-                     "not their words, not their shape:\n" + "\n".join(f"- \"{line[:300]}\"" for line in recent))
+        cleaned_recent = [re.sub(r"^here we\s*(?:\.\.\.|…)\s*", "", line, flags=re.I).strip() for line in recent]
+        parts.append("Your last openings for this contestant. This one must be completely different - different opening "
+                     "words, different joke, different shape:\n"
+                     + "\n".join(f"- \"{line[:300]}\"" for line in cleaned_recent if line))
     parts.append(f"Word limit: {limit}.")
     return "\n\n".join(parts)
 
@@ -1108,6 +1127,7 @@ async def transcribe(pcm: bytes) -> str:
 
 _FOREIGN = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uff00-\uffef]")   # CJK and full-width: never in a line
 _LEAKS = re.compile(r"</?final>|\bword count\b|\b\d+ words\. count\b|\bcount: ", re.I)  # the writer's notes to itself
+_BROKEN_STUB = re.compile(r"^((?:\[[^\[\]]{1,60}\]\s*)*)here we\s*(?:\.\.\.|…)\s*", re.I)
 
 
 def tidy_line(line: str) -> str:
@@ -1121,6 +1141,11 @@ def tidy_line(line: str) -> str:
         found = pattern.search(line)
         if found:
             line = line[:found.start()].rstrip(" ,;:-")
+    stub = _BROKEN_STUB.match(line)
+    if stub:
+        prefix, rest = stub.group(1), line[stub.end():].lstrip()
+        if rest:
+            line = rest if rest.startswith("[") else f"{prefix}{rest}"
     # The same line twice in a row: keep one.
     for middle in [i for i, ch in enumerate(line) if ch == " "]:
         first, second = line[:middle].strip(), line[middle:].strip()

@@ -937,8 +937,8 @@ button:disabled {
     }
   }
 
-  /* Retro CRT host monitor animations */
-  .host-crt {
+  /* Retro CRT host monitor animations (HTML screen overlay for reliable iOS WebKit GPU compositing) */
+  .host-crt .crt-casing {
     filter: drop-shadow(2px 2px 0 #000);
   }
 
@@ -946,11 +946,42 @@ button:disabled {
     filter: drop-shadow(0 0 3px color-mix(in oklab, var(--crt-color) 75%, transparent));
   }
 
-  .host-crt .crt-bars rect {
-    transform-box: fill-box;
+  .host-crt .crt-glass {
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(135deg, rgb(255 255 255 / 0.11) 0 24%, transparent 24%),
+      repeating-linear-gradient(to bottom, transparent 0 2px, rgb(0 0 0 / 0.34) 2px 3px);
+  }
+
+  .host-crt .crt-eye {
+    width: 19%;
+    aspect-ratio: 1;
+    border-radius: 1px;
+    background: var(--crt-color);
+    box-shadow: 0 0 4px color-mix(in oklab, var(--crt-color) 80%, transparent);
+    transform-origin: center;
+  }
+
+  .host-crt .crt-bars {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 8%;
+    height: 44%;
+    width: 100%;
+  }
+
+  .host-crt .crt-bar {
+    flex: 1;
+    height: 100%;
+    border-radius: 1px;
+    background: var(--crt-color);
+    box-shadow: 0 0 4px color-mix(in oklab, var(--crt-color) 75%, transparent);
     transform-origin: center bottom;
     transform: scaleY(0.24);
     transition: transform 0.18s ease;
+    will-change: transform;
   }
 
   .host-crt[data-state='idle'] .crt-b2,
@@ -966,27 +997,50 @@ button:disabled {
   .host-crt[data-state='speaking'] .crt-b5 { transform: scaleY(0.75); }
   .host-crt[data-state='speaking'] .crt-b6 { transform: scaleY(0.4); }
 
+  .host-crt .crt-pulse {
+    width: 50%;
+    aspect-ratio: 1;
+    border-radius: 9999px;
+    border: 1.5px dashed var(--crt-color);
+    box-shadow: 0 0 4px color-mix(in oklab, var(--crt-color) 75%, transparent);
+    will-change: transform;
+  }
+
+  .host-crt .crt-visor-core {
+    position: absolute;
+    width: 18%;
+    aspect-ratio: 1;
+    border-radius: 9999px;
+    background: var(--crt-color);
+    box-shadow: 0 0 5px color-mix(in oklab, var(--crt-color) 85%, transparent);
+  }
+
+  .host-crt .crt-visor-wing {
+    position: absolute;
+    width: 11%;
+    height: 12%;
+    border-radius: 1px;
+    background: var(--crt-color);
+    opacity: 0.72;
+  }
+
   @media (prefers-reduced-motion: no-preference) {
     .host-crt[data-state='idle'] .crt-eye {
-      transform-box: fill-box;
-      transform-origin: center;
       animation: crt-blink 5.2s ease-in-out infinite;
     }
-    .host-crt[data-state='speaking'] .crt-b1 { animation: crt-wave 0.46s ease-in-out infinite; }
-    .host-crt[data-state='speaking'] .crt-b2 { animation: crt-wave 0.38s ease-in-out 0.08s infinite; }
-    .host-crt[data-state='speaking'] .crt-b3 { animation: crt-wave 0.52s ease-in-out 0.14s infinite; }
-    .host-crt[data-state='speaking'] .crt-b4 { animation: crt-wave 0.42s ease-in-out 0.05s infinite; }
-    .host-crt[data-state='speaking'] .crt-b5 { animation: crt-wave 0.5s ease-in-out 0.18s infinite; }
-    .host-crt[data-state='speaking'] .crt-b6 { animation: crt-wave 0.44s ease-in-out 0.11s infinite; }
-    .host-crt[data-state='thinking'] .crt-bars rect { animation: crt-wave 0.9s ease-in-out infinite; }
+    .host-crt[data-state='speaking'] .crt-b1 { animation: crt-wave 0.44s ease-in-out -0.05s infinite; }
+    .host-crt[data-state='speaking'] .crt-b2 { animation: crt-wave 0.36s ease-in-out -0.18s infinite; }
+    .host-crt[data-state='speaking'] .crt-b3 { animation: crt-wave 0.50s ease-in-out -0.32s infinite; }
+    .host-crt[data-state='speaking'] .crt-b4 { animation: crt-wave 0.40s ease-in-out -0.11s infinite; }
+    .host-crt[data-state='speaking'] .crt-b5 { animation: crt-wave 0.48s ease-in-out -0.27s infinite; }
+    .host-crt[data-state='speaking'] .crt-b6 { animation: crt-wave 0.42s ease-in-out -0.08s infinite; }
+    .host-crt[data-state='thinking'] .crt-bar { animation: crt-wave 0.9s ease-in-out infinite; }
     .host-crt[data-state='thinking'] .crt-b2 { animation-delay: 0.12s; }
     .host-crt[data-state='thinking'] .crt-b3 { animation-delay: 0.24s; }
     .host-crt[data-state='thinking'] .crt-b4 { animation-delay: 0.36s; }
     .host-crt[data-state='thinking'] .crt-b5 { animation-delay: 0.48s; }
     .host-crt[data-state='thinking'] .crt-b6 { animation-delay: 0.6s; }
     .host-crt[data-state='listening'] .crt-pulse {
-      transform-box: fill-box;
-      transform-origin: center;
       animation: spin-slow 4s linear infinite;
     }
   }
@@ -1583,7 +1637,9 @@ button:disabled {
 
   .arcade .timer-fill,
   .eq i,
-  .host-wave i {
+  .host-wave i,
+  .host-crt .crt-bar,
+  .host-crt .crt-eye {
     forced-color-adjust: none;
     background: Highlight;
   }

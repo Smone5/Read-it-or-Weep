@@ -3,10 +3,10 @@
 // this player, or turns it off, without touching the host - and, during a game, says what is playing.
 // Both show nothing at all when there is no music.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { musicVolume, nextJukeboxSong, onJukeboxChange, onMusicVolumeChange, setMusicOn, setMusicVolume, toggleJukebox, type JukeboxState } from '../lib/jukebox'
 import type { PartyTrack } from '../lib/types'
-import { IconExternal, IconHeart, IconMusic, IconMusicOff, IconPause, IconPlay, IconSkip } from './Icons'
+import { IconExternal, IconHeart, IconPause, IconPlay, IconSkip, IconSoundOff, IconSoundOn } from './Icons'
 
 export function useJukebox(): JukeboxState {
   const [state, setState] = useState<JukeboxState>({ active: false, track: null, playing: false, needsTap: false })
@@ -27,6 +27,7 @@ export function MusicToggle({ showSong = true }: { showSong?: boolean }) {
   const [open, setOpen] = useState(false)
   const [openUp, setOpenUp] = useState(false)
   const box = useRef<HTMLDivElement | null>(null)
+  const sliderId = useId()
   useEffect(() => onMusicVolumeChange(setLevel), [])
   useEffect(() => {
     if (!open) return
@@ -59,11 +60,12 @@ export function MusicToggle({ showSong = true }: { showSong?: boolean }) {
         type="button"
         className="btn btn-ghost btn-sm"
         aria-expanded={open}
-        aria-label={`Background music volume: ${words}`}
+        aria-haspopup="dialog"
+        aria-label={`Music volume: ${words}`}
         title={`Music volume: ${words}`}
         onClick={toggleOpen}
       >
-        {on ? <IconMusic size={16} /> : <IconMusicOff size={16} className="opacity-55" />}
+        {on ? <IconSoundOn size={16} /> : <IconSoundOff size={16} className="opacity-55" />}
       </button>
       {open && (
         <div
@@ -90,11 +92,11 @@ export function MusicToggle({ showSong = true }: { showSong?: boolean }) {
               </div>
             </div>
           )}
-          <label className="pixel block text-[10px] text-muted" htmlFor="music-volume">
+          <label className="pixel block text-[10px] text-muted" htmlFor={sliderId}>
             Music volume
           </label>
           <input
-            id="music-volume"
+            id={sliderId}
             type="range"
             min={0}
             max={100}
@@ -102,10 +104,10 @@ export function MusicToggle({ showSong = true }: { showSong?: boolean }) {
             value={level}
             onChange={(event) => setMusicVolume(Number(event.target.value))}
             aria-valuetext={words}
-            className="mt-3 w-full"
+            className="mt-1 min-h-[40px] w-full cursor-pointer"
             style={{ accentColor: 'var(--accent)' }}
           />
-          <div className="mt-1 flex justify-between text-[12px] text-muted" aria-hidden>
+          <div className="-mt-1 flex justify-between text-[12px] text-muted" aria-hidden>
             <span>Off</span>
             <span>Loud</span>
           </div>

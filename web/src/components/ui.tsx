@@ -1,7 +1,15 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import {
+  musicVolume,
+  onJukeboxChange,
+  onMusicVolumeChange,
+  setMusicOn,
+  setMusicVolume,
+  type JukeboxState,
+} from '../lib/jukebox'
 import { onSoundChange, setSoundOn, soundOn } from '../lib/sound'
 import type { Branding } from '../lib/types'
-import { IconClose, IconSoundOff, IconSoundOn } from './Icons'
+import { IconClose, IconExternal, IconSoundOff, IconSoundOn } from './Icons'
 
 export function Logo({ branding, size = 40 }: { branding: Branding | null; size?: number }) {
   if (branding?.logoUrl) {
@@ -138,18 +146,147 @@ export function useSoundSetting(): [boolean, (on: boolean) => void] {
   return [on, setSoundOn]
 }
 
-export function SoundToggle() {
+export function SoundToggle({ showSong = true }: { showSong?: boolean }) {
   const [on, setOn] = useSoundSetting()
+  const [level, setLevel] = useState(musicVolume)
+  const [jukebox, setJukebox] = useState<JukeboxState>({ active: false, track: null, playing: false, needsTap: false })
+  const [open, setOpen] = useState(false)
+  const [openUp, setOpenUp] = useState(false)
+  const box = useRef<HTMLDivElement | null>(null)
+  const sliderId = useId()
+
+  useEffect(() => onMusicVolumeChange(setLevel), [])
+  useEffect(() => onJukeboxChange(setJukebox), [])
+
+  useEffect(() => {
+    if (!open) return
+    const outside = (event: PointerEvent) => {
+      if (!box.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        setOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', outside)
+    document.addEventListener('keydown', escape)
+    return () => {
+      document.removeEventListener('pointerdown', outside)
+      document.removeEventListener('keydown', escape)
+    }
+  }, [open])
+
+  const musicActive = on && level > 0
+  const words = !on ? 'muted' : level === 0 ? 'music off' : level < 35 ? 'quiet' : level <= 65 ? 'normal' : 'loud'
+  const track = jukebox.track
+
+  const toggleOpen = () => {
+    if (!open && box.current) {
+      const rect = box.current.getBoundingClientRect()
+      setOpenUp(window.innerHeight - rect.bottom < 280 && rect.top > 280)
+    }
+    setOpen((prev) => !prev)
+  }
+
   return (
-    <button
-      className="btn btn-ghost btn-sm"
-      aria-pressed={on}
-      aria-label={on ? 'Turn sound off' : 'Turn sound on'}
-      onClick={() => setOn(!on)}
-      title={on ? 'Sound on' : 'Sound off'}
-    >
-      {on ? <IconSoundOn size={16} /> : <IconSoundOff size={16} className="opacity-60" />}
-    </button>
+    <div ref={box} className="relative z-[55] flex-none">
+      <button
+        type="button"
+        className="btn btn-ghost btn-sm"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-label={`Sound and volume: ${words}`}
+        title={`Sound & volume (${words})`}
+        onClick={toggleOpen}
+      >
+        {on ? <IconSoundOn size={16} /> : <IconSoundOff size={16} className="opacity-60" />}
+      </button>
+      {open && (
+        <div
+          className={`card rise absolute right-0 z-[60] w-64 max-w-[calc(100vw-2rem)] p-3.5 text-left ${openUp ? 'bottom-full mb-2' : 'top-full mt-2'}`}
+          role="dialog"
+          aria-label="Sound and music volume"
+        >
+          {showSong && musicActive && jukebox.active && jukebox.playing && track && (
+            <div className="mb-3.5 flex items-center gap-2.5 border-b border-line pb-3">
+              {track.artworkUrl && (
+                track.trackUrl ? (
+                  <a
+                    className="relative flex-none"
+                    href={track.trackUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="Listen on Apple Music"
+                    aria-label={`Listen to ${track.title} on Apple Music`}
+                  >
+                    <img src={track.artworkUrl} alt="" width={44} height={44} decoding="async" className="h-11 w-11 rounded-sm border-2 border-black object-cover" />
+                    <span className="absolute -bottom-1 -right-1 grid h-4 w-4 place-items-center rounded-sm bg-black text-white" aria-hidden>
+                      <IconExternal size={10} />
+                    </span>
+                  </a>
+                ) : (
+                  <img src={track.artworkUrl} alt="" width={44} height={44} decoding="async" className="h-11 w-11 flex-none rounded-sm border-2 border-black object-cover" />
+                )
+              )}
+              <div className="min-w-0">
+                <p className="pixel text-[10px] text-muted">Now playing</p>
+                <p className="mt-0.5 truncate text-[15px] font-bold">{track.title}</p>
+                <p className="truncate text-[13px] text-muted">{track.artist}</p>
+                {track.because ? (
+                  <p className="truncate text-[12px]" style={{ color: 'var(--accent-text)' }}>
+                    Because you like {track.because}
+                  </p>
+                ) : track.cueReason ? (
+                  <p className="truncate text-[12px]" style={{ color: 'var(--accent-text)' }}>
+                    {track.cueReason}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          <label className="pixel block text-[10px] text-muted" htmlFor={sliderId}>
+            Music volume
+          </label>
+          <input
+            id={sliderId}
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={on ? level : 0}
+            onChange={(event) => {
+              const next = Number(event.target.value)
+              if (!on && next > 0) setOn(true)
+              setMusicVolume(next)
+            }}
+            aria-valuetext={words}
+            className="mt-1 min-h-[40px] w-full cursor-pointer"
+            style={{ accentColor: 'var(--accent)' }}
+          />
+          <div className="-mt-1 flex justify-between text-[12px] text-muted" aria-hidden>
+            <span>Off</span>
+            <span>Loud</span>
+          </div>
+
+          <div className="mt-3 grid gap-2">
+            {on && (
+              <button type="button" className="btn btn-ghost btn-sm w-full" onClick={() => setMusicOn(level === 0)}>
+                {level > 0 ? 'Turn music off' : 'Turn music on'}
+              </button>
+            )}
+            <button
+              type="button"
+              className={`btn btn-sm w-full ${on ? 'btn-ghost' : 'btn-primary'}`}
+              onClick={() => setOn(!on)}
+            >
+              {on ? 'Mute all sound' : 'Unmute sound'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 

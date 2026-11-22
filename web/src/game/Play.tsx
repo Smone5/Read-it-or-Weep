@@ -25,7 +25,6 @@
 import confetti from 'canvas-confetti'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { IconBolt, IconBook, IconBulb, IconChart, IconChip, IconClose, IconDisc, IconFlag, IconHeart, IconPlay, IconSparkle, IconSplit } from '../components/Icons'
-import { MusicToggle } from '../components/NowPlaying'
 import { ErrorNote, Modal, SoundToggle } from '../components/ui'
 import { VideoClipCard } from './VideoClipCard'
 import { api, ApiError, onConnectionTrouble, session } from '../lib/api'
@@ -826,7 +825,6 @@ export default function Play({ firstTurn, resumed, hostName, hostLine, hostSpeak
         <div className="flex items-center justify-between gap-2 sm:order-2 sm:justify-end">
           <span className="pixel truncate text-[10px] text-muted sm:hidden">{state.modeName}</span>
           <div className="flex items-center gap-1.5 sm:gap-2">
-            <MusicToggle />
             <SoundToggle />
             <button className="btn btn-ghost btn-sm" onClick={() => setQuitting(true)} aria-label="Quit this game" title="Quit">
               <IconClose size={14} />
