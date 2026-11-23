@@ -57,6 +57,8 @@ export type QuizView = {
   modes: ModeInfo[]
   defaultMode: ModeId
   decades: string[]
+  allowFavorites?: boolean
+  lockedPlaylist?: boolean
 }
 
 export type QuizInfo = { branding: Branding; quiz: QuizView; player: PlayerView | null }

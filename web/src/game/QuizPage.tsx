@@ -556,7 +556,8 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onFavouriteArtis
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const chosen = quiz.modes.find((m) => m.id === mode) ?? quiz.modes[0]
-  const wantsDecade = chosen?.music && quiz.decades.length > 0
+  const allowFavorites = (quiz.allowFavorites ?? true) && !quiz.lockedPlaylist
+  const wantsDecade = Boolean(chosen?.music && quiz.decades.length > 0 && !quiz.lockedPlaylist)
   const meeting = untilText(quiz.meetingAt)
   const firstName = player.name.split(' ')[0]
 
@@ -643,7 +644,7 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onFavouriteArtis
 
   const activeHost = branding.host.choices.find((c) => c.id === hostId) ?? branding.host.choices[0]
   const activeHostTone = activeHost ? hostToneFor(activeHost.register) : 'accent'
-  const showCustomize = chosen?.id !== 'straight' && (branding.host.choices.length > 1 || quiz.decades.length > 0)
+  const showCustomize = chosen?.id !== 'straight' && (branding.host.choices.length > 1 || wantsDecade || (quiz.decades.length > 0 && allowFavorites))
   const readiness = player.readiness
   const hasMultipleReports = openReports.length > 1
   const pausedModeName = player.unfinishedRun
@@ -828,7 +829,11 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onFavouriteArtis
           <p className="text-center text-xs text-muted">
             {chosen?.name ?? 'The Show'}
             {chosen?.id !== 'straight' && activeHost ? ` · Host: ${activeHost.name}` : ''}
-            {wantsDecade ? ` · Music: ${decade ? DECADE_LABEL[decade] : 'Any decade'}` : ''}
+            {quiz.lockedPlaylist && chosen?.music
+              ? ' · Curated soundtrack'
+              : wantsDecade
+                ? ` · Music: ${decade ? DECADE_LABEL[decade] : 'Any decade'}`
+                : ''}
           </p>
         </div>
 
@@ -894,8 +899,8 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onFavouriteArtis
                 <p className="pixel text-[10px] text-muted">Host &amp; music</p>
                 <p className="mt-0.5 truncate text-sm font-medium">
                   {activeHost ? activeHost.name : 'Default host'}
-                  {wantsDecade ? ` · ${decade ? DECADE_LABEL[decade] : 'Any decade'}` : ''}
-                  {player.favoriteArtist ? ` · ♥ ${player.favoriteArtist}` : ''}
+                  {quiz.lockedPlaylist ? ' · Curated soundtrack' : wantsDecade ? ` · ${decade ? DECADE_LABEL[decade] : 'Any decade'}` : ''}
+                  {allowFavorites && player.favoriteArtist ? ` · ♥ ${player.favoriteArtist}` : ''}
                 </p>
               </div>
             </div>
@@ -985,7 +990,7 @@ function Lobby({ info, player, challenge, hostId, onChooseHost, onFavouriteArtis
                 </div>
               )}
 
-              {quiz.decades.length > 0 && (
+              {quiz.decades.length > 0 && allowFavorites && (
                 <FavouriteArtist initial={player.favoriteArtist ?? null} onSaved={onFavouriteArtist} />
               )}
             </div>

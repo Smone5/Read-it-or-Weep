@@ -190,10 +190,12 @@ async def start_run(quiz: dict, rules: dict, player: dict, mode: str, decade: st
         raise GameError("Music is switched off for this quiz, so Office Jukebox cannot be played.")
 
     music = bool(rules["music_enabled"]) and mode in ("show", "sudden_death", "jukebox")
+    approved_only, pinned_ids = music_service.music_filter(rules)
     if music:
         allowed = rules["decades"]
         decade = decade if decade in allowed else random.choice(allowed)
-        music_service.ensure_decade(decade)
+        if not (approved_only or pinned_ids):
+            music_service.ensure_decade(decade)
     else:
         decade = None
 
@@ -201,7 +203,7 @@ async def start_run(quiz: dict, rules: dict, player: dict, mode: str, decade: st
                    if any(q["section_id"] == s["id"] and q["kind"] == "mcq" for q in questions)]
     plan = build_plan(mode, rules, stock, section_ids, music)
     if mode == "jukebox":
-        jukebox.prepare_soon(await music_service.tracks_for(decade))   # round two's jargon titles, written ahead
+        jukebox.prepare_soon(await music_service.governed_tracks(decade, approved_only=approved_only, pinned_ids=pinned_ids))   # round two's jargon titles, written ahead
     lifelines = dict(rules["show"]["lifelines"]) if mode == "show" else ({"fifty": 1} if mode == "sudden_death" else {})
     await db.execute("update runs set status = 'abandoned', finished_at = now()"
                      " where player_id = $1 and quiz_id = $2 and status = 'in_progress'", player["id"], quiz["id"])
@@ -245,19 +247,26 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
             "time_limit_sec": int(slot["limit"]), "points_multiplier": float(slot.get("mult", 1))}
 
     if kind == "music":
+        approved_only, pinned_ids = music_service.music_filter(rules)
         avoid = {i["music_track_id"] for i in items if i["music_track_id"]}
         past = await db.fetch("select distinct music_track_id from run_items where player_id = $1 and quiz_id = $2"
                               " and music_track_id is not null", run["player_id"], run["quiz_id"])
         avoid |= {r["music_track_id"] for r in past}
-        if rules.get("soundtrack", True):
+        if rules.get("soundtrack", True) and not pinned_ids:
             # The songs playing behind this game are not asked about: the player has just been listening to them.
-            avoid |= {t["id"] for t in await music_service.soundtrack_rows(run["decade"], run["id"])}
+            avoid |= {t["id"] for t in await music_service.soundtrack_rows(
+                run["decade"], run["id"], approved_only=approved_only, pinned_ids=pinned_ids,
+            )}
             # Nor are the favourite artist's songs that play now and then: the questions are the same for everyone.
-            liked = favorites.keys(await favorites.for_player(run["player_id"]))
-            if liked:
-                avoid |= {t["id"] for t in await music_service.tracks_for(run["decade"])
-                          if favorites.song_key(t["artist"], t["title"]) in liked}
-        built = await music_service.build_question(run["decade"], avoid, asks=slot.get("asks"))
+            if rules.get("allow_player_favorites", True):
+                liked = favorites.keys(await favorites.for_player(run["player_id"]))
+                if liked:
+                    avoid |= {t["id"] for t in await music_service.governed_tracks(
+                        run["decade"], approved_only=approved_only, pinned_ids=pinned_ids,
+                    ) if favorites.song_key(t["artist"], t["title"]) in liked}
+        built = await music_service.build_question(
+            run["decade"], avoid, asks=slot.get("asks"), approved_only=approved_only, pinned_ids=pinned_ids,
+        )
         if built is None:
             return None
         track = built["track"]
@@ -267,7 +276,8 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
                             "attempt": int(slot.get("attempt", 1))}}
 
     if kind in ("jargon", "song_or_jargon"):
-        tracks = await music_service.tracks_for(run["decade"])
+        approved_only, pinned_ids = music_service.music_filter(rules)
+        tracks = await music_service.governed_tracks(run["decade"], approved_only=approved_only, pinned_ids=pinned_ids)
         avoid = {i["music_track_id"] for i in items if i["music_track_id"]}
         past = await db.fetch(
             "select distinct music_track_id from run_items where player_id = $1 and quiz_id = $2"
@@ -275,8 +285,10 @@ async def _materialise(run: dict, rules: dict, slot: dict, items: list[dict]) ->
             run["player_id"], run["quiz_id"],
         )
         avoid |= {r["music_track_id"] for r in past}
-        if rules.get("soundtrack", True):            # never a song the background music is playing: no spoilers
-            avoid |= {t["id"] for t in await music_service.soundtrack_rows(run["decade"], run["id"])}
+        if rules.get("soundtrack", True) and not pinned_ids:  # never a song the background music is playing: no spoilers
+            avoid |= {t["id"] for t in await music_service.soundtrack_rows(
+                run["decade"], run["id"], approved_only=approved_only, pinned_ids=pinned_ids,
+            )}
         if kind == "jargon":
             built = await jukebox.jargon_item(tracks, avoid)
         else:

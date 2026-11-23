@@ -343,6 +343,9 @@ class GameSettingsWrite(BaseModel):
     after_party: bool | None = None
     soundtrack: bool | None = None
     soundtrack_volume: Literal["quiet", "medium", "loud"] | None = None
+    allow_player_favorites: bool | None = None
+    approved_tracks_only: bool | None = None
+    pinned_track_ids: list[str] | None = None
     mix: MusicMixWrite | None = None
     decades: list[str] | None = None
     picture_mode: Literal["auto", "show", "memory"] | None = None
@@ -484,11 +487,250 @@ class MusicRefresh(BaseModel):
     decade: str
 
 
+class MusicTrackPatch(BaseModel):
+    active: bool | None = None
+    approved: bool | None = None
+
+
+class MusicTrackBulk(BaseModel):
+    action: Literal["approve", "unapprove", "enable", "disable"]
+    trackIds: list[uuid.UUID] | None = None
+    decade: str | None = None
+
+
+class MusicTrackAdd(BaseModel):
+    decade: str
+    artist: str = Field(min_length=1, max_length=160)
+    title: str = Field(min_length=1, max_length=200)
+    previewUrl: str = Field(min_length=10, max_length=1000)
+    artworkUrl: str | None = Field(default=None, max_length=1000)
+    trackUrl: str | None = Field(default=None, max_length=1000)
+    releaseYear: int | None = None
+    source: Literal["itunes", "apple_music", "manual"] = "itunes"
+    approved: bool = True
+
+
+class MusicPolicyWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    blocked_artists: list[str] = Field(default_factory=list)
+    blocked_titles: list[str] = Field(default_factory=list)
+
+
+def _track_admin_view(row: dict, policy: dict) -> dict:
+    return {
+        "id": row["id"],
+        "decade": row["decade"],
+        "artist": row["artist"],
+        "title": row["title"],
+        "releaseYear": row["release_year"],
+        "previewUrl": row["preview_url"],
+        "artworkUrl": row["artwork_url"],
+        "trackUrl": row["track_url"],
+        "source": row["source"],
+        "active": bool(row["active"]),
+        "approved": bool(row.get("approved", False)),
+        "blocked": music_service.is_blocked(row["artist"], row["title"], policy),
+    }
+
+
 @router.get("/music")
 async def music_status(admin: dict = Depends(current_admin)) -> dict:
-    rows = await db.fetch("select decade, count(*) as tracks from music_tracks where active group by decade")
-    counts = {r["decade"]: r["tracks"] for r in rows}
-    return {"decades": [{"decade": d, "tracks": counts.get(d, 0)} for d in ALL_DECADES]}
+    rows = await db.fetch(
+        "select decade,"
+        " count(*) filter (where active) as tracks,"
+        " count(*) filter (where active and approved) as approved,"
+        " count(*) filter (where not active) as disabled"
+        " from music_tracks group by decade"
+    )
+    by_decade = {r["decade"]: r for r in rows}
+    policy = await settings_store.get("music")
+    return {
+        "decades": [
+            {
+                "decade": d,
+                "tracks": int(by_decade[d].get("tracks") or 0) if d in by_decade else 0,
+                "approved": int(by_decade[d].get("approved") or 0) if d in by_decade else 0,
+                "disabled": int(by_decade[d].get("disabled") or 0) if d in by_decade else 0,
+            }
+            for d in ALL_DECADES
+        ],
+        "policy": policy,
+    }
+
+
+@router.get("/music/tracks")
+async def list_music_tracks(
+    decade: str | None = None,
+    status: Literal["all", "active", "approved", "unapproved", "disabled"] = "all",
+    q: str | None = None,
+    ids: str | None = None,
+    limit: int = 200,
+    admin: dict = Depends(current_admin),
+) -> dict:
+    if decade and decade not in ALL_DECADES:
+        raise HTTPException(422, "Unknown decade.")
+    limit = max(1, min(500, limit))
+    where: list[str] = []
+    args: list[Any] = []
+    if ids:
+        raw_ids = [s.strip() for s in ids.split(",") if s.strip()][:100]
+        valid_ids: list[str] = []
+        for s in raw_ids:
+            try:
+                valid_ids.append(str(uuid.UUID(s)))
+            except ValueError:
+                pass
+        if not valid_ids:
+            return {"tracks": []}
+        args.append(valid_ids)
+        where.append(f"id = any(${len(args)}::uuid[])")
+    if decade:
+        args.append(decade)
+        where.append(f"decade = ${len(args)}")
+    if status == "active":
+        where.append("active")
+    elif status == "approved":
+        where.append("active and approved")
+    elif status == "unapproved":
+        where.append("active and not approved")
+    elif status == "disabled":
+        where.append("not active")
+    if q and q.strip():
+        args.append(f"%{q.strip()}%")
+        where.append(f"(artist ilike ${len(args)} or title ilike ${len(args)})")
+    args.append(limit)
+    clause = (" where " + " and ".join(where)) if where else ""
+    rows = await db.fetch(
+        f"select * from music_tracks{clause} order by approved desc, active desc, artist asc, title asc limit ${len(args)}",
+        *args,
+    )
+    policy = await settings_store.get("music")
+    return {"tracks": [_track_admin_view(r, policy) for r in rows]}
+
+
+@router.patch("/music/tracks/{track_id}")
+async def update_music_track(track_id: uuid.UUID, body: MusicTrackPatch, admin: dict = Depends(current_admin)) -> dict:
+    tid = str(track_id)
+    existing = await db.fetchrow("select * from music_tracks where id = $1", tid)
+    if existing is None:
+        raise HTTPException(404, "Track not found.")
+    active = existing["active"] if body.active is None else bool(body.active)
+    approved = existing.get("approved", False) if body.approved is None else bool(body.approved)
+    row = await db.fetchrow(
+        "update music_tracks set active = $2, approved = $3,"
+        " approved_at = case when $3 and not approved then now() when not $3 then null else approved_at end,"
+        " approved_by = case when $3 and not approved then $4::uuid when not $3 then null else approved_by end"
+        " where id = $1 returning *",
+        tid, active, approved, admin["id"],
+    )
+    music_service.invalidate_cache(row["decade"])
+    await _audit(
+        admin, "music.track.update", "music_track", tid,
+        details={"artist": row["artist"], "title": row["title"], "active": active, "approved": approved},
+    )
+    policy = await settings_store.get("music")
+    return {"track": _track_admin_view(row, policy)}
+
+
+@router.post("/music/tracks/bulk")
+async def bulk_update_music_tracks(body: MusicTrackBulk, admin: dict = Depends(current_admin)) -> dict:
+    if not body.trackIds and not body.decade:
+        raise HTTPException(400, "Provide trackIds or a decade.")
+    if body.decade and body.decade not in ALL_DECADES:
+        raise HTTPException(422, "Unknown decade.")
+    if body.trackIds:
+        ids = [str(tid) for tid in body.trackIds[:500]]
+        if body.action == "approve":
+            rows = await db.fetch(
+                "update music_tracks set approved = true, approved_at = coalesce(approved_at, now()),"
+                " approved_by = coalesce(approved_by, $2::uuid) where id = any($1::uuid[]) and active returning decade",
+                ids, admin["id"],
+            )
+        elif body.action == "unapprove":
+            rows = await db.fetch(
+                "update music_tracks set approved = false, approved_at = null, approved_by = null"
+                " where id = any($1::uuid[]) returning decade",
+                ids,
+            )
+        elif body.action == "enable":
+            rows = await db.fetch("update music_tracks set active = true where id = any($1::uuid[]) returning decade", ids)
+        else:
+            rows = await db.fetch("update music_tracks set active = false where id = any($1::uuid[]) returning decade", ids)
+    else:
+        if body.action == "approve":
+            rows = await db.fetch(
+                "update music_tracks set approved = true, approved_at = coalesce(approved_at, now()),"
+                " approved_by = coalesce(approved_by, $2::uuid) where decade = $1 and active returning decade",
+                body.decade, admin["id"],
+            )
+        elif body.action == "unapprove":
+            rows = await db.fetch(
+                "update music_tracks set approved = false, approved_at = null, approved_by = null"
+                " where decade = $1 returning decade",
+                body.decade,
+            )
+        elif body.action == "enable":
+            rows = await db.fetch("update music_tracks set active = true where decade = $1 returning decade", body.decade)
+        else:
+            rows = await db.fetch("update music_tracks set active = false where decade = $1 returning decade", body.decade)
+    for d in {r["decade"] for r in rows}:
+        music_service.invalidate_cache(d)
+    await _audit(
+        admin, f"music.tracks.{body.action}", "music_track", body.decade or "bulk",
+        details={"count": len(rows), "decade": body.decade},
+    )
+    return {"ok": True, "updated": len(rows)}
+
+
+@router.get("/music/search")
+async def search_music_catalog(q: str = "", limit: int = 12, admin: dict = Depends(current_admin)) -> dict:
+    if len(q.strip()) < 2:
+        return {"results": []}
+    try:
+        results = await music_service.search_catalog(q, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("music catalog search failed: %s", exc)
+        raise HTTPException(502, "Could not search the Apple/iTunes music catalog right now.") from exc
+    return {"results": results}
+
+
+@router.post("/music/tracks")
+async def add_music_track(body: MusicTrackAdd, admin: dict = Depends(current_admin)) -> dict:
+    if body.decade not in ALL_DECADES:
+        raise HTTPException(422, "Unknown decade.")
+    if not music_service._allowed_preview_url(body.previewUrl):
+        raise HTTPException(400, "Preview URL must be an official Apple/iTunes HTTPS preview link.")
+    policy = await settings_store.get("music")
+    if music_service.is_blocked(body.artist, body.title, policy):
+        raise HTTPException(400, "That artist or song is currently on your organization's blocklist.")
+    row = await music_service.add_track(
+        decade=body.decade,
+        artist=" ".join(body.artist.split()),
+        title=" ".join(body.title.split()),
+        preview_url=body.previewUrl.strip(),
+        artwork_url=(body.artworkUrl or "").strip() or None,
+        track_url=(body.trackUrl or "").strip() or None,
+        release_year=body.releaseYear,
+        source=body.source,
+        approved=body.approved,
+        admin_id=admin["id"],
+    )
+    await _audit(
+        admin, "music.track.add", "music_track", str(row["id"]),
+        details={"decade": row["decade"], "artist": row["artist"], "title": row["title"], "approved": body.approved},
+    )
+    return {"track": _track_admin_view(row, policy)}
+
+
+@router.put("/music/policy")
+async def update_music_policy(body: MusicPolicyWrite, admin: dict = Depends(current_admin)) -> dict:
+    saved = await settings_store.put("music", body.model_dump())
+    music_service.invalidate_cache()
+    await _audit(
+        admin, "music.policy.update", "settings", "music",
+        details={"blocked_artists": len(saved["blocked_artists"]), "blocked_titles": len(saved["blocked_titles"])},
+    )
+    return {"policy": saved}
 
 
 @router.post("/music/refresh")

@@ -175,12 +175,16 @@ async def _after_party(run: dict, rules: dict, items: list[dict]) -> dict | None
     """Music for the results screen: the game's decade, starting with the songs from its own music breaks."""
     if not (rules["music_enabled"] and rules.get("after_party", True)) or run["mode"] == "straight":
         return None
+    approved_only, pinned_ids = music_service.music_filter(rules)
     decade = music_service.game_decade(run, rules)     # the same decade the game's soundtrack came from
-    if not decade:
+    if not decade and not pinned_ids:
         return None
     heard = [item["music_track_id"] for item in items if item["music_track_id"]]
-    tracks = await music_service.after_party(decade, heard, seed=run["id"])
-    tracks = favorites.mix(tracks, await favorites.for_player(run["player_id"]), f"party:{run['id']}", decade)
+    tracks = await music_service.after_party(
+        decade, heard, seed=run["id"], approved_only=approved_only, pinned_ids=pinned_ids,
+    )
+    if rules.get("allow_player_favorites", True) and not pinned_ids:
+        tracks = favorites.mix(tracks, await favorites.for_player(run["player_id"]), f"party:{run['id']}", decade)
     return {"decade": decade, "tracks": tracks} if tracks else None
 
 

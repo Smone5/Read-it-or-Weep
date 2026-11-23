@@ -416,7 +416,8 @@ async def more_questions(document_id: str) -> None:
 
         report = await generate.generate_bank(
             structured, embeddings, progress=progress, avoid_by_chunk=avoid, include_images=False,
-            existing_embeddings=await _existing_question_vectors(document["quiz_id"]))
+            existing_embeddings=await _existing_question_vectors(document["quiz_id"]),
+            max_mcqs=20, max_statements=8)
         inserted = await _insert_questions(document, report, [s["id"] for s in sections], [c["id"] for c in chunks], [],
                                            "approved" if auto_approve else "pending")
         if inserted:

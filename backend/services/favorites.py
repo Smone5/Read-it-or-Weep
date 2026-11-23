@@ -120,11 +120,19 @@ def _tidy(found: dict) -> dict:
     return {**found, "songs": songs}
 
 
+async def is_artist_blocked(name: str) -> bool:
+    policy = await music_service.music_policy()
+    return music_service.is_blocked(name, "", policy)
+
+
 async def pool(name: str) -> dict | None:
     """What the catalogue has for an artist: their name as the catalogue spells it, similar artists, and songs.
-    None when nobody by that name is found. Kept for a week."""
+    None when nobody by that name is found or the artist is on the workplace blocklist. Kept for a week."""
     key = artist_key(name)
     if not key:
+        return None
+    policy = await music_service.music_policy()
+    if music_service.is_blocked(name, "", policy):
         return None
     row = await db.fetchrow("select artist, similar_artists as similar, songs from favorite_music where artist_key = $1"
                             f" and fetched_at > now() - interval '{KEEP_DAYS} days'", key)
@@ -149,7 +157,11 @@ async def pool(name: str) -> dict | None:
         row = found
     songs = row["songs"] if isinstance(row["songs"], list) else json.loads(row["songs"])
     similar = row["similar"] if isinstance(row["similar"], list) else json.loads(row["similar"])
-    if not row["artist"] or not songs:
+    if not row["artist"] or music_service.is_blocked(row["artist"], "", policy):
+        return None
+    songs = [s for s in songs if not music_service.is_blocked(s.get("artist", ""), s.get("title", ""), policy)]
+    similar = [a for a in similar if not music_service.is_blocked(a, "", policy)]
+    if not songs:
         return None
     return {"artist": row["artist"], "similar": similar, "songs": songs}
 

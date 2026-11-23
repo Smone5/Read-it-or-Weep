@@ -44,6 +44,12 @@ export type GameRules = {
   /** ...and quietly behind the questions while the game is being played. */
   soundtrack: boolean
   soundtrack_volume: SoundtrackVolume
+  /** Players may type a favourite artist in the lobby to mix into their soundtrack. */
+  allow_player_favorites?: boolean
+  /** Corporate mode: only tracks explicitly approved by an admin on the Music page may play. */
+  approved_tracks_only?: boolean
+  /** Optional curated playlist: lock this quiz's music to these exact music_tracks IDs. */
+  pinned_track_ids?: string[]
   /** The music moment by moment, in steps of about 3 dB from the mix tuned by ear (0). */
   mix?: MusicMix
   decades: string[]
@@ -182,7 +188,42 @@ export type SettingsRead<T> = { value: T; defaults: T }
 
 export type SettingsWritten<T> = { value: T }
 
-export type MusicStatus = { decades: { decade: string; tracks: number }[] }
+export type MusicPolicy = {
+  blocked_artists: string[]
+  blocked_titles: string[]
+}
+
+export type MusicStatus = {
+  decades: { decade: string; tracks: number; approved?: number; disabled?: number }[]
+  policy?: MusicPolicy
+}
+
+export type MusicTrackAdmin = {
+  id: string
+  decade: string
+  artist: string
+  title: string
+  releaseYear: number | null
+  previewUrl: string
+  artworkUrl: string | null
+  trackUrl: string | null
+  source: string
+  active: boolean
+  approved: boolean
+  blocked: boolean
+}
+
+export type MusicSearchResult = {
+  artist: string
+  title: string
+  previewUrl: string
+  artworkUrl: string | null
+  trackUrl: string | null
+  releaseYear: number | null
+  source: 'itunes' | 'apple_music' | 'manual'
+  suggestedDecade: string
+  blocked: boolean
+}
 
 // ---- quizzes ------------------------------------------------------------------------
 

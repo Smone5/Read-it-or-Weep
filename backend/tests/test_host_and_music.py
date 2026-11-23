@@ -392,3 +392,60 @@ def test_decade_labels_and_tts_pronunciation_expand_00s_10s_20s():
     # On-screen captions normalize ugly "00's" to "2000s"
     assert host_service.spoken_text("[excited] Hits from the 00's!") == "Hits from the 2000s!"
 
+
+def test_music_blocklist_and_governance_rules():
+    policy = {
+        "blocked_artists": ["Kanye West", "Sia"],
+        "blocked_titles": ["Pumped Up Kicks", "WAP"],
+    }
+    assert music_service.is_blocked("Kanye West", "Stronger", policy)
+    assert music_service.is_blocked("Kanye West feat. Daft Punk", "Stronger", policy)
+    assert music_service.is_blocked("Sia", "Chandelier", policy)
+    assert not music_service.is_blocked("Asia", "Heat of the Moment", policy)       # short artist name must not substring-match
+    assert music_service.is_blocked("Foster the People", "Pumped Up Kicks (Remastered)", policy)
+    assert music_service.is_blocked("Cardi B", "WAP", policy)
+    assert not music_service.is_blocked("Taylor Swift", "Swap Meet", policy)       # word-boundary title check
+    assert not music_service.is_blocked("Queen", "Don't Stop Me Now", policy)
+
+    # settings_store cleans corporate soundtrack controls and validates pinned UUIDs
+    valid_id = "11111111-2222-3333-4444-555555555555"
+    cleaned = settings_store.clean_game({
+        **settings_store.DEFAULTS["game"],
+        "allow_player_favorites": False,
+        "approved_tracks_only": True,
+        "pinned_track_ids": [valid_id.upper(), "not-a-uuid", valid_id],
+    })
+    assert cleaned["allow_player_favorites"] is False
+    assert cleaned["approved_tracks_only"] is True
+    assert cleaned["pinned_track_ids"] == [valid_id]
+
+    cleaned_policy = settings_store._clean_music({
+        "blocked_artists": ["  Kanye West ", "kanye west", ""],
+        "blocked_titles": ["Blurred Lines", "blurred lines"],
+    })
+    assert cleaned_policy == {"blocked_artists": ["Kanye West"], "blocked_titles": ["Blurred Lines"]}
+
+
+async def test_approved_only_and_pinned_soundtrack_never_leak_unapproved_tracks(monkeypatch):
+    t1 = {"id": "11111111-1111-1111-1111-111111111111", "decade": "80s", "artist": "Queen", "title": "Radio Ga Ga",
+          "preview_url": "https://a/1.m4a", "artwork_url": None, "track_url": None, "active": True, "approved": True}
+    t2 = {"id": "22222222-2222-2222-2222-222222222222", "decade": "80s", "artist": "Madonna", "title": "Like a Virgin",
+          "preview_url": "https://a/2.m4a", "artwork_url": None, "track_url": None, "active": True, "approved": False}
+
+    async def fake_raw(decade):
+        return [t1, t2] if decade == "80s" else []
+
+    async def fake_policy():
+        return {"blocked_artists": [], "blocked_titles": []}
+
+    monkeypatch.setattr(music_service, "_raw_tracks_for", fake_raw)
+    monkeypatch.setattr(music_service, "music_policy", fake_policy)
+
+    rows = await music_service.soundtrack_rows("80s", "run-corp", approved_only=True)
+    assert [r["id"] for r in rows] == [t1["id"]]
+
+    # When no approved tracks exist in a decade, strict mode returns None without pulling an unvetted starter track
+    q = await music_service.build_question("90s", set(), approved_only=True)
+    assert q is None
+
+

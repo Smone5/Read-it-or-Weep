@@ -1,11 +1,11 @@
-import { useId, useState, type FormEvent } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { errorText } from '../api'
+import { call, errorText } from '../api'
 import { Badge, ChoiceGroup, ConfirmDialog, Note, NumberField, numberError, Panel, SaveBar, Segmented, Switch } from '../components'
 import { useNotify, useUnsavedGuard } from '../context'
 import { decadeLabel } from '../format'
 import { paths } from '../paths'
-import type { DeepPartial, GameRules, ModeId, MusicMix, PictureMode, SoundtrackVolume } from '../types'
+import type { DeepPartial, GameRules, ModeId, MusicMix, MusicTrackAdmin, PictureMode, SoundtrackVolume } from '../types'
 import { useQuiz } from './context'
 
 // ---- the numbers ----------------------------------------------------------------------
@@ -469,7 +469,17 @@ export default function PlayStylesTab() {
         <Panel
           title="Music"
           description="Name-that-tune breaks between questions, in Game Show, Sudden Death and live games."
-          actions={customTag(['music_enabled', 'soundtrack', 'soundtrack_volume', 'mix', 'after_party', 'decades'])}
+          actions={customTag([
+            'music_enabled',
+            'soundtrack',
+            'soundtrack_volume',
+            'mix',
+            'after_party',
+            'decades',
+            'approved_tracks_only',
+            'allow_player_favorites',
+            'pinned_track_ids',
+          ])}
         >
           <Switch
             checked={draft.music_enabled}
@@ -511,7 +521,29 @@ export default function PlayStylesTab() {
             />
           )}
           {draft.music_enabled && (
-            <fieldset className="mt-2">
+            <div className="mt-2 space-y-1 border-t border-line pt-3">
+              <Switch
+                checked={draft.approved_tracks_only ?? false}
+                onChange={(checked) => change((current) => ({ ...current, approved_tracks_only: checked }))}
+                label="Approved tracks only (corporate safe mode)"
+                description="Restrict this quiz to songs an admin has explicitly approved on the Music page."
+              />
+              <Switch
+                checked={draft.allow_player_favorites ?? true}
+                onChange={(checked) => change((current) => ({ ...current, allow_player_favorites: checked }))}
+                label="Allow players to request a favorite artist"
+                description="Turn off to hide the lobby's 'Who do you like?' box so unreviewed artist tracks cannot mix into the soundtrack."
+              />
+            </div>
+          )}
+          {draft.music_enabled && (
+            <CuratedPlaylistPicker
+              pinnedIds={draft.pinned_track_ids ?? []}
+              onChange={(pinned_track_ids) => change((current) => ({ ...current, pinned_track_ids }))}
+            />
+          )}
+          {draft.music_enabled && !(draft.pinned_track_ids?.length) && (
+            <fieldset className="mt-3">
               <legend className="label">Decades players can choose from</legend>
               <div className="flex flex-wrap gap-x-5">
                 {meta.decades.map((decade) => (
@@ -524,7 +556,7 @@ export default function PlayStylesTab() {
               {noDecades && <p className="text-xs font-semibold text-bad">Choose at least one decade.</p>}
               <p className="mt-1 text-xs text-muted">
                 <Link className="ad-link" to={paths.music}>
-                  See how many tracks each decade has
+                  Review, preview, and approve tracks on the Music page
                 </Link>
               </p>
             </fieldset>
@@ -640,6 +672,187 @@ function MixControls({ mix, onChange }: { mix: MusicMix; onChange: (mix: MusicMi
           </button>
         </div>
       </fieldset>
+    </details>
+  )
+}
+
+function CuratedPlaylistPicker({
+  pinnedIds,
+  onChange,
+}: {
+  pinnedIds: string[]
+  onChange: (next: string[]) => void
+}) {
+  const [pinnedTracks, setPinnedTracks] = useState<MusicTrackAdmin[]>([])
+  const [query, setQuery] = useState('')
+  const [matches, setMatches] = useState<MusicTrackAdmin[]>([])
+  const [searching, setSearching] = useState(false)
+  const [playingUrl, setPlayingUrl] = useState<string | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  const stopPreview = () => {
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current.src = ''
+      audioRef.current = null
+    }
+    setPlayingUrl(null)
+  }
+
+  useEffect(() => () => stopPreview(), [])
+
+  const togglePreview = (url: string) => {
+    if (playingUrl === url) {
+      stopPreview()
+      return
+    }
+    stopPreview()
+    const audio = new Audio(url)
+    audio.volume = 0.75
+    audio.onended = () => setPlayingUrl((cur) => (cur === url ? null : cur))
+    audioRef.current = audio
+    setPlayingUrl(url)
+    audio.play().catch(() => setPlayingUrl(null))
+  }
+
+  const pinnedKey = pinnedIds.join(',')
+  useEffect(() => {
+    if (!pinnedKey) {
+      setPinnedTracks([])
+      return
+    }
+    let alive = true
+    call<{ tracks: MusicTrackAdmin[] }>(`/music/tracks?ids=${encodeURIComponent(pinnedKey)}`)
+      .then((res) => {
+        if (!alive) return
+        const byId = new Map(res.tracks.map((t) => [t.id, t]))
+        setPinnedTracks(pinnedIds.map((id) => byId.get(id)).filter((t): t is MusicTrackAdmin => Boolean(t)))
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [pinnedKey])
+
+  useEffect(() => {
+    const trimmed = query.trim()
+    if (trimmed.length < 2) {
+      setMatches([])
+      return
+    }
+    const timer = window.setTimeout(() => {
+      setSearching(true)
+      call<{ tracks: MusicTrackAdmin[] }>(`/music/tracks?status=active&q=${encodeURIComponent(trimmed)}&limit=12`)
+        .then((res) => setMatches(res.tracks.filter((t) => !t.blocked)))
+        .catch(() => setMatches([]))
+        .finally(() => setSearching(false))
+    }, 200)
+    return () => window.clearTimeout(timer)
+  }, [query])
+
+  const addTrack = (track: MusicTrackAdmin) => {
+    if (pinnedIds.includes(track.id)) return
+    setPinnedTracks((cur) => [...cur, track])
+    onChange([...pinnedIds, track.id])
+  }
+
+  const removeTrack = (id: string) => {
+    setPinnedTracks((cur) => cur.filter((t) => t.id !== id))
+    onChange(pinnedIds.filter((x) => x !== id))
+  }
+
+  return (
+    <details className="mt-3 rounded-lg border border-line bg-surface-2 px-3.5 py-2.5" open={pinnedIds.length > 0}>
+      <summary className="cursor-pointer select-none text-sm font-semibold">
+        Curated event playlist{' '}
+        <span className="font-normal text-muted">
+          {pinnedIds.length > 0 ? `(${pinnedIds.length} pinned — locks this quiz strictly to these songs)` : '(optional — lock this quiz to hand-picked songs)'}
+        </span>
+      </summary>
+      <div className="mt-3 space-y-3">
+        <p className="text-xs text-muted">
+          Pin specific songs from your <Link className="ad-link" to={paths.music}>Music library</Link> to lock this quiz’s soundtrack, music breaks, and
+          after-party to an exact pre-vetted set. Leave empty to use normal decade selection.
+        </p>
+
+        {pinnedTracks.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted">Pinned for this quiz ({pinnedTracks.length})</span>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => onChange([])}>
+                Clear playlist
+              </button>
+            </div>
+            <ul className="divide-y divide-line rounded-lg border border-line bg-surface">
+              {pinnedTracks.map((t) => (
+                <li key={t.id} className="flex items-center justify-between gap-2 px-2.5 py-1.5 text-sm">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${playingUrl === t.previewUrl ? 'btn-primary' : 'btn-ghost'}`}
+                      onClick={() => togglePreview(t.previewUrl)}
+                      aria-label={`${playingUrl === t.previewUrl ? 'Stop' : 'Play'} ${t.title}`}
+                    >
+                      {playingUrl === t.previewUrl ? '⏹' : '▶'}
+                    </button>
+                    <span className="truncate font-medium">{t.title}</span>
+                    <span className="truncate text-xs text-muted">· {t.artist}</span>
+                  </div>
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => removeTrack(t.id)}>
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div>
+          <input
+            type="search"
+            className="field"
+            placeholder="Search your Music library by artist or title to pin a track…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            aria-label="Search library tracks to pin"
+          />
+          {searching && <p className="mt-1 text-xs text-muted">Searching library…</p>}
+          {!searching && matches.length > 0 && (
+            <ul className="mt-2 divide-y divide-line rounded-lg border border-line bg-surface">
+              {matches.map((t) => {
+                const pinned = pinnedIds.includes(t.id)
+                return (
+                  <li key={t.id} className="flex items-center justify-between gap-2 px-2.5 py-1.5 text-sm">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <button
+                        type="button"
+                        className={`btn btn-sm ${playingUrl === t.previewUrl ? 'btn-primary' : 'btn-ghost'}`}
+                        onClick={() => togglePreview(t.previewUrl)}
+                        aria-label={`${playingUrl === t.previewUrl ? 'Stop' : 'Play'} ${t.title}`}
+                      >
+                        {playingUrl === t.previewUrl ? '⏹' : '▶'}
+                      </button>
+                      <span className="truncate font-medium">{t.title}</span>
+                      <span className="truncate text-xs text-muted">
+                        · {t.artist} ({decadeLabel(t.decade)})
+                      </span>
+                      {t.approved && <Badge tone="good">Approved</Badge>}
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      disabled={pinned}
+                      onClick={() => addTrack(t)}
+                    >
+                      {pinned ? 'Pinned' : 'Pin'}
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </div>
+      </div>
     </details>
   )
 }

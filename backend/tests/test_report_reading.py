@@ -149,3 +149,229 @@ def test_pdf_parser_preserves_whitespace_spans_and_strips_nul():
     assert "Gameplay data exhibit two biases" in combined
     assert "\x00" not in combined
 
+
+async def test_large_document_triage_triviality_filter_and_curation():
+    from ingest.model import Chunk, ImageItem, Section, StructuredDocument
+
+    # Build a synthetic 50-page-style document with 10 core sections + 2 appendix sections (140 chunks, 60 images)
+    sections = [Section(ordinal=i, level=1, heading=f"{i + 1}. Core Results & Architecture {i + 1}", word_count=1200) for i in range(10)]
+    sections += [
+        Section(ordinal=10, level=1, heading="Appendix A: Hyperparameter Details", word_count=2000),
+        Section(ordinal=11, level=1, heading="Appendix B: Related Work & Citations", word_count=2000),
+    ]
+    prose = " ".join(["architecture", "tradeoff", "memory", "training", "scaling"] * 45)
+    chunks = []
+    for sec in sections:
+        for j in range(12):
+            chunks.append(Chunk(
+                ordinal=len(chunks),
+                section=sec.ordinal,
+                kind="text",
+                heading_path=sec.heading,
+                text=prose,
+                token_count=260,
+            ))
+    images = []
+    for i in range(60):
+        sec_idx = i % 12
+        is_chart = i in (1, 13, 25)
+        images.append(ImageItem(
+            ordinal=i,
+            section=sec_idx,
+            data=b"x",
+            mime="image/png",
+            width=800 if is_chart else 400,
+            height=500 if is_chart else 250,
+            sha256=f"h{i}",
+            origin="chart" if is_chart else "embedded",
+            caption=f"Figure {i}: Scaling results" if is_chart else None,
+            context="Section overview",
+        ))
+    doc = StructuredDocument(title="Large Research Paper", sections=sections, chunks=chunks, images=images, warnings=[], word_count=20000)
+
+    picked_chunks = generate.select_chunks(doc)
+    assert len(picked_chunks) == generate.MAX_CHUNKS_PER_PASS
+    # Every core section (0..9) gets coverage before appendix sections dominate
+    picked_sections = {doc.chunks[i].section for i in picked_chunks}
+    assert set(range(10)).issubset(picked_sections)
+    assert sum(doc.chunks[i].section >= 10 for i in picked_chunks) == 0
+
+    picked_images = generate.select_images(doc)
+    assert len(picked_images) == generate.MAX_IMAGES_PER_PASS
+    assert {1, 13, 25}.issubset({img.ordinal for img in picked_images})
+
+    # Trivial or low-importance questions are rejected by _accept_mcqs
+    report = generate.GenerationReport()
+    d = generate.MCQDraft(
+        title="Minor detail",
+        question="What batch size was listed in Appendix Table 12?",
+        correct_answer="128",
+        distractors=["64", "256", "512"],
+        source_quote="batch size 128",
+        explanation="The batch size was 128.",
+        skill="recall",
+        difficulty="hard",
+    )
+    accepted = generate._accept_mcqs(
+        [(d, ["128", "64", "256", "512"], 0), (d, ["128", "64", "256", "512"], 0), (d, ["128", "64", "256", "512"], 0)],
+        [
+            generate.MCQCheck(number=1, answer_index=0, importance=2, problems=[]),
+            generate.MCQCheck(number=2, answer_index=0, importance=4, problems=["trivial"]),
+            generate.MCQCheck(number=3, answer_index=0, importance=5, problems=[]),
+        ],
+        report,
+    )
+    assert len(accepted) == 1
+    assert accepted[0][1]["importance"] == 5
+
+    # Curate 100 candidate MCQs + 40 statements down to focused caps with section balance
+    candidates = []
+    for i in range(100):
+        candidates.append(generate.ReadyQuestion(
+            kind="mcq",
+            source_type="image" if i < 15 else "text",
+            section_index=i % 10,
+            question_text=f"Question {i}?",
+            options=["A", "B", "C", "D"],
+            correct_index=0,
+            skill="understanding" if i % 2 == 0 else "recall",
+            difficulty="medium",
+            quality={"checked": True, "importance": 5 if i % 3 == 0 else 3},
+        ))
+    for i in range(40):
+        candidates.append(generate.ReadyQuestion(
+            kind="fact_fake",
+            source_type="text",
+            section_index=i % 10,
+            question_text=f"Statement {i}.",
+            is_true=(i % 2 == 0),
+            quality={"checked": True, "importance": 4},
+        ))
+    curated = await generate.curate_bank(doc, candidates, report, use_editor=False)
+    kept_mcqs = [q for q in curated if q.kind == "mcq"]
+    kept_stmts = [q for q in curated if q.kind == "fact_fake"]
+    assert len(kept_mcqs) == generate.DEFAULT_MAX_MCQS
+    assert len(kept_stmts) == generate.DEFAULT_MAX_STATEMENTS
+    assert sum(q.source_type == "image" for q in kept_mcqs) <= generate.MAX_IMAGE_MCQS
+    assert {q.section_index for q in kept_mcqs} == set(range(10))
+
+
+async def test_agentic_critique_revise_and_closed_book_hardening(monkeypatch):
+    import numpy as np
+    from ingest.model import Chunk, Section, StructuredDocument
+
+    sections = [
+        Section(ordinal=0, level=1, heading="1. Architecture", word_count=400),
+        Section(ordinal=1, level=1, heading="2. Results", word_count=400),
+    ]
+    chunks = [
+        Chunk(
+            ordinal=0, section=0, kind="text", heading_path="1. Architecture",
+            text="The Phoenix cross-dock eliminated manual pallet re-wrapping by introducing automated shrink sleeves, cutting dwell time by 38%.",
+            token_count=90,
+        ),
+        Chunk(
+            ordinal=1, section=1, kind="text", heading_path="2. Results",
+            text="Regional margins climbed from 11.4% to 14.7% after Phoenix dwell time dropped by 38%, while Dallas stayed flat at 10.9%.",
+            token_count=90,
+        ),
+    ]
+    doc = StructuredDocument(title="Q3 Operations Review", sections=sections, chunks=chunks, images=[], warnings=[], word_count=800)
+    embs = np.asarray([[1.0, 0.0], [0.6, 0.8]], dtype=np.float32)
+
+    # 1. _split_checked_mcqs routes fixable high-importance flaw to reviser, rejects trivial immediately
+    flawed = generate.MCQDraft(
+        title="Dwell drop",
+        question="Why did the Phoenix cross-dock cut dwell time by 38%?",
+        correct_answer="Automated shrink sleeves replaced manual re-wrapping",
+        distractors=[
+            "Warehouse staff stopped taking any afternoon coffee breaks",
+            "Drivers were told to drive twice as fast on the highway",
+            "Regional managers decided to ignore all incoming shipments",
+        ],
+        source_quote="eliminated manual pallet re-wrapping by introducing automated shrink sleeves, cutting dwell time by 38%",
+        explanation="Automated shrink sleeves replaced manual pallet re-wrapping.",
+        skill="understanding",
+        difficulty="medium",
+    )
+    hardened = generate.MCQDraft(
+        title="Sleeve speed",
+        question="What operational change cut dwell time by 38% at the Phoenix cross-dock?",
+        correct_answer="Automated shrink sleeves replaced manual pallet re-wrapping",
+        distractors=[
+            "Overnight rail shuttles replaced regional truck relays",
+            "Cross-dock staging shifted from Phoenix to the Dallas hub",
+            "Double-deck trailer loading replaced single-pallet docks",
+        ],
+        source_quote="eliminated manual pallet re-wrapping by introducing automated shrink sleeves, cutting dwell time by 38%",
+        explanation="Automated shrink sleeves eliminated manual pallet re-wrapping and cut dwell time by 38%.",
+        skill="understanding",
+        difficulty="medium",
+    )
+
+    rep = generate.GenerationReport()
+    accepted, fixable = generate._split_checked_mcqs(
+        [(flawed, ["A", "B", "C", "D"], 0), (flawed, ["A", "B", "C", "D"], 0)],
+        [
+            generate.MCQCheck(number=1, answer_index=0, importance=5, problems=["guessable"], critique="Replace joke distractors with real operations alternatives."),
+            generate.MCQCheck(number=2, answer_index=0, importance=2, problems=["trivial"], critique=""),
+        ],
+        rep,
+    )
+    assert accepted == []
+    assert len(fixable) == 1
+    assert "joke distractors" in fixable[0][1]
+    assert rep.rejected.get("checker flagged: trivial") == 1
+
+    # 2. _verify_and_revise runs Checker -> Reviser -> Re-Verify and marks revised=True
+    calls = []
+
+    async def fake_parse(*, model, system, user, schema, **kwargs):
+        calls.append(schema.__name__)
+        if schema is generate.CheckResult:
+            # First check flags guessable; second check (post-revision) passes!
+            if calls.count("CheckResult") == 1:
+                return generate.CheckResult(
+                    questions=[generate.MCQCheck(number=1, answer_index=0, importance=5, problems=["guessable"], critique="Distractors are silly.")],
+                    statements=[],
+                )
+            # Find which shuffled index holds the correct answer in the prompt text
+            idx = 0
+            for line in user.splitlines():
+                if "Automated shrink sleeves" in line and "[" in line:
+                    idx = int(line.split("[")[1].split("]")[0])
+                    break
+            return generate.CheckResult(
+                questions=[generate.MCQCheck(number=1, answer_index=idx, importance=5, problems=[])],
+                statements=[],
+            )
+        if schema is generate.RevisedMCQs:
+            return generate.RevisedMCQs(questions=[hardened])
+        if schema is generate.BlindTestResult:
+            # Find the index of "Automated shrink sleeves" and claim high-confidence common-sense crack!
+            idx = 0
+            for line in user.splitlines():
+                if "Automated shrink sleeves" in line and "[" in line:
+                    idx = int(line.split("[")[1].split("]")[0])
+                    break
+            return generate.BlindTestResult(
+                attempts=[generate.BlindAttempt(number=1, guess_index=idx, confidence="high", reason="option_pattern", clue="Distractors looked unrealistic.")]
+            )
+        raise AssertionError(f"unexpected schema {schema}")
+
+    monkeypatch.setattr(generate.llm, "parse", fake_parse)
+
+    ready = await generate._verify_and_revise(
+        doc, chunks[0], [chunks[1]], [flawed], [], generate.GenerationReport(), primary_index=0, allow_revise=True,
+    )
+    assert len(ready) == 1
+    assert ready[0].quality.get("revised") is True
+    assert "RevisedMCQs" in calls
+
+    # 3. _closed_book_stress_test detects a closed-book crack and hardens it via Reviser + Checker
+    stressed = await generate._closed_book_stress_test(doc, embs, ready, generate.GenerationReport())
+    assert len(stressed) == 1
+    assert stressed[0].quality.get("hardened") is True
+
+
+

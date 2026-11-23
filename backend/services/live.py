@@ -141,19 +141,23 @@ async def _line_up(quiz: dict, rules: dict, count: int, music_rounds: int, decad
             "section": headings.get(question["section_id"]), "limit": timer + (10 if question["image_id"] else 0),
         })
 
-    if music_rounds and decade and rules["music_enabled"]:
+    approved_only, pinned_ids = music_service.music_filter(rules)
+    if music_rounds and (decade or pinned_ids) and rules["music_enabled"]:
         used: set[str] = set()
         step = max(2, len(items) // (music_rounds + 1))
         for round_index in range(music_rounds):
-            built = await music_service.build_question(decade, used)
+            built = await music_service.build_question(
+                decade, used, approved_only=approved_only, pinned_ids=pinned_ids,
+            )
             if built is None:
                 break
             track = built["track"]
             used.add(track["id"])
+            era_label = "Curated" if pinned_ids else music_service.DECADE_NAMES.get(decade or "", decade or "")
             items.insert(min(len(items), step * (round_index + 1) + round_index), {
                 "kind": "music", "title": "Name That Tune", "text": built["text"], "options": built["options"],
                 "correct_index": built["correct_index"], "limit": 20,
-                "section": f"Music Break · {music_service.DECADE_NAMES.get(decade, decade)}",
+                "section": f"Music Break · {era_label}" if era_label else "Music Break",
                 "music": {"preview_url": track["preview_url"], "artist": track["artist"], "title": track["title"],
                           "artwork_url": track["artwork_url"]},
             })
@@ -162,11 +166,12 @@ async def _line_up(quiz: dict, rules: dict, count: int, music_rounds: int, decad
 
 async def create_session(quiz: dict, rules: dict, decade: str | None = None) -> dict:
     cfg = rules["live"]
+    approved_only, pinned_ids = music_service.music_filter(rules)
     after_party = bool(rules["music_enabled"] and rules.get("after_party", True))
     if decade not in rules["decades"]:
         wants_music = rules["music_enabled"] and (int(cfg["music_rounds"]) or after_party) and rules["decades"]
         decade = random.choice(rules["decades"]) if wants_music else None
-    if decade:
+    if decade and not (approved_only or pinned_ids):
         music_service.ensure_decade(decade)
     items = await _line_up(quiz, rules, int(cfg["questions"]), int(cfg["music_rounds"]), decade)
     host_key = new_host_key()
@@ -182,7 +187,9 @@ async def create_session(quiz: dict, rules: dict, decade: str | None = None) -> 
             "head_start": int(cfg["head_start"]),
             "decade": decade,
             "ready_threshold": int(rules["ready_threshold"]),
-            "after_party": after_party and bool(decade),
+            "after_party": after_party and bool(decade or pinned_ids),
+            "approved_tracks_only": approved_only,
+            "pinned_track_ids": pinned_ids or [],
             "unlisted": bool(rules.get("unlisted", False)),
             "leaderboard": bool(rules.get("leaderboard", True)),
         }, items)
@@ -567,9 +574,14 @@ async def _shared_snapshot(session: dict) -> dict[str, Any]:
                                "section": source.get("section"), "explanation": source.get("explanation"),
                                "percentCorrect": pct})
         snap["roomMissed"] = sorted(missed, key=lambda m: m["percentCorrect"])[:3]
-        if session["settings"].get("after_party") and session["settings"].get("decade"):
-            decade = session["settings"]["decade"]
-            tracks = await music_service.after_party(decade, seed=sid)
+        if session["settings"].get("after_party") and (session["settings"].get("decade") or session["settings"].get("pinned_track_ids")):
+            decade = session["settings"].get("decade")
+            tracks = await music_service.after_party(
+                decade,
+                seed=sid,
+                approved_only=bool(session["settings"].get("approved_tracks_only")),
+                pinned_ids=session["settings"].get("pinned_track_ids") or None,
+            )
             if tracks:
                 snap["afterParty"] = {"decade": decade, "tracks": tracks}
 

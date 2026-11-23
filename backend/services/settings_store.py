@@ -109,6 +109,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "after_party": True,              # hits from the game's decade play on the results screen
         "soundtrack": True,               # ...and quietly behind the questions, from the first one to the last
         "soundtrack_volume": "medium",    # quiet | medium | loud
+        "allow_player_favorites": True,   # players may name a favourite artist in the lobby
+        "approved_tracks_only": False,    # corporate mode: only admin-approved tracks may play
+        "pinned_track_ids": [],           # optional per-quiz curated playlist (music_tracks UUIDs)
         # The music moment by moment, in steps of about 3 dB from the mix tuned by ear (0): the opening theme, under
         # the host, under a question (-3 = silent), and between questions (title cards and the wait for Next too).
         # Plus how long the theme plays on its own before the host, and whether it eases off while a player lingers.
@@ -131,6 +134,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "speed": {"clock_sec": 90, "wrong_penalty_sec": 3},
         "straight": {"per_section": 2, "max_questions": 20, "pass_mark": 80},
         "live": {"questions": 10, "timer_sec": 20, "music_rounds": 1, "head_start": 200},
+    },
+    "music": {
+        "blocked_artists": [],
+        "blocked_titles": [],
     },
 }
 
@@ -315,8 +322,20 @@ def clean_game(value: dict) -> dict:
     value["mix"] = _clean_mix(value.get("mix"))
     raw_url = str(value.get("report_url") or "").strip()[:500]
     value["report_url"] = raw_url if re.match(r"^https?://\S+$", raw_url, re.I) else None
-    for flag in ("allow_download", "unlisted", "confidential_voice", "purge_source_after_process"):
+    for flag in ("allow_download", "unlisted", "confidential_voice", "purge_source_after_process",
+                 "approved_tracks_only"):
         value[flag] = bool(value.get(flag, False))
+    value["allow_player_favorites"] = bool(value.get("allow_player_favorites", True))
+    raw_pinned = value.get("pinned_track_ids")
+    pinned: list[str] = []
+    seen_pinned: set[str] = set()
+    if isinstance(raw_pinned, list):
+        for item in raw_pinned[:100]:
+            s = str(item or "").strip().lower()
+            if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", s) and s not in seen_pinned:
+                seen_pinned.add(s)
+                pinned.append(s)
+    value["pinned_track_ids"] = pinned
 
     show_in = value.get("show") if isinstance(value.get("show"), dict) else {}
     show_def = defaults["show"]
@@ -375,7 +394,28 @@ def clean_game(value: dict) -> dict:
     return value
 
 
-_CLEANERS = {"branding": _clean_branding, "host": _clean_host, "game": clean_game}
+def _clean_music_list(raw: Any, limit: int = 200) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw[:limit]:
+        cleaned = " ".join(str(item or "").split())[:100]
+        key = cleaned.lower()
+        if cleaned and key not in seen:
+            seen.add(key)
+            out.append(cleaned)
+    return out
+
+
+def _clean_music(value: dict) -> dict:
+    return {
+        "blocked_artists": _clean_music_list(value.get("blocked_artists")),
+        "blocked_titles": _clean_music_list(value.get("blocked_titles")),
+    }
+
+
+_CLEANERS = {"branding": _clean_branding, "host": _clean_host, "game": clean_game, "music": _clean_music}
 
 
 async def quiz_rules(quiz: dict) -> dict[str, Any]:

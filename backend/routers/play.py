@@ -287,6 +287,8 @@ async def quiz_info(slug: str, request: Request, player: dict | None = Depends(o
             "modes": [{**settings_store.mode_view(m, rules), "music": music and m in ("show", "sudden_death", "jukebox")}
                       for m in rules["modes"]],
             "defaultMode": rules["default_mode"], "decades": rules["decades"] if music else [],
+            "allowFavorites": bool(rules.get("allow_player_favorites", True)) and not bool(rules.get("pinned_track_ids")),
+            "lockedPlaylist": bool(rules.get("pinned_track_ids")),
         },
         "player": None,
     }
@@ -370,6 +372,8 @@ async def set_favourite_artist(body: FavouriteBody, request: Request, player: di
     if not name:
         await db.execute("update players set favorite_artist = null where id = $1", player["id"])
         return {"artist": None, "similar": []}
+    if await favorites.is_artist_blocked(name):
+        raise HTTPException(400, "That artist is not available for this workplace's soundtrack.")
     found = await favorites.pool(name)
     if found is None:
         raise HTTPException(404, "We could not find that artist. Check the spelling, or try another.")
@@ -502,17 +506,22 @@ async def run_soundtrack(run_id: uuid.UUID, player: dict = Depends(current_playe
     run, _, rules = await _load_run(run_id, player)
     if not (rules["music_enabled"] and rules.get("soundtrack", True)) or run["mode"] == "straight":
         return {"decade": None, "tracks": [], "cues": {}}
+    approved_only, pinned_ids = music_service.music_filter(rules)
     decade = music_service.game_decade(run, rules)
-    if not decade:
+    if not decade and not pinned_ids:
         return {"decade": None, "tracks": [], "cues": {}}
-    music_service.ensure_decade(decade)
-    music_service.ensure_moods(decade)
+    if decade and not (approved_only or pinned_ids):
+        music_service.ensure_decade(decade)
+        music_service.ensure_moods(decade)
     asked = {r["music_track_id"] for r in await db.fetch(
         "select music_track_id from run_items where run_id = $1 and music_track_id is not null", str(run_id))}
-    rows = [r for r in await music_service.soundtrack_rows(decade, run["id"]) if r["id"] not in asked]
+    rows = [r for r in await music_service.soundtrack_rows(
+        decade, run["id"], approved_only=approved_only, pinned_ids=pinned_ids,
+    ) if r["id"] not in asked]
     tracks = [music_service._track_view(r) for r in rows]
-    favs = await favorites.for_player(player["id"])
-    tracks = favorites.mix(tracks, favs, run["id"], decade)
+    if rules.get("allow_player_favorites", True) and not pinned_ids:
+        favs = await favorites.for_player(player["id"])
+        tracks = favorites.mix(tracks, favs, run["id"], decade)
     fav_views = [t for t in tracks if t.get("because")]
     sections = await bank.sections(run["quiz_id"])
     cues = music_service.build_cues(rows, sections, favorite_tracks=fav_views, seed=run["id"])

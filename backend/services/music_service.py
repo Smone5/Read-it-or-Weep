@@ -29,6 +29,7 @@ from pydantic import BaseModel
 import db
 import llm
 from config import BACKEND_DIR, config
+from services import settings_store
 
 log = logging.getLogger("music")
 
@@ -83,6 +84,75 @@ def _same_artist(wanted: str, found: str) -> bool:
     norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower().replace("&", "and").removeprefix("the "))  # noqa: E731
     a, b = norm(wanted), norm(found)
     return bool(a and b) and (a in b or b in a)
+
+
+def _norm_words(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower().replace("&", " and ")).strip()
+
+
+def _norm_compact(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower().replace("&", "and").removeprefix("the "))
+
+
+def is_blocked(artist: str, title: str, policy: dict | None) -> bool:
+    """True if ``artist`` or ``title`` matches the organization's music blocklist."""
+    if not policy:
+        return False
+    artist_compact = _norm_compact(artist)
+    artist_words = _norm_words(artist)
+    for raw in policy.get("blocked_artists") or []:
+        b_compact = _norm_compact(raw)
+        b_words = _norm_words(raw)
+        if not b_compact:
+            continue
+        if len(b_compact) <= 3:
+            if artist_compact == b_compact or (b_words and re.search(rf"\b{re.escape(b_words)}\b", artist_words)):
+                return True
+        elif b_compact in artist_compact or (artist_compact and artist_compact == b_compact):
+            return True
+    if title:
+        clean_words = _norm_words(_clean_title(title))
+        raw_words = _norm_words(title)
+        for raw in policy.get("blocked_titles") or []:
+            b_words = _norm_words(raw)
+            if not b_words:
+                continue
+            pattern = rf"\b{re.escape(b_words)}\b"
+            if re.search(pattern, clean_words) or re.search(pattern, raw_words):
+                return True
+    return False
+
+
+async def music_policy() -> dict:
+    """Return the org-wide music blocklist policy, failing open to empty lists if DB is unavailable (e.g. unit tests)."""
+    try:
+        return await settings_store.get("music")
+    except Exception:  # noqa: BLE001
+        return {"blocked_artists": [], "blocked_titles": []}
+
+
+def music_filter(rules: dict) -> tuple[bool, list[str] | None]:
+    """Extract (approved_only, pinned_ids) from merged quiz rules."""
+    approved_only = bool(rules.get("approved_tracks_only"))
+    pinned = rules.get("pinned_track_ids") or None
+    return approved_only, (list(pinned) if pinned else None)
+
+
+def invalidate_cache(decade: str | None = None) -> None:
+    if decade:
+        _cache.pop(decade, None)
+    else:
+        _cache.clear()
+
+
+def decade_for_year(year: int | None) -> str:
+    if year:
+        for decade, (low, high) in DECADE_YEARS.items():
+            if low <= year <= high:
+                return decade
+        if year < 1950:
+            return "50s"
+    return "20s"
 
 
 _apple_token: tuple[float, str] | None = None
@@ -150,15 +220,150 @@ async def _lookup_itunes(client: httpx.AsyncClient, artist: str, title: str) -> 
     return None
 
 
+async def search_catalog(query: str, limit: int = 12) -> list[dict]:
+    """Search Apple Music / iTunes for clean, non-explicit previewable tracks an admin can add to the library."""
+    term = " ".join((query or "").split())[:100]
+    if len(term) < 2:
+        return []
+    limit = max(1, min(25, limit))
+    policy = await music_policy()
+    results: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    token = _apple_developer_token()
+    async with httpx.AsyncClient(timeout=12) as client:
+        if token:
+            try:
+                response = await client.get(
+                    APPLE_MUSIC_SEARCH,
+                    params={"term": term, "types": "songs", "limit": min(25, limit * 2)},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if response.status_code == 200:
+                    for song in response.json().get("results", {}).get("songs", {}).get("data", []):
+                        a = song.get("attributes", {})
+                        previews = a.get("previews") or []
+                        if not previews or a.get("contentRating") == "explicit":
+                            continue
+                        artist = (a.get("artistName") or "").strip()
+                        title = _clean_title(a.get("name") or "")
+                        if not artist or not title:
+                            continue
+                        key = (artist.lower(), title.lower())
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        year = int(a["releaseDate"][:4]) if a.get("releaseDate") else None
+                        artwork = (a.get("artwork") or {}).get("url", "").replace("{w}", "300").replace("{h}", "300") or None
+                        results.append({
+                            "artist": artist, "title": title, "previewUrl": previews[0]["url"],
+                            "artworkUrl": artwork, "trackUrl": a.get("url"), "releaseYear": year,
+                            "source": "apple_music", "suggestedDecade": decade_for_year(year),
+                            "blocked": is_blocked(artist, title, policy),
+                        })
+                        if len(results) >= limit:
+                            return results
+            except httpx.HTTPError:
+                pass
+        if not results:
+            response = await client.get(
+                ITUNES_SEARCH,
+                params={"term": term, "media": "music", "entity": "song", "limit": min(25, limit * 2), "country": "US"},
+            )
+            response.raise_for_status()
+            for track in response.json().get("results", []):
+                if not track.get("previewUrl") or track.get("trackExplicitness") == "explicit":
+                    continue
+                artist = (track.get("artistName") or "").strip()
+                title = _clean_title(track.get("trackName") or "")
+                if not artist or not title:
+                    continue
+                key = (artist.lower(), title.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                year = int(track["releaseDate"][:4]) if track.get("releaseDate") else None
+                artwork = (track.get("artworkUrl100") or "").replace("100x100", "300x300") or None
+                results.append({
+                    "artist": artist, "title": title, "previewUrl": track["previewUrl"],
+                    "artworkUrl": artwork, "trackUrl": track.get("trackViewUrl"), "releaseYear": year,
+                    "source": "itunes", "suggestedDecade": decade_for_year(year),
+                    "blocked": is_blocked(artist, title, policy),
+                })
+                if len(results) >= limit:
+                    break
+    return results
+
+
 # --------------------------------------------------------------------------- catalogue
 
-async def tracks_for(decade: str) -> list[dict]:
+async def _raw_tracks_for(decade: str) -> list[dict]:
     cached = _cache.get(decade)
     if cached and time.monotonic() - cached[0] < 60:
         return cached[1]
     rows = await db.fetch("select * from music_tracks where decade = $1 and active", decade)
     _cache[decade] = (time.monotonic(), rows)
     return rows
+
+
+async def tracks_for(decade: str) -> list[dict]:
+    policy = await music_policy()
+    rows = await _raw_tracks_for(decade)
+    return [r for r in rows if not is_blocked(r["artist"], r["title"], policy)]
+
+
+async def governed_tracks(
+    decade: str | None,
+    *,
+    approved_only: bool = False,
+    pinned_ids: list[str] | None = None,
+) -> list[dict]:
+    """Tracks allowed under a quiz's governance settings (blocklist, approved-only mode, or pinned playlist)."""
+    policy = await music_policy()
+    if pinned_ids:
+        rows = await db.fetch(
+            "select * from music_tracks where id = any($1::uuid[]) and active",
+            pinned_ids,
+        )
+        by_id = {str(r["id"]): r for r in rows if not is_blocked(r["artist"], r["title"], policy)}
+        return [by_id[pid] for pid in pinned_ids if pid in by_id]
+    if not decade:
+        return []
+    if not approved_only:
+        return await tracks_for(decade)
+    rows = await _raw_tracks_for(decade)
+    return [r for r in rows if r.get("approved") and not is_blocked(r["artist"], r["title"], policy)]
+
+
+async def add_track(
+    *,
+    decade: str,
+    artist: str,
+    title: str,
+    preview_url: str,
+    artwork_url: str | None = None,
+    track_url: str | None = None,
+    release_year: int | None = None,
+    source: str = "itunes",
+    approved: bool = True,
+    admin_id: str | None = None,
+) -> dict:
+    """Insert (or reactivate & approve) an admin-chosen track."""
+    row = await db.fetchrow(
+        "insert into music_tracks"
+        " (decade, artist, title, preview_url, artwork_url, track_url, release_year, source, active, approved, approved_at, approved_by)"
+        " values ($1,$2,$3,$4,$5,$6,$7,$8, true, $9, case when $9 then now() else null end, case when $9 then $10::uuid else null end)"
+        " on conflict (decade, artist, title) do update set"
+        " preview_url = excluded.preview_url, artwork_url = coalesce(excluded.artwork_url, music_tracks.artwork_url),"
+        " track_url = coalesce(excluded.track_url, music_tracks.track_url),"
+        " release_year = coalesce(excluded.release_year, music_tracks.release_year),"
+        " active = true, approved = excluded.approved,"
+        " approved_at = case when excluded.approved then now() else music_tracks.approved_at end,"
+        " approved_by = case when excluded.approved then excluded.approved_by else music_tracks.approved_by end"
+        " returning *",
+        decade, artist, title, preview_url, artwork_url, track_url, release_year, source, approved, admin_id,
+    )
+    invalidate_cache(decade)
+    return row
 
 
 def ensure_decade(decade: str) -> None:
@@ -198,10 +403,13 @@ async def seed_decade(decade: str, count: int = TARGET_TRACKS) -> int:
         user=f"List {wanted + 12} such songs first released between {start} and {end}.{already}",
         schema=HitList, effort="low", max_output_tokens=6000)
     added = 0
+    policy = await music_policy()
     use_apple = _apple_developer_token() is not None
     async with httpx.AsyncClient(timeout=15) as client:
         for hit in hits.songs:
             if (hit.artist.lower(), hit.title.lower()) in have or not (start - 1 <= hit.year <= end + 1):
+                continue
+            if is_blocked(hit.artist, hit.title, policy):
                 continue
             found = None
             try:
@@ -214,7 +422,7 @@ async def seed_decade(decade: str, count: int = TARGET_TRACKS) -> int:
                 log.info("look-up failed for %s - %s: %s", hit.artist, hit.title, exc)
                 await asyncio.sleep(5)
                 continue
-            if not found:
+            if not found or is_blocked(found["artist"], found["title"], policy):
                 continue
             result = await db.execute(
                 "insert into music_tracks (decade, artist, title, preview_url, artwork_url, track_url, release_year, source)"
@@ -264,12 +472,16 @@ async def _store(decade: str, found: dict, year: int | None) -> dict | None:
 
 async def _starter_track(decade: str, avoid_artists: set[str]) -> dict | None:
     """Cold start: look up one well-known hit for the decade right now."""
-    candidates = [hit for hit in STARTER_HITS.get(decade, []) if hit[0].lower() not in avoid_artists]
+    policy = await music_policy()
+    candidates = [
+        hit for hit in STARTER_HITS.get(decade, [])
+        if hit[0].lower() not in avoid_artists and not is_blocked(hit[0], hit[1], policy)
+    ]
     random.shuffle(candidates)
     async with httpx.AsyncClient(timeout=10) as client:
         for artist, title in candidates[:3]:
             found = await _lookup_apple(client, artist, title) or await _lookup_itunes(client, artist, title)
-            if found:
+            if found and not is_blocked(found["artist"], found["title"], policy):
                 return await _store(decade, found, None)
     return None
 
@@ -284,13 +496,28 @@ def prefill(decades: list[str]) -> None:
         _seeding["prefill"] = asyncio.create_task(run())
 
 
-async def build_question(decade: str, avoid_track_ids: set[str], asks: str | None = None) -> dict | None:
+async def build_question(
+    decade: str | None,
+    avoid_track_ids: set[str],
+    asks: str | None = None,
+    *,
+    approved_only: bool = False,
+    pinned_ids: list[str] | None = None,
+) -> dict | None:
     """Return {'track', 'text', 'options', 'correct_index'} for a music question, or None if unavailable."""
-    ensure_decade(decade)
-    tracks = await tracks_for(decade)
+    strict = approved_only or bool(pinned_ids)
+    if not strict and decade:
+        ensure_decade(decade)
+    tracks = (
+        await governed_tracks(decade, approved_only=approved_only, pinned_ids=pinned_ids)
+        if strict else (await tracks_for(decade) if decade else [])
+    )
     fresh = [t for t in tracks if t["id"] not in avoid_track_ids]
-    track = random.choice(fresh) if fresh else (random.choice(tracks) if len(tracks) >= MIN_TRACKS_FOR_BANK else None)
+    min_bank = 1 if strict else MIN_TRACKS_FOR_BANK
+    track = random.choice(fresh) if fresh else (random.choice(tracks) if len(tracks) >= min_bank else None)
     if track is None:
+        if strict or not decade:
+            return None
         try:
             track = await _starter_track(decade, {t["artist"].lower() for t in tracks if t["id"] in avoid_track_ids})
         except httpx.HTTPError as exc:
@@ -308,7 +535,8 @@ async def build_question(decade: str, avoid_track_ids: set[str], asks: str | Non
     else:
         pool = list({t["artist"] for t in tracks if not _same_artist(t["artist"], track["artist"])})
         if len(pool) < 3:
-            pool = list({*pool, *[a for a in FALLBACK_ARTISTS.get(decade, []) if not _same_artist(a, track["artist"])]})
+            fallback_decade = track.get("decade") or decade or "80s"
+            pool = list({*pool, *[a for a in FALLBACK_ARTISTS.get(fallback_decade, []) if not _same_artist(a, track["artist"])]})
         if len(pool) < 3:
             return None
         correct, wrong = track["artist"], random.sample(pool, 3)
@@ -525,13 +753,29 @@ def game_decade(run: dict, rules: dict) -> str | None:
     return random.Random(f"decade:{run['id']}").choice(allowed) if allowed else None
 
 
-async def soundtrack_rows(decade: str, seed: str, count: int = SOUNDTRACK_SONGS) -> list[dict]:
+async def soundtrack_rows(
+    decade: str | None,
+    seed: str,
+    count: int = SOUNDTRACK_SONGS,
+    *,
+    approved_only: bool = False,
+    pinned_ids: list[str] | None = None,
+) -> list[dict]:
     """The songs that play quietly behind one game: one per artist, in an order fixed by ``seed``.
 
     Fixed, because two things must agree on it without talking to each other: the browser plays these
     songs, and the game never uses one of them as a "name that tune" question.
     """
-    tracks = sorted(await tracks_for(decade), key=lambda t: t["id"])
+    if approved_only or pinned_ids:
+        raw = await governed_tracks(decade, approved_only=approved_only, pinned_ids=pinned_ids)
+    else:
+        raw = await tracks_for(decade) if decade else []
+    if pinned_ids:
+        # Respect the curated playlist completely (including multiple songs by the same artist if the admin chose them).
+        tracks = list(raw)
+        random.Random(f"soundtrack:{seed}").shuffle(tracks)
+        return tracks[:count]
+    tracks = sorted(raw, key=lambda t: t["id"])
     random.Random(f"soundtrack:{seed}").shuffle(tracks)
     chosen: list[dict] = []
     artists: set[str] = set()
@@ -546,21 +790,42 @@ async def soundtrack_rows(decade: str, seed: str, count: int = SOUNDTRACK_SONGS)
     return chosen
 
 
-async def soundtrack(decade: str, seed: str, skip_ids: set[str] | None = None) -> list[dict]:
+async def soundtrack(
+    decade: str | None,
+    seed: str,
+    skip_ids: set[str] | None = None,
+    *,
+    approved_only: bool = False,
+    pinned_ids: list[str] | None = None,
+) -> list[dict]:
     """The same list as the browser plays it, leaving out any song already used as a question."""
-    return [_track_view(t) for t in await soundtrack_rows(decade, seed) if t["id"] not in (skip_ids or set())]
+    rows = await soundtrack_rows(decade, seed, approved_only=approved_only, pinned_ids=pinned_ids)
+    return [_track_view(t) for t in rows if t["id"] not in (skip_ids or set())]
 
 
-async def after_party(decade: str, heard_ids: list[str] | None = None, count: int = 40, seed: str | None = None) -> list[dict]:
+async def after_party(
+    decade: str | None,
+    heard_ids: list[str] | None = None,
+    count: int = 40,
+    seed: str | None = None,
+    *,
+    approved_only: bool = False,
+    pinned_ids: list[str] | None = None,
+) -> list[dict]:
     """A playlist for the results screen: hits from the game's decade, opening with the ones just played.
 
     One song per artist keeps it varied. With a ``seed`` the order is the same every time it is asked for.
     """
-    tracks = await tracks_for(decade)
+    if approved_only or pinned_ids:
+        tracks = await governed_tracks(decade, approved_only=approved_only, pinned_ids=pinned_ids)
+    else:
+        tracks = await tracks_for(decade) if decade else []
     by_id = {t["id"]: t for t in tracks}
     lead = [by_id[i] for i in dict.fromkeys(heard_ids or []) if i in by_id]
     rest = sorted((t for t in tracks if t not in lead), key=lambda t: t["id"])
     (random.Random(seed) if seed else random).shuffle(rest)
+    if pinned_ids:
+        return [_track_view(t) for t in [*lead, *rest][:count]]
     chosen: list[dict] = []
     artists: set[str] = set()
     for track in [*lead, *rest]:

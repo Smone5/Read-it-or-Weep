@@ -138,6 +138,8 @@ function DefaultsForm({ initial, decades }: { initial: GameRules; decades: strin
         after_party: draft.after_party,
         soundtrack: draft.soundtrack,
         soundtrack_volume: draft.soundtrack_volume,
+        allow_player_favorites: draft.allow_player_favorites ?? true,
+        approved_tracks_only: draft.approved_tracks_only ?? false,
         decades: draft.decades,
         picture_mode: draft.picture_mode,
         ready_threshold: draft.ready_threshold,
@@ -293,6 +295,18 @@ function DefaultsForm({ initial, decades }: { initial: GameRules; decades: strin
               <div className="grid gap-1 sm:grid-cols-2">
                 <Switch checked={draft.soundtrack} onChange={(soundtrack) => update({ soundtrack })} label="Background soundtrack during questions" />
                 <Switch checked={draft.after_party} onChange={(after_party) => update({ after_party })} label="After-party music on results screen" />
+                <Switch
+                  checked={draft.approved_tracks_only ?? false}
+                  onChange={(approved_tracks_only) => update({ approved_tracks_only })}
+                  label="Approved tracks only (corporate safe mode)"
+                  description="Only play songs an admin has approved on the Music page."
+                />
+                <Switch
+                  checked={draft.allow_player_favorites ?? true}
+                  onChange={(allow_player_favorites) => update({ allow_player_favorites })}
+                  label="Allow player favorite-artist requests"
+                  description="Shows the optional 'Who do you like?' field in the lobby."
+                />
               </div>
               {draft.soundtrack && (
                 <div>
