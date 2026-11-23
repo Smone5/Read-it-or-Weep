@@ -78,11 +78,11 @@ async def _record(character: dict, settings: dict, branding: dict, performer: di
         words = host_service.spoken_text(line)
         voice = eleven.BY_ID[performer["voice"]]
         try:
-            audio = b"".join([chunk async for chunk in eleven.perform(line, voice, output_format=SAMPLE_FORMAT)])
+            audio = b"".join([chunk async for chunk in eleven.perform(host_service.speech_text(line), voice, output_format=SAMPLE_FORMAT)])
             return "audio/mpeg", audio, words
         except eleven.ElevenError as exc:
             log.warning("ElevenLabs could not record %s's sample (%s); the backup voice does", character["name"], exc)
-        return "audio/mpeg", await _backup_mp3(words, voice.fallback, manner), words
+        return "audio/mpeg", await _backup_mp3(host_service.speech_text(words), voice.fallback, manner), words
     host = {**settings, "manner": manner, **performer}
     pcm, words = bytearray(), ""
     async with host_service.open_voice(persona, host, True) as session:

@@ -17,6 +17,7 @@ import db
 import llm
 from ingest import UnreadableDocument, generate, parse_document
 from ingest.model import StructuredDocument
+from ingest.structure import sanitize_text
 from services import bank, settings_store, video
 from storage import storage
 
@@ -84,6 +85,13 @@ async def clear_derived(document_id: str) -> None:
     await storage().delete_prefix(f"quizzes/images/{document_id}")
 
 
+_VALID_IMAGE_ORIGINS = {"embedded", "chart", "page"}
+
+
+def _clean_opt(value: str | None) -> str | None:
+    return sanitize_text(value) if value is not None else None
+
+
 async def _store_structure(document: dict, structured: StructuredDocument) -> tuple[list[str], list[str], list[str]]:
     document_id, quiz_id = document["id"], document["quiz_id"]
     section_ids: list[str] = []
@@ -91,24 +99,25 @@ async def _store_structure(document: dict, structured: StructuredDocument) -> tu
         section_ids.append(await db.fetchval(
             "insert into doc_sections (document_id, quiz_id, ordinal, level, heading, word_count)"
             " values ($1, $2, $3, $4, $5, $6) returning id",
-            document_id, quiz_id, section.ordinal, section.level, section.heading[:300], section.word_count))
+            document_id, quiz_id, section.ordinal, section.level, sanitize_text(section.heading)[:300], section.word_count))
     chunk_ids: list[str] = []
     for chunk in structured.chunks:
         chunk_ids.append(await db.fetchval(
             "insert into doc_chunks (document_id, quiz_id, section_id, ordinal, kind, heading_path, chunk_text, token_count)"
             " values ($1, $2, $3, $4, $5, $6, $7, $8) returning id",
             document_id, quiz_id, section_ids[chunk.section], chunk.ordinal, chunk.kind,
-            chunk.heading_path[:500], chunk.text, chunk.token_count))
+            sanitize_text(chunk.heading_path)[:500], sanitize_text(chunk.text), chunk.token_count))
     image_ids: list[str] = []
     for image in structured.images:
         extension = "jpg" if image.mime == "image/jpeg" else "png"
         key = f"quizzes/images/{document_id}/{image.ordinal:03d}.{extension}"
         await storage().put(key, image.data, image.mime)
+        origin = image.origin if image.origin in _VALID_IMAGE_ORIGINS else "embedded"
         image_ids.append(await db.fetchval(
             "insert into doc_images (document_id, quiz_id, section_id, ordinal, storage_key, mime_type, width, height,"
             " sha256, origin, caption, context_text) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) returning id",
             document_id, quiz_id, section_ids[image.section], image.ordinal, key, image.mime, image.width,
-            image.height, image.sha256, image.origin, image.caption, image.context))
+            image.height, image.sha256, origin, _clean_opt(image.caption), sanitize_text(image.context)))
     return section_ids, chunk_ids, image_ids
 
 
@@ -144,12 +153,14 @@ async def _insert_questions(document: dict, report: generate.GenerationReport, s
                             chunk_ids: list[str], image_ids: list[str], status: str) -> int:
     rows = []
     for q in report.questions:
+        clean_options = [sanitize_text(opt) for opt in q.options] if q.options is not None else None
         rows.append((
             document["quiz_id"], document["id"], section_ids[q.section_index],
             chunk_ids[q.chunk_index] if q.chunk_index is not None else None,
             image_ids[q.image_index] if q.image_index is not None else None,
-            q.kind, q.source_type, q.skill, q.title, q.question_text, q.options, q.correct_index, q.is_true,
-            q.explanation, q.source_quote, q.difficulty, status, q.quality,
+            q.kind, q.source_type, q.skill, _clean_opt(q.title), sanitize_text(q.question_text), clean_options,
+            q.correct_index, q.is_true, sanitize_text(q.explanation), sanitize_text(q.source_quote), q.difficulty,
+            status, q.quality,
             q.embedding.tolist() if q.embedding is not None else None,
         ))
     await db.executemany(
@@ -290,7 +301,7 @@ async def process_document(document_id: str) -> None:
                                               existing_embeddings=await _existing_question_vectors(document["quiz_id"]))
         for ordinal, (kind, description, usable) in report.image_notes.items():
             await db.execute("update doc_images set kind = $2, description = $3, usable = $4 where id = $1",
-                             image_ids[ordinal], kind, description, usable)
+                             image_ids[ordinal], kind, sanitize_text(description), usable)
         inserted = await _insert_questions(document, report, section_ids, chunk_ids, image_ids,
                                            "approved" if auto_approve else "pending")
 
@@ -328,11 +339,12 @@ async def process_document(document_id: str) -> None:
                 purge_warning = "WARNING: Automatic source file purge failed — please delete or re-check storage."
                 warnings.append(purge_warning)
         await _set(
-            document_id, status="ready", stage=None, title=structured.title, summary=summary_text,
+            document_id, status="ready", stage=None, title=sanitize_text(structured.title),
+            summary=_clean_opt(summary_text),
             storage_key=storage_key,
             word_count=structured.word_count, section_count=len(structured.sections),
             image_count=len(structured.images), chunk_count=len(structured.chunks), question_count=inserted,
-            warnings=warnings, processed_at=datetime.now(timezone.utc),
+            warnings=[sanitize_text(w) for w in warnings], processed_at=datetime.now(timezone.utc),
             progress={"label": "Ready", "done": 1, "total": 1, "drafted": report.drafted, "kept": inserted,
                       "rejected": report.rejected})
         bank.invalidate(document["quiz_id"])

@@ -152,7 +152,8 @@ async def _line_up(quiz: dict, rules: dict, count: int, music_rounds: int, decad
             used.add(track["id"])
             items.insert(min(len(items), step * (round_index + 1) + round_index), {
                 "kind": "music", "title": "Name That Tune", "text": built["text"], "options": built["options"],
-                "correct_index": built["correct_index"], "limit": 20, "section": f"Music Break · {decade}",
+                "correct_index": built["correct_index"], "limit": 20,
+                "section": f"Music Break · {music_service.DECADE_NAMES.get(decade, decade)}",
                 "music": {"preview_url": track["preview_url"], "artist": track["artist"], "title": track["title"],
                           "artwork_url": track["artwork_url"]},
             })

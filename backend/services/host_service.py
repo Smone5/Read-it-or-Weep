@@ -216,6 +216,74 @@ _SOUTHERN_PLAIN_SHAPES = (
 
 _TAG = re.compile(r"\[[^\[\]]{0,60}\]")
 
+_DECADE_LABELS: dict[str, str] = {
+    "50s": "1950s", "60s": "1960s", "70s": "1970s", "80s": "1980s",
+    "90s": "1990s", "00s": "2000s", "10s": "2010s", "20s": "2020s",
+}
+
+_AGE_POSSESSIVES = {"his", "her", "their", "my", "your", "our", "roaring"}
+_RE_2000S = re.compile(r"(?<!\d)2000['’]?[sS]\b")
+_RE_2010S = re.compile(r"(?<!\d)2010['’]?[sS]\b")
+_RE_2020S = re.compile(r"(?<!\d)2020['’]?[sS]\b")
+_RE_1900S_APOS = re.compile(r"(?<!\d)(19[5-9]0)['’][sS]\b")
+_RE_SHORT_00S = re.compile(r"(?<![\d.$€£\w])['’]?00['’]?[sS]\b")
+_RE_SHORT_10S_APOS = re.compile(r"(?<![\d.$€£\w])(?:['’]10['’]?[sS]|10['’][sS])\b")
+_RE_SHORT_10S_CUE = re.compile(r"(?i)\b(the\s+|early\s+|mid[\s-]+|late\s+|pure\s+|classic\s+|throwback\s+)10s\b")
+_RE_SHORT_20S_APOS = re.compile(r"(?<![\d.$€£\w])(?:['’]20['’]?[sS]|20['’][sS])\b")
+_RE_SHORT_20S_CUE = re.compile(r"(?i)\b(the\s+|early\s+|mid[\s-]+|late\s+|pure\s+|classic\s+|throwback\s+)20s\b")
+_RE_SHORT_50_90_APOS = re.compile(r"(?<![\d.$€£\w])['’]?([5-9]0)['’][sS]\b")
+
+
+def decade_label(decade: str | None) -> str:
+    """Human/spoken decade name: '00s' -> '2000s', '10s' -> '2010s', '20s' -> '2020s', etc."""
+    return _DECADE_LABELS.get(decade or "", decade or "")
+
+
+def _prev_word(text: str, pos: int) -> str:
+    m = re.search(r"([A-Za-z]+)\s*$", text[:pos])
+    return m.group(1).lower() if m else ""
+
+
+def _normalize_decades_for_speech(segment: str) -> str:
+    """Turn decade shorthand ('00s, 00's, 2000s, the 10s, the 20s) into unmistakable spoken words for TTS."""
+    segment = _RE_2000S.sub("two-thousands", segment)
+    segment = _RE_2010S.sub("twenty-tens", segment)
+    segment = _RE_2020S.sub("twenty-twenties", segment)
+    segment = _RE_1900S_APOS.sub(r"\1s", segment)
+    segment = _RE_SHORT_00S.sub("two-thousands", segment)
+    segment = _RE_SHORT_10S_APOS.sub("twenty-tens", segment)
+    segment = _RE_SHORT_10S_CUE.sub(r"\1twenty-tens", segment)
+
+    def _sub_20s_apos(match: re.Match[str]) -> str:
+        if _prev_word(segment, match.start()) in _AGE_POSSESSIVES:
+            return match.group(0)
+        return "twenty-twenties"
+
+    def _sub_20s_cue(match: re.Match[str]) -> str:
+        if _prev_word(segment, match.start()) in _AGE_POSSESSIVES:
+            return match.group(0)
+        return f"{match.group(1)}twenty-twenties"
+
+    segment = _RE_SHORT_20S_APOS.sub(_sub_20s_apos, segment)
+    segment = _RE_SHORT_20S_CUE.sub(_sub_20s_cue, segment)
+    segment = _RE_SHORT_50_90_APOS.sub(r"\1s", segment)
+    return segment
+
+
+def speech_text(line: str) -> str:
+    """Prepare a host line for TTS (preserving [delivery tags]): expands decades like 00's/2000s/2010s/2020s
+    so voice models pronounce 'two-thousands', 'twenty-tens', 'twenty-twenties' instead of 'zero zeros'."""
+    parts: list[str] = []
+    pos = 0
+    for match in _TAG.finditer(line):
+        if match.start() > pos:
+            parts.append(_normalize_decades_for_speech(line[pos:match.start()]))
+        parts.append(match.group(0))
+        pos = match.end()
+    if pos < len(line):
+        parts.append(_normalize_decades_for_speech(line[pos:]))
+    return "".join(parts)
+
 
 def _strip_outer_quotes(text: str) -> str:
     """Remove only balanced wrapping quotes so trailing apostrophes like darlin' stay intact."""
@@ -228,6 +296,7 @@ def _strip_outer_quotes(text: str) -> str:
 def spoken_text(line: str) -> str:
     """A written line as it is heard: the delivery tags taken out (that is what the host box shows)."""
     text = _TAG.sub(" ", line)
+    text = _RE_SHORT_00S.sub("2000s", text)
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\s+([,!?]|\.(?!\.))", r"\1", text)      # "Sam !" -> "Sam!", but a "..." keeps its space
     return _strip_outer_quotes(text)
@@ -302,7 +371,9 @@ def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, roo
         "they are right, 14 when they are wrong or out of time, 16 for a song. Round announcements: 12 words. Sign-offs: "
         "24 words. The show's opening is the one place you take your time. Each stage direction gives the exact limit; "
         "never go over it.\n"
-        "Say numbers the short way: \"184 million\", not \"one hundred eighty-four point two million dollars\".",
+        "Say numbers the short way: \"184 million\", not \"one hundred eighty-four point two million dollars\". "
+        "For recent decades, always use the full decade name (\"the 2000s\", \"the 2010s\", \"the 2020s\" — spoken "
+        "\"two-thousands\", \"twenty-tens\", \"twenty-twenties\"), never shorthand like \"00s\" or \"00's\".",
         "# Variety\n"
         "Never open two lines in a row the same way. Never reuse a joke or comparison. Use a contestant's name in at "
         "most one line in four, and never as the first word.",
@@ -512,7 +583,7 @@ def _opening_angles(run: dict, player: dict | None, quiz: dict, returning: bool)
     if meeting:
         angles.append(f"the meeting or session this is for, {meeting}: this is their chance to walk in ready")
     if run["decade"]:
-        angles.append(f"tonight's soundtrack: hits from the {run['decade']}")
+        angles.append(f"tonight's soundtrack: hits from the {decade_label(run['decade'])}")
     if player and player["team"]:
         angles.append(f"the contestant's team, {player['team']}, and its reputation riding on this")
     if returning:
@@ -696,12 +767,13 @@ async def describe_cue(cue: str, *, run: dict | None, player: dict | None, item_
             angle = _ROUND_ANGLE.get(round_name, "name the song")
             ending = f"then, if you like, ONE joke of five words or fewer about it. {throw}"
         elif item["slot"] == "music":
+            era = decade_label(run["decade"])
             if run["mode"] == "sudden_death":
                 prize = "win back a life" if run.get("strikes", 0) > 0 else "score bonus points"
                 return (f"Announce a bonus music break. Its name first, as a headline - \"Music Break!\" - then, in ten "
-                        f"words or fewer: name the tune - a hit from the {run['decade']} - and {prize}. {throw} "
+                        f"words or fewer: name the tune - a hit from the {era} - and {prize}. {throw} "
                         "Do not say the contestant's name, the song or the artist. Word limit: 14.")
-            round_name, angle = "Music Break", f"name that tune, hits from the {run['decade']}"
+            round_name, angle = "Music Break", f"name that tune, hits from the {era}"
             ending = f"then, if you like, ONE joke of five words or fewer. {throw}"
         elif round_name == "Final Wager":
             angle = f"one final question, bet up to half your {run['score']} points"
@@ -865,7 +937,8 @@ async def round_set(run: dict, item_id: str | None) -> str | None:
         return None
     decade = run["decade"] if item["slot"] == "music" else ""     # a music break's line may mention the decade
     # Jargon Jukebox's set was started afresh when its song began playing under the titles: its lines end on a throw.
-    edition = "|2" if item["slot"] == "jargon" else ""
+    # Music breaks for 00s/10s/20s were refreshed so full decade names (2000s/2010s/2020s) replace "00s"/"10s"/"20s".
+    edition = "|2" if item["slot"] == "jargon" or decade in ("00s", "10s", "20s") else ""
     return f"{run['mode']}|{item['slot']}|{item['round_name']}|{decade}{edition}"
 
 
@@ -1362,7 +1435,7 @@ class WrittenHostVoice:
             sent = False
             try:
                 self.last_by = "eleven"
-                async with contextlib.aclosing(eleven.perform(line, self.voice)) as audio:
+                async with contextlib.aclosing(eleven.perform(speech_text(line), self.voice)) as audio:
                     async for chunk in audio:
                         sent = True
                         yield chunk
@@ -1378,7 +1451,7 @@ class WrittenHostVoice:
                 if sent:
                     return            # half a line was heard: do not start it again in another voice
         self.last_by = "backup"
-        async with contextlib.aclosing(self._backup(spoken_text(line))) as audio:
+        async with contextlib.aclosing(self._backup(speech_text(spoken_text(line)))) as audio:
             async for chunk in audio:
                 yield chunk
 
@@ -1430,7 +1503,8 @@ class WrittenHostVoice:
                        ) -> AsyncIterator[tuple[str, bytes | str]]:
         """The line's audio, with the dead air taken out; stops as soon as the host is cut off. With `keep`, a line
         already recorded in this voice is replayed rather than paid for again, and a new one is recorded as it goes."""
-        key = _audio_key(self.voice, line, self.pause_cap) if keep else None
+        tts_line = speech_text(line)
+        key = _audio_key(self.voice, tts_line, self.pause_cap) if keep else None
         began, sound_at = time.monotonic(), None
         if key:
             try:

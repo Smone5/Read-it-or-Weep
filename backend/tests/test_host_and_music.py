@@ -358,3 +358,37 @@ def test_host_persona_and_angles_follow_quiz_topic():
     assert title.lower() in joined
     assert "business report" not in joined
     assert "office life" not in joined
+
+
+def test_decade_labels_and_tts_pronunciation_expand_00s_10s_20s():
+    assert host_service.decade_label("00s") == "2000s"
+    assert host_service.decade_label("10s") == "2010s"
+    assert host_service.decade_label("20s") == "2020s"
+    assert host_service.decade_label("80s") == "1980s"
+
+    # Opening angles use full decades so the writer never sees bare "00s"
+    angles = host_service._opening_angles(
+        {"decade": "00s", "mode": "show"},
+        {"team": None},
+        {"title": "Q3 Report", "meeting_at": None},
+        returning=False,
+    )
+    assert any("2000s" in a for a in angles)
+    assert not any("the 00s" in a for a in angles)
+
+    # speech_text turns 00's / 00s / 2000s / 10's / 2010s / 20's / 2020s into spoken words while preserving tags
+    assert host_service.speech_text("[excited] Hits from the 00's!") == "[excited] Hits from the two-thousands!"
+    assert host_service.speech_text("[warm] Pure '00s gold, y'all.") == "[warm] Pure two-thousands gold, y'all."
+    assert host_service.speech_text("Back to the 2000s and 2010's!") == "Back to the two-thousands and twenty-tens!"
+    assert host_service.speech_text("Spinning the 10s and the 20s!") == "Spinning the twenty-tens and the twenty-twenties!"
+    assert host_service.speech_text("Best of the 2020s!") == "Best of the twenty-twenties!"
+    assert host_service.speech_text("Pure 80's and 1990's hits!") == "Pure 80s and 1990s hits!"
+
+    # Non-decade numbers, durations, and ages stay untouched
+    assert host_service.speech_text("Finished in 10s flat.") == "Finished in 10s flat."
+    assert host_service.speech_text("Still in her early 20s and paid in $100s.") == "Still in her early 20s and paid in $100s."
+    assert host_service.speech_text("The Roaring 20s jazz era.") == "The Roaring 20s jazz era."
+
+    # On-screen captions normalize ugly "00's" to "2000s"
+    assert host_service.spoken_text("[excited] Hits from the 00's!") == "Hits from the 2000s!"
+

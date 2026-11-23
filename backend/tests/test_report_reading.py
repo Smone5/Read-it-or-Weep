@@ -108,3 +108,44 @@ def test_real_world_pdf_hardening_helpers():
     assert "Executive Summary" in headings and "Supply Chain" in headings
     assert headings.count("Supply Chain") == 1
     assert "Table of Contents" not in headings and "References" not in headings
+
+
+def test_build_structure_strips_nul_bytes_and_control_chars():
+    from ingest.model import Block, ParsedDocument
+    from ingest.structure import sanitize_text
+
+    assert sanitize_text("alpha\x00beta\x01\x10\ngamma\t\ud800delta") == "alphabeta\ngamma\tdelta"
+
+    parsed = ParsedDocument(
+        title="LaTeX\x00 Paper",
+        blocks=[
+            Block(kind="heading", text="2.2 Trajectory\x00 Debiasing", level=1),
+            Block(kind="paragraph", text="State x = \x00B, M\x01 where M is memory."),
+            Block(kind="table", text="| Col\x00 |\n| --- |\n| Val\x01 |", caption="Table\x00 1"),
+        ],
+        warnings=["Note\x00 warning"],
+    )
+    structured = build_structure(parsed, "paper.pdf")
+    assert "\x00" not in structured.title
+    assert all("\x00" not in s.heading and "\x01" not in s.heading for s in structured.sections)
+    assert all("\x00" not in c.text and "\x01" not in c.text and "\x00" not in c.heading_path for c in structured.chunks)
+    assert all("\x00" not in w for w in structured.warnings)
+
+
+def test_pdf_parser_preserves_whitespace_spans_and_strips_nul():
+    import pymupdf
+    from ingest.other_parsers import parse_pdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    # Emit words separated by explicit space glyphs plus a formula-style line
+    page.insert_text((72, 72), "Introduction", fontsize=18)
+    page.insert_text((72, 110), "Gameplay data exhibit two biases that limit control learning.", fontsize=11)
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    parsed = parse_pdf(pdf_bytes, "test.pdf")
+    combined = " ".join(b.text for b in parsed.blocks)
+    assert "Gameplay data exhibit two biases" in combined
+    assert "\x00" not in combined
+

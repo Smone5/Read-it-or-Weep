@@ -12,6 +12,7 @@ from collections import Counter
 from ingest import charts
 from ingest.docx_parser import UnreadableDocument, check_ooxml_zip, rows_to_markdown
 from ingest.model import Block, ParsedDocument
+from ingest.structure import sanitize_text
 
 
 def parse_text(data: bytes, filename: str = "") -> ParsedDocument:
@@ -232,12 +233,16 @@ def parse_pdf(data: bytes, filename: str = "") -> ParsedDocument:
             block_size = 0.0
             bold = True
             for line in block.get("lines", []):
-                spans = [s for s in line.get("spans", []) if s.get("text", "").strip()]
-                if not spans:
+                raw_spans = line.get("spans", [])
+                nonempty = [s for s in raw_spans if sanitize_text(s.get("text", "")).strip()]
+                if not nonempty:
                     continue
-                lines.append("".join(s["text"] for s in spans).strip())
-                block_size = max(block_size, max(round(s["size"], 1) for s in spans))
-                bold = bold and all("bold" in s.get("font", "").lower() or s.get("flags", 0) & 16 for s in spans)
+                line_text = sanitize_text("".join(s.get("text", "") for s in raw_spans)).strip()
+                if not line_text:
+                    continue
+                lines.append(line_text)
+                block_size = max(block_size, max(round(s["size"], 1) for s in nonempty))
+                bold = bold and all("bold" in s.get("font", "").lower() or s.get("flags", 0) & 16 for s in nonempty)
             text = re.sub(r"\s+", " ", " ".join(lines)).strip()
             if not text or re.fullmatch(r"(page\s*)?\d+(\s*(of|/)\s*\d+)?", text, flags=re.I):
                 continue
@@ -355,7 +360,7 @@ def parse_pptx(data: bytes, filename: str = "") -> ParsedDocument:
                         image=png,
                         mime="image/png" if png else None,
                         caption=chart_data.title,
-                        origin="chart_render" if png else "embedded",
+                        origin="chart" if png else "embedded",
                     ))
                     content_blocks += 1
                 else:

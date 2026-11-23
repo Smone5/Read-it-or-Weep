@@ -21,6 +21,14 @@ TABLE_MAX_TOKENS = 700
 MAX_SECTIONS = 14
 TINY_SECTION_WORDS = 35
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(])")
+_BAD_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]")
+
+
+def sanitize_text(text: str) -> str:
+    """Strip NUL bytes, non-whitespace control characters, and lone surrogates that PostgreSQL rejects."""
+    if not text:
+        return ""
+    return _BAD_CONTROL_CHARS.sub("", text)
 
 
 def approx_tokens(text: str) -> int:
@@ -295,10 +303,16 @@ _MARKER_LINE = re.compile(r"^\[[^\]]*\]$")
 
 
 def build_structure(parsed: ParsedDocument, filename: str = "") -> StructuredDocument:
-    fallback_title = parsed.title or re.sub(r"\.[A-Za-z0-9]+$", "", filename).replace("_", " ").strip() or "The report"
+    for block in parsed.blocks:
+        if block.text:
+            block.text = sanitize_text(block.text)
+        if block.caption:
+            block.caption = sanitize_text(block.caption)
+    parsed_title = sanitize_text(parsed.title or "").strip()
+    fallback_title = parsed_title or sanitize_text(re.sub(r"\.[A-Za-z0-9]+$", "", filename).replace("_", " ")).strip() or "The report"
     usable_images, skipped = _prepare_images(parsed)
     drafts = _draft_sections(parsed, fallback_title)
-    warnings = list(parsed.warnings)
+    warnings = [sanitize_text(w) for w in parsed.warnings]
 
     sections: list[Section] = []
     chunks: list[Chunk] = []
