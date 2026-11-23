@@ -374,4 +374,69 @@ async def test_agentic_critique_revise_and_closed_book_hardening(monkeypatch):
     assert stressed[0].quality.get("hardened") is True
 
 
+async def test_picture_round_blocks_screenshots_appendix_galleries_and_eye_tests(monkeypatch):
+    from ingest.model import Chunk, ImageItem, Section, StructuredDocument
+
+    sections = [
+        Section(ordinal=0, level=1, heading="2. Scaling Results", word_count=600),
+        Section(ordinal=1, level=1, heading="E Rollout Visualization and Qualitative Case Study", word_count=400),
+    ]
+    chunks = [
+        Chunk(ordinal=0, section=0, kind="text", heading_path="2. Scaling Results",
+              text="Diverse game mixtures continue lowering validation loss past 800 hours whereas single-game runs plateau early.",
+              token_count=90),
+    ]
+    core_chart = ImageItem(
+        ordinal=0, section=0, data=b"png", mime="image/png", width=900, height=600, sha256="c0",
+        origin="chart", caption="Figure 4: Scaling loss across mixtures", context="Scaling results",
+    )
+    appendix_shot = ImageItem(
+        ordinal=1, section=1, data=b"png", mime="image/png", width=900, height=600, sha256="s1",
+        origin="embedded", caption=None, context="Gameplay rollout frame",
+    )
+    doc = StructuredDocument(title="GameScaling", sections=sections, chunks=chunks,
+                             images=[core_chart, appendix_shot], warnings=[], word_count=1000)
+
+    # Appendix rollout gallery image is excluded when core visuals exist
+    picked = generate.select_images(doc)
+    assert [img.ordinal for img in picked] == [0]
+
+    # Raw screenshot never yields Picture Round questions, even if the model returned one
+    eye_test_draft = generate.MCQDraft(
+        title="Party of how many?",
+        question="How many party character portraits are stacked along the right edge of the gameplay screen?",
+        correct_answer="4",
+        distractors=["3", "5", "6"],
+        source_quote="Four portraits on the right",
+        explanation="Four portraits appear on the right.",
+        skill="recall",
+        difficulty="easy",
+    )
+
+    async def fake_screenshot_parse(*, schema, **kwargs):
+        if schema is generate.ImageDrafts:
+            return generate.ImageDrafts(kind="screenshot", informative=True, description="Gameplay screenshot.", questions=[eye_test_draft])
+        raise AssertionError("checker should not run for rejected screenshot")
+
+    monkeypatch.setattr(generate.llm, "parse", fake_screenshot_parse)
+    rep1 = generate.GenerationReport()
+    qs1, note1 = await generate._questions_for_image(doc, appendix_shot, rep1)
+    assert qs1 == []
+    assert note1[0] == "screenshot" and note1[2] is True
+    assert rep1.rejected.get("skipped non-analytical visual (screenshot/photo)") == 1
+
+    # Even on a diagram, an "I Spy" counting question is blocked by the deterministic eye-test guard
+    async def fake_eye_test_parse(*, schema, **kwargs):
+        if schema is generate.ImageDrafts:
+            return generate.ImageDrafts(kind="diagram", informative=True, description="System diagram.", questions=[eye_test_draft])
+        raise AssertionError("checker should not run after eye-test rejection")
+
+    monkeypatch.setattr(generate.llm, "parse", fake_eye_test_parse)
+    rep2 = generate.GenerationReport()
+    qs2, _ = await generate._questions_for_image(doc, core_chart, rep2)
+    assert qs2 == []
+    assert any("eye-test" in k for k in rep2.rejected)
+
+
+
 

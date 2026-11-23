@@ -288,30 +288,44 @@ For each numbered question:
 
 Be honest — do NOT claim "high" confidence on a genuinely document-specific question where you are really guessing."""
 
-IMAGE_WRITER_SYSTEM = """You write picture-round questions for a trivia game based on a reading document. You are shown ONE picture from the document, with its caption and nearby context.
+IMAGE_WRITER_SYSTEM = """You write visual-comprehension Picture Round questions for a quiz based on a reading document. You are shown ONE visual from the document along with its caption and section text.
 
-First decide what the picture is and whether it is informative. A chart, table, diagram, timeline, map, annotated screenshot or meaningful photo is informative. A logo, decorative photo, banner, icon, signature or cover image is not.
+STEP 1 — Classify the visual strictly:
+- ONLY analytical visuals qualify for Picture Round questions: `chart`, `table`, `diagram`, `timeline`, or `map`.
+- Raw `screenshot`s (e.g. video game frames, app UI captures, rollout galleries), `photo`s, `logo`s, `decorative` art, banners, icons, and cover images MUST NOT get Picture Round questions: set `questions: []` (you may still set `informative: true` with a crisp description ONLY if it would be a genuinely helpful Answer Reveal illustration; otherwise set `informative: false`).
 
-If it is informative, describe it in one or two sentences (this becomes its alt text) and write up to the requested number of multiple-choice questions that the player answers BY LOOKING AT THE PICTURE, which is shown on screen with the question.
-- Ask about what the picture shows: the largest or smallest, a trend, a clearly labelled value, which item is in which state, what comes after what.
-- The answer must be plainly readable in the picture. Never ask for a value that has to be estimated between gridlines or read from tiny text.
-- Exactly one correct option and three believable wrong ones of the same kind and precision, ideally other items or values that appear in the picture.
-- The question must stand on its own and name what it asks about. Do not ask what the caption says or what the figure number is.
+STEP 2 — If (and ONLY if) it is an analytical visual (`chart`, `table`, `diagram`, `timeline`, `map`), write up to the requested number of multiple-choice questions that test **visual interpretation + document comprehension** while the player looks at the visual on screen:
+- GOOD questions connect what the visual shows to what it MEANS in the document:
+  - What key finding, trend, or conclusion does this chart prove?
+  - In this architecture/process diagram, what role does a highlighted component play or what problem does it solve?
+  - Why does a curve spike, flatten, or diverge according to the document?
+  - How do two methods, regions, or phases compared in this figure differ in outcome or tradeoff?
+- STRICTLY BANNED ("I Spy" / eye-test questions):
+  - NEVER ask players to count objects, icons, portraits, characters, people, boxes, arrows, bars, or UI elements ("How many party character portraits are stacked along the right edge?").
+  - NEVER ask about colors, screen positions, layout, caption text, or figure numbers.
+  - NEVER ask a trivial look-up question that someone who never read the document could trivially spot in two seconds without understanding anything.
+- Exactly one correct option and three believable wrong ones of the same kind, length, and precision, grounded in real concepts/terms from the figure and document.
+- The question must stand on its own and name what it asks about.
 - title: a short punny title of 2 to 5 words that does not give away the answer.
-- source_quote: say where in the picture the answer is read from, e.g. "The Southwest bar is labelled 52.6".
-- explanation: one sentence stating the answer and what it means in the document.
-- skill: "understanding" when it needs comparing or interpreting, otherwise "recall".
-- difficulty: "easy" for the obvious headline/largest/smallest bar or single prominent label, "medium" for a clear comparison or trend, "hard" for multi-series synthesis or subtle contrast.
+- source_quote: briefly state what part of the figure + context proves the answer (e.g. "The scaling curve flattens after 800 hours while diverse mixtures keep improving").
+- explanation: one sentence explaining the answer and why it matters in the document.
+- skill: prefer "understanding" (interpreting trends, roles, causes, tradeoffs).
+- difficulty: "easy" for the visual's main headline takeaway, "medium" for comparing series/components or explaining a mechanism, "hard" for synthesizing a nuanced tradeoff or multi-part pattern."""
 
-If it is not informative, set informative to false and return no questions."""
+IMAGE_CHECKER_SYSTEM = """You are the strict quality and comprehension checker for a Picture Round in a document quiz. You are shown the visual, its caption, nearby document context, and candidate questions (with titles) WITHOUT the answer key.
 
-IMAGE_CHECKER_SYSTEM = """You are the quality checker for a picture round in a trivia quiz. You are shown the picture (plus its caption and nearby context when available) and candidate questions (with their titles) WITHOUT the answer key. Answer each from the picture and context alone.
-
-- answer_index: the 0-based index of the option the picture supports, or -1 if none is clearly supported.
+For each question:
+- answer_index: 0-based index of the option supported by the visual + document context, or -1 if none is clearly supported.
+- importance (1 to 5):
+  - 5: Core finding, key mechanism, or major takeaway illustrated by a chart/diagram.
+  - 4: Meaningful visual interpretation, comparison, or role of a system component.
+  - 3: Solid, worthwhile interpretation grounded in the visual and document.
+  - 1-2: Pure "I Spy" eye-test, object/icon counting, UI/layout spotting, or trivial visual look-up that tests zero understanding of the document.
 - problems: list any that apply
-  - not_readable: the answer cannot be read clearly from the picture
+  - trivial: ANY "I Spy" or eye-test question (counting portraits/icons/objects/boxes, asking about colors/positions/UI layout, or trivial look-up on a screenshot/photo that tests no document comprehension)
+  - not_readable: the needed detail cannot be read clearly from the visual
   - ambiguous / multiple_correct / not_answerable / leaks_answer / guessable: as usual (including if the title leaks the answer)
-  Leave the list empty when the question is sound.
+  Leave the list empty ONLY when the question is accurate, readable, AND tests genuine understanding.
 Return an empty statements list. Be strict."""
 
 
@@ -417,10 +431,19 @@ MAX_IMAGE_MCQS = 8           # keep picture rounds focused on the very clearest 
 MIN_IMPORTANCE = 3           # checker 1-5 importance floor (1-2 = obscure minutiae/trivia)
 
 _LOW_VALUE_HEADING = re.compile(
+    r"(?:^[A-Z](?:\.\d+)?\s+[A-Z])|"
     r"\b(appendix|related work|prior work|background literature|hyperparameter|implementation detail|"
     r"notation|experimental setup|training detail|ablation detail|prompt template|qualitative example|"
+    r"qualitative case stud|rollout visualization|visual example|case study visualization|gallery|"
     r"supplementary|ethics statement|broader impact|reproducibility|author contribution|acknowledg)\b",
     re.I,
+)
+_ANALYTICAL_IMAGE_KINDS = frozenset({"chart", "table", "diagram", "timeline", "map"})
+_EYE_TEST_IMAGE_Q = re.compile(
+    r"(?i)\bhow many\b.{0,55}\b(portraits?|icons?|buttons?|characters?|people|persons?|avatars?|boxes|"
+    r"arrows?|circles?|dots?|squares?|panels?|frames?|thumbnails?|menus?|tabs?|items?|objects?)\b"
+    r"|\bwhat color (is|are)\b.{0,40}\b(background|border|button|icon|text|bar|box|arrow|edge|corner)\b"
+    r"|\b(along the (left|right|top|bottom) edge|in the (top|bottom)-(left|right) corner)\b",
 )
 _CORE_HEADING = re.compile(
     r"\b(abstract|executive summary|summary|overview|introduction|key finding|result|conclusion|"
@@ -529,9 +552,22 @@ def select_chunks(
 
 
 def select_images(document: StructuredDocument, limit: int = MAX_IMAGES_PER_PASS) -> list[ImageItem]:
-    """Pick the most informative charts/diagrams spread across sections instead of running vision on hundreds of frames."""
-    if len(document.images) <= limit:
-        return list(document.images)
+    """Pick the most informative charts/diagrams from core sections instead of appendix screenshot galleries."""
+    if not document.images:
+        return []
+
+    def _in_low_value_section(img: ImageItem) -> bool:
+        sec_heading = document.sections[img.section].heading if 0 <= img.section < len(document.sections) else ""
+        return bool(_LOW_VALUE_HEADING.search(sec_heading))
+
+    # Drop appendix / rollout-gallery images completely whenever core-section visuals exist.
+    core_images = [img for img in document.images if not _in_low_value_section(img)]
+    pool = core_images if core_images else [
+        img for img in document.images
+        if img.origin == "chart" or bool(img.caption) or _INFORMATIVE_VISUAL_HINT.search(img.context or "")
+    ]
+    if len(pool) <= limit:
+        return list(pool)
 
     def _img_score(img: ImageItem) -> float:
         sec_heading = document.sections[img.section].heading if 0 <= img.section < len(document.sections) else ""
@@ -553,7 +589,7 @@ def select_images(document: StructuredDocument, limit: int = MAX_IMAGES_PER_PASS
             score -= 2.0
         return score
 
-    scored: list[tuple[ImageItem, float]] = [(img, _img_score(img)) for img in document.images]
+    scored: list[tuple[ImageItem, float]] = [(img, _img_score(img)) for img in pool]
     picked: list[ImageItem] = []
     per_section: dict[int, int] = {}
     remaining = list(scored)
@@ -1165,20 +1201,48 @@ async def _closed_book_stress_test(
     return out
 
 
+def _section_context_for_image(document: StructuredDocument, image: ImageItem, max_chars: int = 900) -> str:
+    """Gather the section's key prose around a visual so Picture Round questions test real comprehension, not I-Spy."""
+    parts: list[str] = []
+    if image.caption:
+        parts.append(f"Caption: {image.caption}")
+    if image.context:
+        parts.append(image.context[:500])
+    sec_chunks = [c.text for c in document.chunks if c.section == image.section and c.kind == "text" and c.token_count >= 45]
+    if sec_chunks:
+        parts.append("Key section text:\n" + sec_chunks[0][:max_chars])
+    return "\n\n".join(parts)
+
+
 async def _questions_for_image(document: StructuredDocument, image: ImageItem, report: GenerationReport,
                                max_questions: int = 2) -> tuple[list[ReadyQuestion], tuple[str, str, bool]]:
     picture = llm.image_part(image.data, image.mime)
-    intro = f"Report: {document.title}\n{image.context}\n\nWrite up to {max_questions} questions."
+    rich_context = _section_context_for_image(document, image)
+    intro = (
+        f"Document: {document.title}\n"
+        f"Outline:\n{_outline(document)}\n\n"
+        f"{rich_context}\n\n"
+        f"Write up to {max_questions} visual-comprehension question(s) ONLY if this is an analytical visual "
+        f"(chart, table, diagram, timeline, or map). Return an empty questions list for raw screenshots or photos."
+    )
     drafts = await llm.parse(model=config.model_vision, system=IMAGE_WRITER_SYSTEM,
                              user=[llm.text_part(intro), picture], schema=ImageDrafts,
                              effort="low", max_output_tokens=4000)
     if not drafts.informative:
         return [], (drafts.kind, drafts.description.strip(), False)
+    # Raw screenshots/photos can still be marked usable for Answer Reveal illustrations, but never Picture Round Qs.
+    if drafts.kind not in _ANALYTICAL_IMAGE_KINDS:
+        for _ in drafts.questions:
+            report.reject("skipped non-analytical visual (screenshot/photo)")
+        return [], (drafts.kind, drafts.description.strip(), True)
     if not drafts.questions:
         return [], (drafts.kind, drafts.description.strip(), True)
     report.drafted += len(drafts.questions)
     mcqs: list[tuple[MCQDraft, list[str], int]] = []
     for draft in drafts.questions[:max_questions]:
+        if _EYE_TEST_IMAGE_Q.search(draft.question or ""):
+            report.reject("eye-test picture question (counts/spots visual elements instead of comprehension)")
+            continue
         problem = mcq_problem(draft, None)
         if problem:
             report.reject(problem)
@@ -1187,12 +1251,7 @@ async def _questions_for_image(document: StructuredDocument, image: ImageItem, r
     if not mcqs:
         # Still mark informative visuals usable=True so Answer Reveal matching can use them.
         return [], (drafts.kind, drafts.description.strip(), True)
-    ctx_parts = []
-    if image.caption:
-        ctx_parts.append(f"Caption: {image.caption}")
-    if image.context:
-        ctx_parts.append(f"Context:\n{image.context[:450]}")
-    context_prefix = ("\n".join(ctx_parts) + "\n\n") if ctx_parts else ""
+    context_prefix = (rich_context + "\n\n") if rich_context else ""
     check = await llm.parse(model=config.model_vision, system=IMAGE_CHECKER_SYSTEM,
                             user=[llm.text_part(context_prefix + _present(mcqs, [])), picture], schema=CheckResult,
                             effort="low", max_output_tokens=2000)
