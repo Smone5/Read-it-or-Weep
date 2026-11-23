@@ -1044,6 +1044,10 @@ button:disabled {
     opacity: 0.72;
   }
 
+  .host-crt[data-vu='true'] .crt-bar {
+    transition: none;
+  }
+
   @media (prefers-reduced-motion: no-preference) {
     .host-crt[data-state='idle'] .crt-eye {
       animation: crt-blink 5.2s ease-in-out infinite;
@@ -1054,7 +1058,6 @@ button:disabled {
     .host-crt[data-state='speaking']:not([data-vu='true']) .crt-b4 { animation: crt-wave 0.40s ease-in-out -0.11s infinite; }
     .host-crt[data-state='speaking']:not([data-vu='true']) .crt-b5 { animation: crt-wave 0.48s ease-in-out -0.27s infinite; }
     .host-crt[data-state='speaking']:not([data-vu='true']) .crt-b6 { animation: crt-wave 0.42s ease-in-out -0.08s infinite; }
-    .host-crt[data-vu='true'] .crt-bar { transition: transform 0.05s linear; }
     .host-crt[data-state='thinking'] .crt-bar { animation: crt-wave 0.9s ease-in-out infinite; }
     .host-crt[data-state='thinking'] .crt-b2 { animation-delay: 0.12s; }
     .host-crt[data-state='thinking'] .crt-b3 { animation-delay: 0.24s; }

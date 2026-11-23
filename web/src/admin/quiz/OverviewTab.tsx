@@ -3,9 +3,10 @@ import { Link, useNavigate } from 'react-router-dom'
 import QRCode from 'qrcode'
 import { ErrorNote } from '../../components/ui'
 import { call, errorText } from '../api'
-import { ChoiceGroup, ConfirmDialog, CopyButton, Field, Note, Panel, SaveBar } from '../components'
-import { useNotify } from '../context'
-import { fromLocalInput, isThisSite, isWorking, onThisSite, plural, QUIZ_STATUS, toLocalInput } from '../format'
+import { AuditLogFeed } from '../AuditLogFeed'
+import { ChoiceGroup, ConfirmDialog, CopyButton, Dialog, DialogActions, Field, Note, Panel, SaveBar, Switch } from '../components'
+import { useNotify, useUnsavedGuard } from '../context'
+import { formatDateTime, fromLocalInput, isThisSite, isWorking, onThisSite, plural, QUIZ_STATUS, toLocalInput } from '../format'
 import { paths } from '../paths'
 import type { QuestionSources, Quiz, QuizOverview, QuizPatch, QuizStatus } from '../types'
 import { useQuiz } from './context'
@@ -21,7 +22,8 @@ export default function OverviewTab() {
       </div>
       <AtAGlance />
       <DetailsForm />
-      <DeleteQuiz />
+      <AuditLogFeed quizId={detail.quiz.id} limit={15} title="Recent activity on this quiz" description="Access-code changes, resets, and deletions" collapsible />
+      <LifecyclePanel />
     </div>
   )
 }
@@ -38,15 +40,16 @@ function GettingReady() {
   const { detail } = useQuiz()
   const { quiz, overview, documents, rules } = detail
   const working = documents.some(isWorking)
+  const docCount = documents.length
   const playableMcq = playableMcqCount(overview, rules.question_sources)
   const steps = [
     {
-      done: overview.documents > 0 && !working,
+      done: docCount > 0 && !working,
       title: 'Upload the report',
       note: working
         ? 'The report is being read and the questions written. This takes a minute or two.'
-        : overview.documents > 0
-          ? `${plural(overview.documents, 'document')} uploaded.`
+        : docCount > 0
+          ? `${plural(docCount, 'document')} uploaded.`
           : 'The questions are written from it automatically.',
       to: paths.quiz(quiz.id, 'report'),
       action: 'Go to Report',
@@ -73,7 +76,7 @@ function GettingReady() {
   ]
   return (
     <Panel title="Getting this quiz ready" description="It is a draft, so only signed-in admins can play it for now.">
-      {overview.documents === 0 && (
+      {docCount === 0 && (
         <div className="mb-4">
           <Note tone="info">
             Uploading a confidential report? Review{' '}
@@ -181,6 +184,14 @@ function SharePanel() {
   // address in use right now can see. So the test always opens on this address.
   const elsewhere = !isThisSite(quiz.playUrl)
   const testUrl = elsewhere ? onThisSite(quiz.playUrl) : quiz.playUrl
+  const inviteBlurb = [
+    `Ready to test yourself on "${quiz.title}"?`,
+    quiz.meetingAt ? `Play before our meeting on ${formatDateTime(quiz.meetingAt)}:` : 'Play here:',
+    quiz.playUrl,
+    quiz.accessCode ? `Access code: ${quiz.accessCode}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n')
 
   return (
     <Panel title="Play link" description="Send this to the people who should read the report.">
@@ -189,6 +200,7 @@ function SharePanel() {
           <input className="field" readOnly value={quiz.playUrl} aria-label="Play link" onFocus={(event) => event.target.select()} />
         </div>
         <CopyButton text={quiz.playUrl} label="Copy link" />
+        <CopyButton text={inviteBlurb} label="Copy invite" className="btn btn-ghost" />
       </div>
 
       {quiz.status === 'draft' && (
@@ -364,8 +376,10 @@ function DetailsForm() {
 
   const changes = changesFrom(quiz, rules, form)
   const dirty = Object.keys(changes).length > 0
+  useUnsavedGuard(dirty)
   const badDomain = parseDomains(form.domains).find((domain) => !DOMAIN.test(domain)) ?? null
   const badReportUrl = form.reportUrl.trim() !== '' && !HTTP_URL.test(form.reportUrl.trim())
+  const rotatingOpenCode = quiz.status === 'open' && 'accessCode' in changes
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -385,9 +399,14 @@ function DetailsForm() {
     setSaving(true)
     setError(null)
     try {
+      const prevUrl = quiz.playUrl
       const saved = await save(changes)
       setForm(detailsOf(saved.quiz, saved.rules))
-      notify('Quiz details saved.')
+      if (saved.quiz.playUrl !== prevUrl) {
+        notify('Saved. Your play link changed to an unlisted address — copy the updated link above.')
+      } else {
+        notify('Quiz details saved.')
+      }
     } catch (reason) {
       setError(errorText(reason))
     } finally {
@@ -423,7 +442,14 @@ function DetailsForm() {
               <textarea className="field" {...props} value={form.description} onChange={(event) => set({ description: event.target.value })} maxLength={600} rows={3} />
             )}
           </Field>
-          <Field label="Access code" hint="Optional. If set, players must type it to join. Capital letters do not matter.">
+          <Field
+            label="Access code"
+            hint={
+              rotatingOpenCode
+                ? 'Warning: changing the access code on an open quiz signs current players out until they enter the new code.'
+                : 'Optional. If set, players must type it to join. Capital letters do not matter.'
+            }
+          >
             {(props) => (
               <input className="field" {...props} value={form.accessCode} onChange={(event) => set({ accessCode: event.target.value })} maxLength={40} autoComplete="off" />
             )}
@@ -519,69 +545,32 @@ function DetailsForm() {
             )}
           </Field>
 
-          <label className="flex items-start gap-3 text-sm">
-            <input
-              type="checkbox"
-              className="mt-1"
+          <div className="grid gap-1">
+            <Switch
               checked={form.allowDownload}
-              onChange={(event) => {
-                const checked = event.target.checked
-                set({ allowDownload: checked, ...(checked ? { purgeSource: false } : {}) })
-              }}
+              onChange={(checked) => set({ allowDownload: checked, ...(checked ? { purgeSource: false } : {}) })}
+              label="Allow signed-in players to open/download the uploaded report"
+              description={`Off by default. Streams the uploaded PDF/Word file via short-lived signed links in the lobby and results screen.${form.purgeSource ? ' Turning this on automatically turns off source-file purging below.' : ''}`}
             />
-            <span>
-              <strong className="block">Allow signed-in players to open/download the uploaded report</strong>
-              <span className="text-muted">
-                Off by default. Streams the uploaded PDF/Word file via short-lived signed links in the lobby and results screen.
-                {form.purgeSource && ' Turning this on automatically turns off source-file purging below.'}
-              </span>
-            </span>
-          </label>
-
-          <label className="flex items-start gap-3 text-sm">
-            <input
-              type="checkbox"
-              className="mt-1"
+            <Switch
               checked={form.unlisted}
-              onChange={(event) => set({ unlisted: event.target.checked })}
+              onChange={(unlisted) => set({ unlisted })}
+              label="Unlisted (direct link only)"
+              description="Hides this quiz’s title from the public front door (/). Enabling this on a draft also updates the play link with an unguessable suffix."
             />
-            <span>
-              <strong className="block">Unlisted (direct link only)</strong>
-              <span className="text-muted">Hides this quiz’s title from the public front door (/). Pair with an access code above for confidential meetings.</span>
-            </span>
-          </label>
-
-          <label className="flex items-start gap-3 text-sm">
-            <input
-              type="checkbox"
-              className="mt-1"
+            <Switch
               checked={form.confidentialVoice}
-              onChange={(event) => set({ confidentialVoice: event.target.checked })}
+              onChange={(confidentialVoice) => set({ confidentialVoice })}
+              label="Confidential voice mode (no third-party ElevenLabs)"
+              description="Prevents spoken questions and answers from being sent to ElevenLabs; uses your primary OpenAI/Azure tenant voice instead."
             />
-            <span>
-              <strong className="block">Confidential voice mode (no third-party ElevenLabs)</strong>
-              <span className="text-muted">Prevents spoken questions and answers from being sent to ElevenLabs; uses your primary OpenAI/Azure tenant voice instead.</span>
-            </span>
-          </label>
-
-          <label className="flex items-start gap-3 text-sm">
-            <input
-              type="checkbox"
-              className="mt-1"
+            <Switch
               checked={form.purgeSource}
-              onChange={(event) => {
-                const checked = event.target.checked
-                set({ purgeSource: checked, ...(checked ? { allowDownload: false } : {}) })
-              }}
+              onChange={(checked) => set({ purgeSource: checked, ...(checked ? { allowDownload: false } : {}) })}
+              label="Purge source file after processing"
+              description={`Automatically deletes the raw uploaded report file from storage once questions are generated (keeps questions and charts).${form.allowDownload ? ' Turning this on disables player file downloads above.' : ''}`}
             />
-            <span>
-              <strong className="block">Purge source file after processing</strong>
-              <span className="text-muted">
-                Automatically deletes the raw uploaded report file from storage once questions are generated (keeps questions and charts).
-                {form.allowDownload && ' Turning this on disables player file downloads above.'}
-              </span>
-            </span>
-          </label>
+          </div>
         </div>
       </Panel>
       </div>
@@ -591,47 +580,116 @@ function DetailsForm() {
   )
 }
 
-// ---- delete ----------------------------------------------------------------------------
+// ---- duplicate & delete ----------------------------------------------------------------
 
-function DeleteQuiz() {
+function LifecyclePanel() {
   const { detail } = useQuiz()
   const navigate = useNavigate()
   const notify = useNotify()
   const { quiz, overview } = detail
-  const [asking, setAsking] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [duplicating, setDuplicating] = useState(false)
+  const [includeManual, setIncludeManual] = useState(false)
+  const [dupBusy, setDupBusy] = useState(false)
+  const [dupError, setDupError] = useState<string | null>(null)
+  const [askingDelete, setAskingDelete] = useState(false)
+  const [delBusy, setDelBusy] = useState(false)
+  const [delError, setDelError] = useState<string | null>(null)
+
+  const duplicate = async (event: FormEvent) => {
+    event.preventDefault()
+    if (dupBusy) return
+    setDupBusy(true)
+    setDupError(null)
+    try {
+      const res = await call<{ quiz: Quiz; copiedQuestions?: number }>(`/quizzes/${quiz.id}/duplicate`, {
+        method: 'POST',
+        body: { includeManualQuestions: includeManual },
+      })
+      setDuplicating(false)
+      notify(`Created draft “${res.quiz.title}”.`)
+      navigate(paths.quiz(res.quiz.id))
+    } catch (reason) {
+      setDupError(errorText(reason))
+      setDupBusy(false)
+    }
+  }
 
   const remove = async () => {
-    setBusy(true)
-    setError(null)
+    setDelBusy(true)
+    setDelError(null)
     try {
       await call(`/quizzes/${quiz.id}`, { method: 'DELETE' })
       notify(`“${quiz.title}” was deleted.`)
       navigate(paths.home)
     } catch (reason) {
-      setError(errorText(reason))
-      setBusy(false)
+      setDelError(errorText(reason))
+      setDelBusy(false)
     }
   }
 
   return (
-    <Panel title="Delete this quiz" description="Removes the quiz, its report, its questions and everyone's results for good.">
-      <button type="button" className="btn btn-danger" onClick={() => setAsking(true)}>
-        Delete quiz…
-      </button>
+    <div className="grid gap-5 md:grid-cols-2">
+      <Panel
+        title="Duplicate this quiz"
+        description="Start a recurring meeting quiz with the same teams, allowed email domains, and play-style rules — ready for a new report."
+      >
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => {
+            setIncludeManual(false)
+            setDupError(null)
+            setDuplicating(true)
+          }}
+        >
+          Duplicate quiz…
+        </button>
+      </Panel>
+
+      <Panel title="Delete this quiz" description="Removes the quiz, its report, its questions and everyone's results for good.">
+        <button type="button" className="btn btn-danger" onClick={() => setAskingDelete(true)}>
+          Delete quiz…
+        </button>
+      </Panel>
+
+      <Dialog open={duplicating} onClose={dupBusy ? () => {} : () => setDuplicating(false)} title="Duplicate this quiz">
+        <form className="grid gap-4" onSubmit={duplicate}>
+          <p className="text-sm text-muted">
+            Creates a new <strong>Draft</strong> quiz copying the title, description, teams, allowed email domains, and custom play-style rules.
+            Uploaded reports, player results, and access codes are not copied.
+          </p>
+          {overview.manual > 0 && (
+            <Switch
+              checked={includeManual}
+              onChange={setIncludeManual}
+              label={`Also copy ${plural(overview.manual, 'hand-written question')}`}
+              description="Copies text-only manual questions (picture questions stay tied to the original report)."
+            />
+          )}
+          <ErrorNote>{dupError}</ErrorNote>
+          <DialogActions>
+            <button type="button" className="btn btn-ghost" onClick={() => setDuplicating(false)} disabled={dupBusy}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={dupBusy}>
+              {dupBusy ? 'Duplicating…' : 'Create copy'}
+            </button>
+          </DialogActions>
+        </form>
+      </Dialog>
+
       <ConfirmDialog
-        open={asking}
+        open={askingDelete}
         title="Delete this quiz?"
         confirmLabel="Delete for good"
         busyLabel="Deleting…"
         typeToConfirm={quiz.title}
-        busy={busy}
-        error={error}
+        busy={delBusy}
+        error={delError}
         onConfirm={remove}
         onCancel={() => {
-          setAsking(false)
-          setError(null)
+          setAskingDelete(false)
+          setDelError(null)
         }}
       >
         <p>
@@ -640,6 +698,6 @@ function DeleteQuiz() {
         </p>
         <p>It cannot be undone. If you only want to stop people playing, set the status to Closed instead.</p>
       </ConfirmDialog>
-    </Panel>
+    </div>
   )
 }

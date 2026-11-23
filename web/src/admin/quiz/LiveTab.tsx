@@ -1,13 +1,13 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ErrorNote } from '../../components/ui'
 import { call, errorText } from '../api'
 import { Badge, ConfirmDialog, CopyButton, Dialog, ErrorBlock, Field, LoadingBlock, Note, Panel } from '../components'
 import { useNotify } from '../context'
 import { decadeLabel, formatDateTime, isThisSite, plural, type Tone } from '../format'
-import { useLoad } from '../hooks'
+import { useInterval, useLoad } from '../hooks'
 import { paths } from '../paths'
-import type { LiveCreated, LiveSession, LiveStanding } from '../types'
+import type { LiveCreated, LiveSession, LiveStanding, QuestionSources, QuizOverview } from '../types'
 import { useQuiz } from './context'
 
 const SESSION_STATUS: Record<LiveSession['status'], { label: string; tone: Tone }> = {
@@ -18,10 +18,16 @@ const SESSION_STATUS: Record<LiveSession['status'], { label: string; tone: Tone 
   finished: { label: 'Finished', tone: 'neutral' },
 }
 
+function playableMcqCount(overview: QuizOverview, source?: QuestionSources): number {
+  if (source === 'manual' && overview.approved_manual_mcq !== undefined) return overview.approved_manual_mcq
+  if (source === 'ai' && overview.approved_ai_mcq !== undefined) return overview.approved_ai_mcq
+  return overview.approved_mcq ?? overview.approved
+}
+
 export default function LiveTab() {
-  const { detail, liveGame, setLiveGame } = useQuiz()
+  const { detail, refresh: refreshQuiz, liveGame, setLiveGame } = useQuiz()
   const notify = useNotify()
-  const { quiz, rules } = detail
+  const { quiz, rules, overview } = detail
   const sessions = useLoad<{ sessions: LiveSession[] }>(`/quizzes/${quiz.id}/live`)
   const [decade, setDecade] = useState('') // '' lets the server pick one
   const [starting, setStarting] = useState(false)
@@ -30,6 +36,37 @@ export default function LiveTab() {
   const [viewing, setViewing] = useState<LiveSession | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [reclaimingId, setReclaimingId] = useState<string | null>(null)
+  const [ending, setEnding] = useState<LiveSession | null>(null)
+  const [endBusy, setEndBusy] = useState(false)
+  const [endError, setEndError] = useState<string | null>(null)
+  const [reopenedCode, setReopenedCode] = useState<string | null>(null)
+  const readyRef = useRef<HTMLDivElement>(null)
+
+  const list = sessions.data?.sessions ?? []
+  const activeSessions = list.filter((s) => s.status !== 'finished')
+  const hasActive = activeSessions.length > 0 || liveGame !== null
+  const playableMcq = playableMcqCount(overview, rules.question_sources)
+  const canStart = playableMcq >= 3
+
+  // Auto-poll active live rooms every 5s (paused while tab is hidden).
+  useInterval(
+    () => {
+      if (document.hidden) return
+      sessions.refresh().catch(() => {})
+    },
+    hasActive ? 5000 : null,
+  )
+
+  // Clear the active ReadyGame banner automatically once the server marks that room finished.
+  useEffect(() => {
+    if (!liveGame || !sessions.data) return
+    const match = sessions.data.sessions.find((s) => s.code === liveGame.code)
+    if (match && match.status === 'finished') {
+      setLiveGame(null)
+      setReopenedCode(null)
+      refreshQuiz().catch(() => {})
+    }
+  }, [liveGame, sessions.data, setLiveGame, refreshQuiz])
 
   const reclaim = async (session: LiveSession) => {
     if (reclaimingId) return
@@ -37,11 +74,35 @@ export default function LiveTab() {
     try {
       const recovered = await call<LiveCreated>(`/live/${session.id}/reclaim`, { method: 'POST', body: {} })
       setLiveGame({ ...recovered, questions: session.questions })
+      setReopenedCode(recovered.code)
       notify(`Fresh big-screen link ready for ${recovered.code}.`)
+      window.setTimeout(() => {
+        readyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }, 50)
     } catch (reason) {
       notify(errorText(reason), 'bad')
     } finally {
       setReclaimingId(null)
+    }
+  }
+
+  const endGame = async () => {
+    if (!ending || endBusy) return
+    setEndBusy(true)
+    setEndError(null)
+    try {
+      await call(`/live/${ending.id}/finish`, { method: 'POST', body: {} })
+      if (liveGame?.code === ending.code) {
+        setLiveGame(null)
+        setReopenedCode(null)
+      }
+      notify(`Ended live game ${ending.code}.`)
+      setEnding(null)
+      await Promise.all([sessions.refresh().catch(() => {}), refreshQuiz().catch(() => {})])
+    } catch (reason) {
+      setEndError(errorText(reason))
+    } finally {
+      setEndBusy(false)
     }
   }
 
@@ -55,11 +116,11 @@ export default function LiveTab() {
     try {
       const game = await call<LiveCreated>(`/quizzes/${quiz.id}/live`, { method: 'POST', body: wantsMusicDecade && decade ? { decade } : {} })
       setLiveGame(game)
+      setReopenedCode(null)
       setReplacing(false)
       notify(`Live game ${game.code} is ready.`)
-      sessions.refresh().catch(() => {})
+      await Promise.all([sessions.refresh().catch(() => {}), refreshQuiz().catch(() => {})])
     } catch (reason) {
-      // For example: fewer than three live questions. The server's message says what to do.
       setError(errorText(reason))
     } finally {
       setStarting(false)
@@ -79,7 +140,48 @@ export default function LiveTab() {
 
   return (
     <div className="grid gap-5">
-      {liveGame && <ReadyGame game={liveGame} />}
+      {liveGame && (
+        <div ref={readyRef}>
+          <ReadyGame game={liveGame} resumed={reopenedCode === liveGame.code} />
+        </div>
+      )}
+
+      {!liveGame && activeSessions.length > 0 && (
+        <Note tone="info" role="status">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <strong>
+                Active live room{activeSessions.length > 1 ? `s (${activeSessions.length})` : `: ${activeSessions[0].code}`}
+              </strong>
+              <p className="mt-0.5 text-sm text-muted">
+                {activeSessions.length === 1
+                  ? `${SESSION_STATUS[activeSessions[0].status]?.label ?? activeSessions[0].status} · ${plural(activeSessions[0].players, 'player')} joined.`
+                  : 'Reopen the big screen on any active room below, or end abandoned test rooms.'}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={reclaimingId === activeSessions[0].id}
+                onClick={() => void reclaim(activeSessions[0])}
+              >
+                {reclaimingId === activeSessions[0].id ? 'Reopening…' : `Reopen ${activeSessions[0].code}`}
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger btn-sm"
+                onClick={() => {
+                  setEndError(null)
+                  setEnding(activeSessions[0])
+                }}
+              >
+                End game
+              </button>
+            </div>
+          </div>
+        </Note>
+      )}
 
       <Panel
         title={liveGame ? 'Start another live game' : 'Start a live game'}
@@ -108,11 +210,23 @@ export default function LiveTab() {
           </li>
         </ul>
 
+        {!canStart && (
+          <div className="mt-4">
+            <Note tone="warn">
+              This quiz currently has <strong>{plural(playableMcq, 'eligible live multiple-choice question')}</strong> — at least 3 are needed to run a
+              live game.{' '}
+              <Link className="ad-link" to={paths.quiz(quiz.id, 'questions')}>
+                Go to Questions
+              </Link>
+            </Note>
+          </div>
+        )}
+
         <div className="mt-4 flex flex-wrap items-end gap-3">
           {wantsMusicDecade && (
             <Field label="Music from" className="w-full sm:w-56">
               {(props) => (
-                <select className="field" {...props} value={decade} onChange={(event) => setDecade(event.target.value)} disabled={starting}>
+                <select className="field" {...props} value={decade} onChange={(event) => setDecade(event.target.value)} disabled={starting || !canStart}>
                   <option value="">Surprise us</option>
                   {rules.decades.map((option) => (
                     <option key={option} value={option}>
@@ -126,10 +240,10 @@ export default function LiveTab() {
           <button
             type="button"
             className="btn btn-primary"
-            disabled={starting}
+            disabled={starting || !canStart}
             onClick={() => {
               setError(null)
-              if (liveGame) setReplacing(true)
+              if (liveGame || activeSessions.length > 0) setReplacing(true)
               else void start()
             }}
           >
@@ -145,7 +259,7 @@ export default function LiveTab() {
 
       <Panel
         title="Earlier live games"
-        description="The last 20 games run for this quiz."
+        description={hasActive ? 'The last 20 games run for this quiz. Updates automatically every 5 seconds while a room is active.' : 'The last 20 games run for this quiz.'}
         actions={
           <button type="button" className="btn btn-ghost btn-sm" onClick={refreshSessions} disabled={refreshing}>
             {refreshing ? 'Refreshing…' : 'Refresh'}
@@ -154,15 +268,15 @@ export default function LiveTab() {
       >
         {!sessions.data && sessions.loading && <LoadingBlock label="Loading earlier games" />}
         {!sessions.data && sessions.error && <ErrorBlock message={sessions.error} onRetry={sessions.reload} />}
-        {sessions.data && sessions.data.sessions.length === 0 && <p className="py-2 text-sm text-muted">No live games have been run for this quiz yet.</p>}
-        {sessions.data && sessions.data.sessions.length > 0 && (
+        {sessions.data && list.length === 0 && <p className="py-2 text-sm text-muted">No live games have been run for this quiz yet.</p>}
+        {sessions.data && list.length > 0 && (
           <>
-            <div className="ad-table-wrap">
-              <table className="ad-table" style={{ minWidth: 560 }}>
+            <div className="ad-table-wrap ad-table-sticky" tabIndex={0} role="region" aria-label="Earlier live games">
+              <table className="ad-table" style={{ minWidth: 680 }}>
                 <thead>
                   <tr>
-                    <th scope="col">Started</th>
                     <th scope="col">Join code</th>
+                    <th scope="col">Started</th>
                     <th scope="col">Status</th>
                     <th scope="col" className="num">
                       Players
@@ -170,34 +284,48 @@ export default function LiveTab() {
                     <th scope="col" className="num">
                       Questions
                     </th>
-                    <th scope="col">
-                      <span className="sr-only">Results</span>
+                    <th scope="col" className="num">
+                      Actions
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {sessions.data.sessions.map((session) => {
+                  {list.map((session) => {
                     const status = SESSION_STATUS[session.status] ?? { label: session.status, tone: 'neutral' as Tone }
                     return (
                       <tr key={session.id}>
+                        <th scope="row" className="font-mono font-semibold tracking-wider">
+                          {session.code}
+                        </th>
                         <td className="whitespace-nowrap">{formatDateTime(session.created_at)}</td>
-                        <td className="font-mono font-semibold tracking-wider">{session.code}</td>
                         <td>
                           <Badge tone={status.tone}>{status.label}</Badge>
                         </td>
                         <td className="num">{session.players}</td>
                         <td className="num">{session.questions}</td>
                         <td className="num">
-                          <div className="inline-flex items-center gap-2">
+                          <div className="inline-flex flex-wrap items-center justify-end gap-2">
                             {session.status !== 'finished' && (
-                              <button
-                                type="button"
-                                className="btn btn-accent btn-sm"
-                                disabled={reclaimingId === session.id}
-                                onClick={() => void reclaim(session)}
-                              >
-                                {reclaimingId === session.id ? 'Reopening…' : 'Reopen big screen'}
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  className="btn btn-accent btn-sm"
+                                  disabled={reclaimingId === session.id}
+                                  onClick={() => void reclaim(session)}
+                                >
+                                  {reclaimingId === session.id ? 'Reopening…' : 'Reopen big screen'}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-danger btn-sm"
+                                  onClick={() => {
+                                    setEndError(null)
+                                    setEnding(session)
+                                  }}
+                                >
+                                  End game
+                                </button>
+                              </>
                             )}
                             <button type="button" className="btn btn-ghost btn-sm" onClick={() => setViewing(session)} disabled={session.players === 0}>
                               {session.players === 0 ? 'Nobody joined' : 'See results'}
@@ -232,7 +360,29 @@ export default function LiveTab() {
         }}
       >
         <p>
-          Game <strong>{liveGame?.code}</strong> stays active, and you can reopen its big screen anytime from the Earlier live games list below while it is still running.
+          {liveGame ? (
+            <>
+              Game <strong>{liveGame.code}</strong> stays active, and you can reopen its big screen or end it anytime from Earlier live games below.
+            </>
+          ) : (
+            <>An earlier live room is still active. Starting another creates a separate room with its own join code.</>
+          )}
+        </p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={ending !== null}
+        title={ending ? `End live game ${ending.code}?` : 'End live game?'}
+        confirmLabel="End game"
+        busyLabel="Ending…"
+        danger
+        busy={endBusy}
+        error={endError}
+        onConfirm={() => void endGame()}
+        onCancel={() => !endBusy && setEnding(null)}
+      >
+        <p>
+          Marks live game <strong>{ending?.code}</strong> as finished immediately. Any joined players will see the final standings, and nobody new can join.
         </p>
       </ConfirmDialog>
 
@@ -243,18 +393,22 @@ export default function LiveTab() {
   )
 }
 
-/** The game that was just created: its join code, and the one-time link that runs it. */
-function ReadyGame({ game }: { game: LiveCreated }) {
+/** The game that was just created or reclaimed: its join code, and the one-time link that runs it. */
+function ReadyGame({ game, resumed }: { game: LiveCreated; resumed: boolean }) {
   const elsewhere = !isThisSite(game.joinUrl)
   return (
     <section className="card p-4 sm:p-5" aria-label={`Live game ${game.code}`}>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2 className="text-base font-bold">Your live game is ready</h2>
-          <p className="mt-0.5 text-sm text-muted">{plural(game.questions, 'question')} lined up. Players can join as soon as the big screen is open.</p>
+          <h2 className="text-base font-bold">{resumed ? `Resuming live game ${game.code}` : 'Your live game is ready'}</h2>
+          <p className="mt-0.5 text-sm text-muted">
+            {resumed
+              ? 'A fresh host control link has been issued. Opening it takes over the big screen right where the game left off.'
+              : `${plural(game.questions, 'question')} lined up. Players can join as soon as the big screen is open.`}
+          </p>
         </div>
         <a className="btn btn-primary btn-lg" href={game.hostUrl} target="_blank" rel="noopener">
-          Open the big screen
+          {resumed ? 'Reopen the big screen' : 'Open the big screen'}
         </a>
       </div>
 
@@ -327,7 +481,7 @@ function SessionResults({ session }: { session: LiveSession }) {
         {formatDateTime(session.created_at)} · {plural(session.questions, 'question')} · {SESSION_STATUS[session.status]?.label ?? session.status}
         {session.status !== 'finished' && ' (scores so far)'}
       </p>
-      <div className="ad-table-wrap">
+      <div className="ad-table-wrap" tabIndex={0} role="region" aria-label={`Standings for game ${session.code}`}>
         <table className="ad-table" style={{ minWidth: 560 }}>
           <thead>
             <tr>

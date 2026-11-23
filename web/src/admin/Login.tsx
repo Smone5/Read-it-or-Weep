@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { ErrorNote } from '../components/ui'
-import { adminApi, session } from '../lib/api'
-import { errorText } from './api'
+import { session } from '../lib/api'
+import { errorText, loginAdmin } from './api'
 import { Field, Note } from './components'
 import { usePageTitle } from './context'
 import type { AdminUser } from './types'
@@ -20,11 +20,8 @@ export default function Login({ notice, onSignedIn }: { notice: string | null; o
     setBusy(true)
     setError(null)
     try {
-      // The shared client is used directly here: a wrong password is an ordinary error, not an expired session.
-      const result = await adminApi<{ token: string; admin: AdminUser }>('/login', {
-        method: 'POST',
-        body: { email: email.trim(), password },
-      })
+      // Send without the admin token so a wrong password never clears another open tab's session.
+      const result = await loginAdmin<{ token: string; admin: AdminUser }>(email.trim(), password)
       session.setAdminToken(result.token)
       onSignedIn(result.admin)
     } catch (reason) {

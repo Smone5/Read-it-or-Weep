@@ -10,7 +10,7 @@ import re
 from collections import Counter
 
 from ingest import charts
-from ingest.docx_parser import UnreadableDocument, rows_to_markdown
+from ingest.docx_parser import UnreadableDocument, check_ooxml_zip, rows_to_markdown
 from ingest.model import Block, ParsedDocument
 
 
@@ -316,6 +316,7 @@ def _pptx_chart_markdown(chart) -> tuple[str | None, str]:
 def parse_pptx(data: bytes, filename: str = "") -> ParsedDocument:
     from pptx import Presentation
 
+    check_ooxml_zip(data, "PowerPoint (.pptx) presentation")
     try:
         deck = Presentation(io.BytesIO(data))
     except Exception as exc:

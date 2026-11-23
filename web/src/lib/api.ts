@@ -23,6 +23,21 @@ function write(key: string, value: string | null) {
 let playerToken = read(PLAYER_KEY)
 let adminToken = read(ADMIN_KEY)
 
+const adminTokenListeners = new Set<(token: string | null) => void>()
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (event) => {
+    if (event.key !== ADMIN_KEY) return
+    adminToken = event.newValue
+    adminTokenListeners.forEach((listener) => listener(adminToken))
+  })
+}
+
+export function onAdminTokenChange(listener: (token: string | null) => void): () => void {
+  adminTokenListeners.add(listener)
+  return () => adminTokenListeners.delete(listener)
+}
+
 export const session = {
   get playerToken() {
     return playerToken
@@ -160,8 +175,24 @@ export const adminApi = <T = unknown>(path: string, options: Omit<Options, 'as'>
 
 /** Download a file from an admin endpoint (e.g. the results CSV). */
 export async function adminDownload(path: string, filename: string) {
-  const response = await fetch(`/api/admin${path}`, { headers: { Authorization: `Bearer ${adminToken ?? ''}` } })
-  if (!response.ok) throw new ApiError('Could not download that file.', response.status)
+  let response: Response
+  try {
+    response = await fetch(`/api/admin${path}`, { headers: { Authorization: `Bearer ${adminToken ?? ''}` } })
+  } catch {
+    throw new ApiError(messageFrom(null, 0), 0)
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    let payload: unknown = null
+    if (text) {
+      try {
+        payload = JSON.parse(text)
+      } catch {
+        payload = text
+      }
+    }
+    throw new ApiError(messageFrom(payload, response.status), response.status)
+  }
   const url = URL.createObjectURL(await response.blob())
   const link = document.createElement('a')
   link.href = url

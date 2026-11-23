@@ -87,16 +87,19 @@ export function Modal({
   children,
   wide,
   label = 'Dialog',
+  labelledBy,
 }: {
   open: boolean
   onClose: () => void
   children: ReactNode
   wide?: boolean
   label?: string
+  labelledBy?: string
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const pressedOutside = useRef(false)
+  const supportsClosedBy = typeof HTMLDialogElement !== 'undefined' && 'closedBy' in HTMLDialogElement.prototype
 
   useEffect(() => {
     const dialog = dialogRef.current
@@ -120,7 +123,8 @@ export function Modal({
   return (
     <dialog
       ref={dialogRef}
-      aria-label={label}
+      aria-label={labelledBy ? undefined : label}
+      aria-labelledby={labelledBy}
       {...({ closedby: 'any' } as Record<string, string>)}
       onCancel={(event) => {
         event.preventDefault()
@@ -130,12 +134,12 @@ export function Modal({
         if (open) onClose()
       }}
       onPointerDown={(event) => {
-        pressedOutside.current = isOutsidePanel(event.clientX, event.clientY)
+        if (!supportsClosedBy) pressedOutside.current = isOutsidePanel(event.clientX, event.clientY)
       }}
       onPointerUp={(event) => {
         // Light-dismiss fallback for browsers without native closedby="any" (e.g. Safari):
         // require both press and release outside the panel so drag-selections never dismiss.
-        if (pressedOutside.current && isOutsidePanel(event.clientX, event.clientY)) {
+        if (!supportsClosedBy && pressedOutside.current && isOutsidePanel(event.clientX, event.clientY)) {
           onClose()
         }
         pressedOutside.current = false
@@ -145,7 +149,7 @@ export function Modal({
       <div className="grid h-full w-full place-items-end sm:place-items-center sm:p-4">
         <div
           ref={panelRef}
-          className={`card rise relative max-h-[92dvh] w-full overflow-y-auto rounded-b-none p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:rounded-b-[var(--radius)] sm:pb-5 ${wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'}`}
+          className={`card rise relative max-h-[92dvh] w-full overflow-y-auto overscroll-contain rounded-b-none p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:rounded-b-[var(--radius)] sm:pb-5 ${wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'}`}
         >
           {children}
         </div>

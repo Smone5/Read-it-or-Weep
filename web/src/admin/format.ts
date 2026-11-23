@@ -50,9 +50,10 @@ export function meetingHint(iso: string | null | undefined): string | null {
   if (!date) return null
   const ms = date.getTime() - Date.now()
   if (ms < 0) return timeAgo(iso)
-  const hours = ms / 3_600_000
-  if (hours < 1) return `in ${Math.max(1, Math.round(ms / 60_000))} min`
-  if (hours < 24) return `in ${Math.round(hours)} hour${Math.round(hours) === 1 ? '' : 's'}`
+  const mins = Math.max(1, Math.round(ms / 60_000))
+  if (mins < 60) return `in ${mins} min`
+  const hours = Math.round(mins / 60)
+  if (hours < 24) return `in ${hours} hour${hours === 1 ? '' : 's'}`
   const days = Math.round(hours / 24)
   return days === 1 ? 'tomorrow' : `in ${days} days`
 }

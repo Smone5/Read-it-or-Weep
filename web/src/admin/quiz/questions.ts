@@ -25,9 +25,11 @@ export const LETTERS = ['A', 'B', 'C', 'D'] as const
 
 export type QuestionSort = 'default' | 'hardest' | 'easiest' | 'most_asked' | 'most_flagged'
 
+export type AuthorFilter = 'all' | 'ai' | 'ai_unedited' | 'ai_edited' | 'manual'
+
 export type Filters = {
   status: 'all' | QuestionStatus
-  author: 'all' | 'ai' | 'manual'
+  author: AuthorFilter
   type: 'all' | QuestionType
   difficulty: 'all' | Difficulty
   /** A section id, `none` for questions that are not filed under a section, or `all`. */
@@ -52,21 +54,27 @@ export const NO_FILTERS: Filters = {
   hasRevealVisualOnly: false,
 }
 
+export function countSecondaryFilters(filters: Filters): number {
+  let n = 0
+  if (filters.author !== 'all') n += 1
+  if (filters.type !== 'all') n += 1
+  if (filters.difficulty !== 'all') n += 1
+  if (filters.section !== 'all') n += 1
+  if (filters.flaggedOnly) n += 1
+  if (filters.hasVideoOnly) n += 1
+  if (filters.pinnedOnly) n += 1
+  if (filters.hasRevealVisualOnly) n += 1
+  return n
+}
+
 export const isFiltered = (filters: Filters) =>
-  filters.status !== 'all' ||
-  filters.author !== 'all' ||
-  filters.type !== 'all' ||
-  filters.difficulty !== 'all' ||
-  filters.section !== 'all' ||
-  filters.search.trim() !== '' ||
-  filters.flaggedOnly ||
-  filters.hasVideoOnly ||
-  filters.pinnedOnly ||
-  filters.hasRevealVisualOnly
+  filters.status !== 'all' || filters.search.trim() !== '' || countSecondaryFilters(filters) > 0
 
 export function matches(question: Question, filters: Filters): boolean {
   if (filters.status !== 'all' && question.status !== filters.status) return false
   if (filters.author === 'ai' && question.origin !== 'generated') return false
+  if (filters.author === 'ai_unedited' && (question.origin !== 'generated' || question.edited)) return false
+  if (filters.author === 'ai_edited' && (question.origin !== 'generated' || !question.edited)) return false
   if (filters.author === 'manual' && question.origin !== 'manual') return false
   if (filters.type !== 'all' && questionType(question) !== filters.type) return false
   if (filters.difficulty !== 'all' && question.difficulty !== filters.difficulty) return false
@@ -112,12 +120,24 @@ export function sortQuestions(list: Question[], sort: QuestionSort): Question[] 
   return copy.sort((a, b) => b.flags - a.flags || b.served - a.served)
 }
 
-/** What a question looks like after the server has accepted `patch` (approving also clears its flags). */
+/** What a question looks like after the server has accepted `patch`. */
 export function withPatch(question: Question, patch: QuestionPatch): Question {
-  const next = { ...question, ...patch }
-  if (patch.status === 'approved') {
+  const next: Question = { ...question, ...patch }
+  if (patch.status === 'approved' || patch.clearFlags) {
     next.flags = 0
-    next.pulledReason = null
+    next.flagReasons = []
+    if (patch.status === 'approved' || question.pulledReason === 'flagged by players') {
+      next.pulledReason = null
+    }
+  }
+  if (
+    patch.status === 'rejected' ||
+    patch.pinned === true ||
+    patch.difficulty !== undefined ||
+    patch.sectionId !== undefined ||
+    patch.text !== undefined
+  ) {
+    next.edited = true
   }
   return next
 }

@@ -281,6 +281,7 @@ async def quiz_overview(quiz_id: str) -> dict[str, Any]:
         " (select count(distinct player_id) from runs where quiz_id = $1) as players,"
         " (select count(*) from runs where quiz_id = $1 and status = 'completed') as games,"
         " (select count(*) from live_sessions where quiz_id = $1) as live_sessions,"
+        " (select count(*) from live_sessions where quiz_id = $1 and status <> 'finished') as active_live_sessions,"
         " (select count(*) from documents where quiz_id = $1) as documents", quiz_id)
     return dict(row)
 
@@ -291,7 +292,8 @@ async def quiz_overviews(quiz_ids: list[str]) -> dict[str, dict[str, int]]:
         return {}
     empty = {
         "approved": 0, "approved_mcq": 0, "approved_manual_mcq": 0, "approved_ai_mcq": 0,
-        "pending": 0, "manual": 0, "flagged": 0, "players": 0, "games": 0, "live_sessions": 0, "documents": 0,
+        "pending": 0, "manual": 0, "flagged": 0, "players": 0, "games": 0,
+        "live_sessions": 0, "active_live_sessions": 0, "documents": 0,
     }
     out = {qid: dict(empty) for qid in quiz_ids}
     q_rows = await db.fetch(
@@ -317,10 +319,15 @@ async def quiz_overviews(quiz_ids: list[str]) -> dict[str, dict[str, int]]:
     for r in r_rows:
         out[r["quiz_id"]].update({"players": r["players"], "games": r["games"]})
     l_rows = await db.fetch(
-        "select quiz_id, count(*) as live_sessions from live_sessions where quiz_id = any($1::uuid[]) group by quiz_id",
+        "select quiz_id, count(*) as live_sessions,"
+        " count(*) filter (where status <> 'finished') as active_live_sessions"
+        " from live_sessions where quiz_id = any($1::uuid[]) group by quiz_id",
         quiz_ids)
     for r in l_rows:
-        out[r["quiz_id"]]["live_sessions"] = r["live_sessions"]
+        out[r["quiz_id"]].update({
+            "live_sessions": r["live_sessions"],
+            "active_live_sessions": r["active_live_sessions"],
+        })
     d_rows = await db.fetch(
         "select quiz_id, count(*) as documents from documents where quiz_id = any($1::uuid[]) group by quiz_id",
         quiz_ids)
@@ -351,7 +358,7 @@ async def participants(quiz: dict, rules: dict) -> list[dict]:
         result.append({
             "id": r["id"], "name": r["name"], "email": r["email"], "team": r["team"], "games": r["games"],
             "bestScore": r["best_score"], "answered": r["report_answered"], "correct": r["report_correct"],
-            "accuracy": round(100 * r["report_correct"] / r["report_answered"]) if r["report_answered"] else 0,
+            "accuracy": round(100 * r["report_correct"] / r["report_answered"]) if r["report_answered"] else None,
             "sectionsCleared": r["sections_cleared"], "sectionsTotal": sections_total, "readiness": percent,
             "ready": percent >= threshold, "peeksUsed": r["peeks_used"], "passed": r["passed"],
             "lastPlayedAt": r["last_played_at"],
@@ -380,7 +387,8 @@ async def participants_csv(quiz: dict, rules: dict) -> str:
         writer.writerow([
             _csv_cell(p["name"]), _csv_cell(p["email"]), _csv_cell(p["team"] or ""),
             "yes" if p["ready"] else "no", p["readiness"],
-            p["sectionsCleared"], p["sectionsTotal"], p["answered"], p["correct"], p["accuracy"],
+            p["sectionsCleared"], p["sectionsTotal"], p["answered"], p["correct"],
+            p["accuracy"] if p["accuracy"] is not None else "",
             p["games"], p["bestScore"] if p["bestScore"] is not None else "", p["peeksUsed"],
             p["lastPlayedAt"].strftime("%Y-%m-%d %H:%M") if p["lastPlayedAt"] else "",
         ])

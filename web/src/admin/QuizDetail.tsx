@@ -1,8 +1,8 @@
-import { useCallback, useMemo, useState } from 'react'
-import { Link, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { call } from './api'
 import { Badge, ErrorBlock, LoadingBlock } from './components'
-import { usePageTitle } from './context'
+import { useDirtyGuard, usePageTitle } from './context'
 import { formatDateTime, isWorking, meetingHint, QUIZ_STATUS } from './format'
 import { useLoad, useMeta } from './hooks'
 import { paths, tabFromPath, type QuizTab } from './paths'
@@ -34,11 +34,26 @@ function QuizScreen({ quizId }: { quizId: string }) {
   const { data: detail, error, reload, refresh, mutate } = useLoad<QuizDetailData>(`/quizzes/${quizId}`)
   const { meta, error: metaError, retry: retryMeta } = useMeta()
   const [liveGame, setLiveGame] = useState<LiveCreated | null>(null)
+  const { confirmLeave } = useDirtyGuard()
+  const navigate = useNavigate()
   const { pathname } = useLocation()
   const current = tabFromPath(pathname, quizId)
   const currentLabel = TABS.find((tab) => tab.id === current)?.label ?? 'Overview'
+  const tabsRef = useRef<HTMLElement>(null)
 
   usePageTitle(detail ? `${currentLabel} · ${detail.quiz.title}` : 'Quiz')
+
+  useEffect(() => {
+    const active = tabsRef.current?.querySelector<HTMLElement>('[aria-current="page"]')
+    active?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  }, [current, detail?.quiz.id])
+
+  const guardedClick = (to: string) => (event: React.MouseEvent<HTMLAnchorElement>) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return
+    if (to === pathname) return
+    event.preventDefault()
+    confirmLeave(() => navigate(to))
+  }
 
   const save = useCallback(
     async (changes: QuizPatch) => {
@@ -52,7 +67,11 @@ function QuizScreen({ quizId }: { quizId: string }) {
   const setDocuments = useCallback(
     (documents: QuizDocument[]) => {
       // Polling returns the same list most of the time; only a real change should redraw the page.
-      mutate((current) => (JSON.stringify(current.documents) === JSON.stringify(documents) ? current : { ...current, documents }))
+      mutate((current) =>
+        JSON.stringify(current.documents) === JSON.stringify(documents)
+          ? current
+          : { ...current, documents, overview: { ...current.overview, documents: documents.length } },
+      )
     },
     [mutate],
   )
@@ -95,16 +114,20 @@ function QuizScreen({ quizId }: { quizId: string }) {
 
   const tabBadge = (tab: QuizTab) => {
     if (tab === 'questions' && overview.pending > 0) return <Badge tone="warn">{overview.pending} to review</Badge>
+    if (tab === 'questions' && overview.flagged > 0) return <Badge tone="bad">{overview.flagged} flagged</Badge>
     if (tab === 'questions') return <span className="font-normal tabular-nums">{overview.approved}</span>
     if (tab === 'report' && documents.some(isWorking)) return <Badge tone="info">Working</Badge>
     if (tab === 'live' && liveGame) return <Badge tone="good">{liveGame.code}</Badge>
+    if (tab === 'live' && (overview.active_live_sessions ?? 0) > 0) {
+      return <Badge tone="good">{overview.active_live_sessions} active</Badge>
+    }
     return null
   }
 
   return (
     <>
       <p className="text-sm">
-        <Link to={paths.home} className="ad-link">
+        <Link to={paths.home} onClick={guardedClick(paths.home)} className="ad-link">
           ← All quizzes
         </Link>
       </p>
@@ -125,14 +148,25 @@ function QuizScreen({ quizId }: { quizId: string }) {
         )}
       </p>
 
-      <nav className="ad-tabs mb-5 mt-4" aria-label="Parts of this quiz">
-        {TABS.map((tab) => (
-          <Link key={tab.id} to={paths.quiz(quizId, tab.id)} className="ad-tab" aria-current={current === tab.id ? 'page' : undefined}>
-            {tab.label}
-            {tabBadge(tab.id)}
-          </Link>
-        ))}
-      </nav>
+      <div className="ad-tabs-wrap mb-5 mt-4">
+        <nav ref={tabsRef} className="ad-tabs" aria-label="Parts of this quiz">
+          {TABS.map((tab) => {
+            const to = paths.quiz(quizId, tab.id)
+            return (
+              <Link
+                key={tab.id}
+                to={to}
+                onClick={guardedClick(to)}
+                className="ad-tab"
+                aria-current={current === tab.id ? 'page' : undefined}
+              >
+                {tab.label}
+                {tabBadge(tab.id)}
+              </Link>
+            )
+          })}
+        </nav>
+      </div>
 
       <QuizContext.Provider value={value}>
         <Routes>

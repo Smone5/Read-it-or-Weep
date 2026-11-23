@@ -20,15 +20,21 @@ export type Loaded<T> = {
 export function useLoad<T>(path: string | null): Loaded<T> {
   const [state, setState] = useState<LoadState<T>>({ path, data: null, error: null, loading: path !== null })
   const [attempt, setAttempt] = useState(0)
+  const seqRef = useRef(0)
+  const refreshAbort = useRef<AbortController | null>(null)
 
   useEffect(() => {
     if (path === null) return
+    refreshAbort.current?.abort()
+    const seq = ++seqRef.current
     const controller = new AbortController()
     setState((previous) => ({ path, data: previous.path === path ? previous.data : null, error: null, loading: true }))
     call<T>(path, { signal: controller.signal }).then(
-      (data) => setState({ path, data, error: null, loading: false }),
+      (data) => {
+        if (seq === seqRef.current) setState({ path, data, error: null, loading: false })
+      },
       (error: unknown) => {
-        if (isAbort(error)) return
+        if (isAbort(error) || seq !== seqRef.current) return
         setState((previous) => ({
           path,
           data: previous.path === path ? previous.data : null,
@@ -37,15 +43,28 @@ export function useLoad<T>(path: string | null): Loaded<T> {
         }))
       },
     )
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      refreshAbort.current?.abort()
+    }
   }, [path, attempt])
 
   const reload = useCallback(() => setAttempt((n) => n + 1), [])
 
   const refresh = useCallback(async () => {
     if (path === null) return
-    const data = await call<T>(path)
-    setState((previous) => (previous.path === path ? { path, data, error: null, loading: false } : previous))
+    refreshAbort.current?.abort()
+    const controller = new AbortController()
+    refreshAbort.current = controller
+    const seq = ++seqRef.current
+    try {
+      const data = await call<T>(path, { signal: controller.signal })
+      if (seq === seqRef.current) {
+        setState((previous) => (previous.path === path ? { path, data, error: null, loading: false } : previous))
+      }
+    } catch (error) {
+      if (!isAbort(error)) throw error
+    }
   }, [path])
 
   const mutate = useCallback((update: (data: T) => T) => {
@@ -102,7 +121,14 @@ export function useMeta(): { meta: Meta | null; error: string | null; retry: () 
     }
   }, [attempt])
 
-  return { meta, error, retry: useCallback(() => setAttempt((n) => n + 1), []) }
+  return {
+    meta,
+    error,
+    retry: useCallback(() => {
+      forgetMeta()
+      setAttempt((n) => n + 1)
+    }, []),
+  }
 }
 
 /** Run `callback` every `delayMs` while `delayMs` is a number. Always calls the latest callback. */

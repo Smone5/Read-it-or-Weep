@@ -2,7 +2,7 @@ import { useRef, useState, type CSSProperties, type FormEvent } from 'react'
 import { ErrorNote } from '../components/ui'
 import { call, errorText } from './api'
 import { ConfirmDialog, ErrorBlock, Field, LoadingBlock, Note, PageHeader, Panel, SaveBar, Segmented } from './components'
-import { useChrome, useNotify, usePageTitle } from './context'
+import { useChrome, useNotify, usePageTitle, useUnsavedGuard } from './context'
 import { useLoad } from './hooks'
 import type { BrandingSettings, SettingsRead, SettingsWritten } from './types'
 
@@ -54,20 +54,19 @@ const THEMES = [
   { value: 'light', label: 'Light' },
 ] as const
 
-/**
- * Only the fields that differ from what is saved. An empty support email is sent as an
- * empty text, because the server ignores an empty (null) value rather than clearing it.
- */
-function changesFrom(saved: BrandingSettings, form: Form): Partial<Form> {
+type FormWrite = Omit<Partial<Form>, 'support_email'> & { support_email?: string | null }
+
+/** Only the fields that differ from what is saved. Clearing support_email sends null. */
+function changesFrom(saved: BrandingSettings, form: Form): FormWrite {
   const before = formOf(saved)
-  const changes: Partial<Form> = {}
+  const changes: FormWrite = {}
   if (form.company_name.trim() !== before.company_name) changes.company_name = form.company_name.trim()
   if (form.game_title.trim() !== before.game_title) changes.game_title = form.game_title.trim()
   if (form.tagline.trim() !== before.tagline) changes.tagline = form.tagline.trim()
   if (form.primary_color.toLowerCase() !== before.primary_color.toLowerCase()) changes.primary_color = form.primary_color
   if (form.accent_color.toLowerCase() !== before.accent_color.toLowerCase()) changes.accent_color = form.accent_color
   if (form.theme !== before.theme) changes.theme = form.theme
-  if (form.support_email.trim() !== before.support_email) changes.support_email = form.support_email.trim()
+  if (form.support_email.trim() !== before.support_email) changes.support_email = form.support_email.trim() || null
   return changes
 }
 
@@ -98,6 +97,7 @@ function BrandingForm({ initial, defaults }: { initial: BrandingSettings; defaul
 
   const changes = changesFrom(saved, form)
   const dirty = Object.keys(changes).length > 0
+  useUnsavedGuard(dirty)
   // The logo is served from one fixed address; the key on the end makes the browser fetch a replaced logo afresh.
   const logoUrl = saved.logo_key ? `/api/media/logo?v=${encodeURIComponent(saved.logo_key)}` : null
   const standardColours =
@@ -174,6 +174,12 @@ function BrandingForm({ initial, defaults }: { initial: BrandingSettings; defaul
 
   return (
     <>
+      <details className="card mb-5 p-4 lg:hidden">
+        <summary className="cursor-pointer font-bold">Live preview {dirty ? '· unsaved' : ''}</summary>
+        <div className="mt-3">
+          <GamePreview form={form} fallback={saved} defaults={defaults} logoUrl={logoUrl} />
+        </div>
+      </details>
       <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
         {/* A flex column, not a grid, so the save bar (position: sticky) can follow the screen. */}
         <form onSubmit={submit} className="flex flex-col gap-5">
@@ -200,7 +206,7 @@ function BrandingForm({ initial, defaults }: { initial: BrandingSettings; defaul
                     {...props}
                     value={form.support_email}
                     onChange={(event) => set({ support_email: event.target.value })}
-                    maxLength={200}
+                    maxLength={120}
                     autoComplete="off"
                   />
                 )}
@@ -298,9 +304,9 @@ function BrandingForm({ initial, defaults }: { initial: BrandingSettings; defaul
           <SaveBar dirty={dirty} saving={saving} error={error} onDiscard={() => set(formOf(saved))} />
         </form>
 
-        <aside className="lg:sticky lg:top-20" aria-label="Preview">
+        <aside className="hidden lg:sticky lg:top-20 lg:block" aria-label="Preview">
           <Panel title="Preview" description="How the game's start screen will look. It updates as you type.">
-            <GamePreview form={form} fallback={saved} logoUrl={logoUrl} />
+            <GamePreview form={form} fallback={saved} defaults={defaults} logoUrl={logoUrl} />
             <p className="mt-2 text-xs text-muted">{dirty ? 'Not saved yet: players still see the old look.' : 'This is what players see now.'}</p>
           </Panel>
         </aside>
@@ -413,11 +419,21 @@ function ContrastNote({ form }: { form: Form }) {
  * A mock of the game's start screen. The `arcade` class gives it the game's real styles, and
  * the colours are set on this element only, so nothing outside the box changes.
  */
-function GamePreview({ form, fallback, logoUrl }: { form: Form; fallback: BrandingSettings; logoUrl: string | null }) {
+function GamePreview({
+  form,
+  fallback,
+  defaults,
+  logoUrl,
+}: {
+  form: Form
+  fallback: BrandingSettings
+  defaults: BrandingSettings
+  logoUrl: string | null
+}) {
   const primary = HEX.test(form.primary_color) ? form.primary_color : fallback.primary_color
   const accent = HEX.test(form.accent_color) ? form.accent_color : fallback.accent_color
   const palette = PALETTE[form.theme]
-  const company = form.company_name.trim() || fallback.company_name
+  const company = form.company_name.trim() || defaults.company_name
   const style = {
     '--brand': primary,
     '--accent': accent,
@@ -443,7 +459,10 @@ function GamePreview({ form, fallback, logoUrl }: { form: Form; fallback: Brandi
           {logoUrl ? (
             <img src={logoUrl} alt="" className="object-contain" style={{ height: 44, maxWidth: 176 }} />
           ) : (
-            <span className="display grid place-items-center rounded-xl text-white" style={{ width: 44, height: 44, background: 'var(--brand)', fontSize: 22 }}>
+            <span
+              className="display grid place-items-center rounded-xl"
+              style={{ width: 44, height: 44, background: 'var(--brand)', color: 'var(--brand-ink)', fontSize: 22 }}
+            >
               {company.charAt(0).toUpperCase()}
             </span>
           )}
@@ -451,9 +470,9 @@ function GamePreview({ form, fallback, logoUrl }: { form: Form; fallback: Brandi
         <div className="mt-3">
           <span className="chip chip-accent">{company}</span>
         </div>
-        <h2 className="neon mt-3 text-sm [overflow-wrap:anywhere]">{form.game_title.trim() || fallback.game_title}</h2>
+        <h2 className="neon mt-3 text-sm [overflow-wrap:anywhere]">{form.game_title.trim() || defaults.game_title}</h2>
         <p className="mt-2 text-sm [overflow-wrap:anywhere]" style={{ color: 'var(--muted)' }}>
-          {form.tagline.trim() || fallback.tagline}
+          {form.tagline.trim() || defaults.tagline}
         </p>
         <div className="mt-4">
           <span className="btn btn-primary">Press Start</span>

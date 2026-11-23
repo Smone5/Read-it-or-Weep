@@ -199,6 +199,7 @@ export type QuizOverview = {
   players: number
   games: number
   live_sessions?: number
+  active_live_sessions?: number
   documents: number
 }
 
@@ -230,6 +231,7 @@ export type QuizPatch = {
   allowedEmailDomains?: string[]
   teams?: string[]
   settings?: DeepPartial<GameRules>
+  resetSettings?: boolean
 }
 
 export type QuizSaved = { quiz: Quiz; rules: GameRules }
@@ -353,7 +355,7 @@ export type Question = {
   flagReasons: string[]
 }
 
-export type QuizImage = { id: string; label: string; url: string }
+export type QuizImage = { id: string; sectionId?: string | null; label: string; url: string }
 
 export type QuestionBank = { questions: Question[]; images: QuizImage[] }
 
@@ -392,9 +394,10 @@ export type QuestionPatch = Partial<{
   sectionId: string | null
   imageId: string | null
   revealImageId: string | null
+  clearFlags: boolean
 }>
 
-export type BulkAction = 'approve' | 'reject' | 'delete' | 'pin' | 'unpin' | 'set_difficulty' | 'set_section'
+export type BulkAction = 'approve' | 'reject' | 'pending' | 'delete' | 'pin' | 'unpin' | 'set_difficulty' | 'set_section'
 
 export type Suggestion = { wrongAnswers: string[]; title: string; explanation: string; concern: string }
 
@@ -409,7 +412,7 @@ export type Participant = {
   bestScore: number | null
   answered: number
   correct: number
-  accuracy: number
+  accuracy: number | null
   sectionsCleared: number
   sectionsTotal: number
   readiness: number
@@ -493,4 +496,18 @@ export type LiveStanding = {
   score: number
   correct_count: number
   head_start: number
+}
+
+// ---- audit log ----------------------------------------------------------------------
+
+export type AuditLogEntry = {
+  id: string
+  admin_id: string | null
+  admin_email: string | null
+  action: string
+  target_type: string
+  target_id: string | null
+  quiz_id: string | null
+  details: Record<string, unknown>
+  created_at: string
 }

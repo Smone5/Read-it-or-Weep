@@ -106,7 +106,7 @@ export function YouTubePicker({ value, title, disabled = false, onChange }: Prop
       return
     }
     if (extractVideoIdClient(clean) && clean !== lastLooked.current) {
-      const timer = window.setTimeout(() => void inspect(clean, title, false), 350)
+      const timer = window.setTimeout(() => void inspect(clean, title, externalOnly), 350)
       return () => window.clearTimeout(timer)
     }
   }, [url]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -151,7 +151,7 @@ export function YouTubePicker({ value, title, disabled = false, onChange }: Prop
                 type="button"
                 className="btn btn-ghost btn-sm flex-none"
                 disabled={disabled || looking || !extractVideoIdClient(url)}
-                onClick={() => void inspect(url, title)}
+                onClick={() => void inspect(url, title, true)}
               >
                 {looking ? 'Checking…' : 'Preview'}
               </button>
@@ -194,7 +194,7 @@ export function YouTubePicker({ value, title, disabled = false, onChange }: Prop
               href={info?.watchUrl ?? url}
               target="_blank"
               rel="noopener noreferrer"
-              className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+              className="ad-link mt-1 inline-flex items-center gap-1 text-xs"
             >
               Test on YouTube <IconExternal size={11} />
             </a>

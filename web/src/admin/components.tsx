@@ -5,7 +5,7 @@
 // property they set (display on .btn, width on .field, background on .card, and so on).
 // Put such utilities on a wrapper element instead.
 
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { ErrorNote, Modal, Spinner } from '../components/ui'
 import { useChrome } from './context'
@@ -166,28 +166,39 @@ export function Dialog({
 }) {
   const { portal } = useChrome()
   const body = useRef<HTMLDivElement>(null)
+  const titleId = useId()
 
   useEffect(() => {
     if (!open || !portal) return
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const find = (selector: string) => body.current?.querySelector<HTMLElement>(selector) ?? null
-    // The element a dialog marks, else its first field, else its close button.
-    const target = find('[data-autofocus]') ?? find('input:not([type="hidden"]), textarea, select') ?? find('button')
+    const coarse = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches
+    // On touch screens, avoid immediately focusing a text field so the virtual keyboard doesn't cover warnings.
+    const explicit = find('[data-autofocus]')
+    const target =
+      (explicit && (!coarse || !/^(INPUT|TEXTAREA|SELECT)$/.test(explicit.tagName)) ? explicit : null) ??
+      (coarse ? null : find('input:not([type="hidden"]), textarea, select')) ??
+      find('button')
     target?.focus()
-    return () => opener?.focus()
+    return () => {
+      if (opener?.isConnected) opener.focus()
+      else document.getElementById('admin-main')?.focus()
+    }
   }, [open, portal])
 
   if (!open || !portal) return null
   return createPortal(
-    <Modal open onClose={onClose} wide={wide}>
+    <Modal open onClose={onClose} wide={wide} labelledBy={titleId}>
       <div ref={body}>
-        <div className="flex items-start justify-between gap-3">
-          <h2 className="text-lg font-bold">{title}</h2>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} aria-label="Close">
+        <div className="sticky -top-5 z-10 -mx-5 -mt-5 mb-4 flex items-center justify-between gap-3 border-b border-line bg-surface px-5 py-3.5">
+          <h2 id={titleId} className="min-w-0 text-lg font-bold">
+            {title}
+          </h2>
+          <button type="button" className="btn btn-ghost btn-sm flex-none" onClick={onClose} aria-label="Close">
             <span aria-hidden>✕</span>
           </button>
         </div>
-        <div className="mt-4">{children}</div>
+        <div>{children}</div>
       </div>
     </Modal>,
     portal,
@@ -384,6 +395,33 @@ export function Switch({
   )
 }
 
+function useRadioKeys<T extends string>(
+  options: readonly { value: T }[],
+  value: T,
+  onChange: (value: T) => void,
+  disabled?: boolean,
+) {
+  const groupRef = useRef<HTMLDivElement>(null)
+  const activeIndex = Math.max(
+    0,
+    options.findIndex((o) => o.value === value),
+  )
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (disabled || options.length < 2) return
+    let next = -1
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (index + 1) % options.length
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (index - 1 + options.length) % options.length
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = options.length - 1
+    if (next < 0) return
+    event.preventDefault()
+    onChange(options[next].value)
+    const buttons = groupRef.current?.querySelectorAll<HTMLButtonElement>('[role="radio"]')
+    buttons?.[next]?.focus()
+  }
+  return { groupRef, activeIndex, onKeyDown }
+}
+
 /** Pick one of a few options, shown side by side. */
 export function Segmented<T extends string>({
   label,
@@ -398,17 +436,20 @@ export function Segmented<T extends string>({
   onChange: (value: T) => void
   disabled?: boolean
 }) {
+  const { groupRef, activeIndex, onKeyDown } = useRadioKeys(options, value, onChange, disabled)
   return (
-    <div role="radiogroup" aria-label={label} className="ad-seg">
-      {options.map((option) => (
+    <div ref={groupRef} role="radiogroup" aria-label={label} className="ad-seg">
+      {options.map((option, index) => (
         <button
           key={option.value}
           type="button"
           role="radio"
           aria-checked={option.value === value}
+          tabIndex={index === activeIndex ? 0 : -1}
           className="ad-seg-item"
           disabled={disabled}
           onClick={() => onChange(option.value)}
+          onKeyDown={(event) => onKeyDown(event, index)}
         >
           {option.label}
         </button>
@@ -433,17 +474,20 @@ export function ChoiceGroup<T extends string>({
   disabled?: boolean
   className?: string
 }) {
+  const { groupRef, activeIndex, onKeyDown } = useRadioKeys(options, value, onChange, disabled)
   return (
-    <div role="radiogroup" aria-label={label} className={className}>
-      {options.map((option) => (
+    <div ref={groupRef} role="radiogroup" aria-label={label} className={className}>
+      {options.map((option, index) => (
         <button
           key={option.value}
           type="button"
           role="radio"
           aria-checked={option.value === value}
+          tabIndex={index === activeIndex ? 0 : -1}
           className="ad-choice"
           disabled={disabled}
           onClick={() => onChange(option.value)}
+          onKeyDown={(event) => onKeyDown(event, index)}
         >
           <span className="ad-choice-dot" aria-hidden />
           <span className="min-w-0">
@@ -517,7 +561,7 @@ export function SaveBar({
 }) {
   if (!dirty && !error) return null
   return (
-    <div className="ad-sticky-bar">
+    <div className="ad-sticky-bar ad-save-bar">
       <div className="mr-auto min-w-0 text-sm font-semibold" role={error ? 'alert' : undefined}>
         {error ? <span className="text-bad">{error}</span> : 'You have unsaved changes.'}
       </div>

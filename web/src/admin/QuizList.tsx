@@ -2,10 +2,10 @@ import { useMemo, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ErrorNote } from '../components/ui'
 import { call, errorText } from './api'
-import { Badge, Dialog, DialogActions, EmptyState, ErrorBlock, Field, LoadingBlock, PageHeader } from './components'
+import { Badge, CopyButton, Dialog, DialogActions, EmptyState, ErrorBlock, Field, LoadingBlock, PageHeader, Segmented } from './components'
 import { useNotify, usePageTitle } from './context'
 import { formatDateTime, fromLocalInput, meetingHint, QUIZ_STATUS } from './format'
-import { useLoad } from './hooks'
+import { useLoad, useMeta } from './hooks'
 import { paths } from './paths'
 import type { QuestionSources, Quiz, QuizListItem, QuizOverview } from './types'
 
@@ -23,6 +23,9 @@ export default function QuizList() {
   const navigate = useNavigate()
   const notify = useNotify()
   const { data, error, loading, reload, refresh } = useLoad<{ quizzes: QuizListItem[] }>('/quizzes')
+  const { meta } = useMeta()
+  const defaultSources = meta?.gameDefaults.question_sources
+  const defaultUnlisted = meta?.gameDefaults.unlisted ?? false
   const [creating, setCreating] = useState(false)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [search, setSearch] = useState('')
@@ -103,20 +106,17 @@ export default function QuizList() {
       {data && data.quizzes.length > 0 && (
         <>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Filter quizzes by status">
-              {(['all', 'open', 'draft', 'closed'] as StatusFilter[]).map((key) => (
-                <button
-                  key={key}
-                  type="button"
-                  role="tab"
-                  aria-selected={statusFilter === key}
-                  className={`btn btn-sm ${statusFilter === key ? 'btn-primary' : 'btn-ghost'}`}
-                  onClick={() => setStatusFilter(key)}
-                >
-                  {key === 'all' ? 'All' : key === 'open' ? 'Open' : key === 'draft' ? 'Draft' : 'Closed'} ({counts[key]})
-                </button>
-              ))}
-            </div>
+            <Segmented
+              label="Filter quizzes by status"
+              value={statusFilter}
+              onChange={setStatusFilter}
+              options={[
+                { value: 'all', label: `All (${counts.all})` },
+                { value: 'open', label: `Open (${counts.open})` },
+                { value: 'draft', label: `Draft (${counts.draft})` },
+                { value: 'closed', label: `Closed (${counts.closed})` },
+              ]}
+            />
             <div className="flex flex-1 flex-wrap items-center justify-end gap-2 sm:flex-initial">
               <input
                 type="search"
@@ -146,6 +146,8 @@ export default function QuizList() {
                 <li key={quiz.id}>
                   <QuizCard
                     quiz={quiz}
+                    defaultSources={defaultSources}
+                    defaultUnlisted={defaultUnlisted}
                     busy={togglingId === quiz.id}
                     onToggleStatus={() => void toggleStatus(quiz)}
                   />
@@ -161,7 +163,19 @@ export default function QuizList() {
   )
 }
 
-function QuizCard({ quiz, busy, onToggleStatus }: { quiz: QuizListItem; busy: boolean; onToggleStatus: () => void }) {
+function QuizCard({
+  quiz,
+  defaultSources,
+  defaultUnlisted,
+  busy,
+  onToggleStatus,
+}: {
+  quiz: QuizListItem
+  defaultSources?: QuestionSources
+  defaultUnlisted: boolean
+  busy: boolean
+  onToggleStatus: () => void
+}) {
   const status = QUIZ_STATUS[quiz.status]
   const { overview } = quiz
   const hint = meetingHint(quiz.meetingAt)
@@ -171,9 +185,19 @@ function QuizCard({ quiz, busy, onToggleStatus }: { quiz: QuizListItem; busy: bo
     { label: 'Players', value: overview.players },
     { label: 'Games played', value: overview.games },
   ]
-  const playableMcq = playableMcqCount(overview, quiz.settings?.question_sources)
+  const effectiveSource = quiz.settings?.question_sources ?? defaultSources
+  const playableMcq = playableMcqCount(overview, effectiveSource)
+  const needsMore = quiz.status !== 'open' && playableMcq < 3
+  const isUnlisted = quiz.settings?.unlisted ?? defaultUnlisted
+  const hasBadges =
+    overview.documents === 0 ||
+    overview.flagged > 0 ||
+    isUnlisted ||
+    Boolean(quiz.accessCode) ||
+    Boolean(overview.active_live_sessions)
+
   return (
-    <div className="card flex h-full flex-col p-4">
+    <div className="card ad-quiz-card flex h-full flex-col p-4">
       <Link to={paths.quiz(quiz.id)} className="flex-1">
         <div className="flex items-start justify-between gap-3">
           <h2 className="min-w-0 text-base font-bold">{quiz.title}</h2>
@@ -199,28 +223,32 @@ function QuizCard({ quiz, busy, onToggleStatus }: { quiz: QuizListItem; busy: bo
             </div>
           ))}
         </dl>
-        {(overview.documents === 0 || overview.flagged > 0) && (
+        {hasBadges && (
           <div className="mt-3 flex flex-wrap gap-2">
+            {Boolean(overview.active_live_sessions) && <Badge tone="brand">Live game running</Badge>}
             {overview.documents === 0 && <Badge tone="warn">No report uploaded yet</Badge>}
-            {overview.flagged > 0 && (
-              <Badge tone="bad">
-                {overview.flagged} flagged by players
-              </Badge>
-            )}
+            {overview.flagged > 0 && <Badge tone="bad">{overview.flagged} flagged by players</Badge>}
+            {isUnlisted && <Badge tone="info">Unlisted</Badge>}
+            {quiz.accessCode && <Badge tone="neutral">Code required</Badge>}
           </div>
         )}
       </Link>
-      <div className="mt-3 flex items-center justify-between gap-2 border-t pt-2.5" style={{ borderColor: 'var(--line)' }}>
-        <span className="truncate font-mono text-xs text-muted">/q/{quiz.slug}</span>
-        <button
-          type="button"
-          className="btn btn-ghost btn-sm"
-          disabled={busy || (quiz.status !== 'open' && playableMcq < 3)}
-          title={quiz.status !== 'open' && playableMcq < 3 ? 'Needs at least 3 live multiple-choice questions before opening' : undefined}
-          onClick={onToggleStatus}
-        >
-          {busy ? 'Saving…' : quiz.status === 'open' ? 'Close' : 'Open'}
-        </button>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t pt-2.5" style={{ borderColor: 'var(--line)' }}>
+        <div className="min-w-0 flex-1">
+          <span className="block truncate font-mono text-xs text-muted">/q/{quiz.slug}</span>
+          {needsMore && <span className="block text-xs text-muted">Needs {3 - playableMcq} more live multiple-choice question{3 - playableMcq === 1 ? '' : 's'} to open</span>}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <CopyButton text={quiz.playUrl} label="Copy link" className="btn btn-ghost btn-sm" />
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            disabled={busy || needsMore}
+            onClick={onToggleStatus}
+          >
+            {busy ? 'Saving…' : quiz.status === 'open' ? 'Close' : 'Open'}
+          </button>
+        </div>
       </div>
     </div>
   )

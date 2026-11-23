@@ -206,6 +206,22 @@ async def reclaim_session(session_id: str) -> dict:
             "hostUrl": f"{base}/host/{session['code']}#k={host_key}", "joinUrl": f"{base}/live/{session['code']}"}
 
 
+async def finish_session(session_id: str) -> dict:
+    """Forcibly end an active live session (e.g. an abandoned test room) so it no longer shows as live."""
+    session = await db.fetchrow("select id, quiz_id, code, status from live_sessions where id = $1", session_id)
+    if session is None:
+        raise LiveError("We could not find that live game.", 404)
+    if session["status"] != "finished":
+        await db.execute(
+            "update live_sessions set status = 'finished', finished_at = coalesce(finished_at, now()),"
+            " phase_ends_at = null, version = version + 1 where id = $1",
+            session["id"],
+        )
+        _recent.pop(session["code"], None)
+        _public_snap.pop(session["id"], None)
+    return {"ok": True, "quizId": session["quiz_id"], "code": session["code"]}
+
+
 # --------------------------------------------------------------------------- loading + transitions
 
 _recent: dict[str, tuple[float, dict]] = {}

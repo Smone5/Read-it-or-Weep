@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { call, download, errorText } from '../api'
-import { Badge, Bar, ConfirmDialog, EmptyState, ErrorBlock, LoadingBlock, Note, Panel, Segmented, Stat } from '../components'
+import { Badge, Bar, ConfirmDialog, CopyButton, EmptyState, ErrorBlock, LoadingBlock, Note, Panel, Segmented, Stat } from '../components'
 import { useNotify } from '../context'
 import { decadeLabel, formatDate, plural, timeAgo } from '../format'
 import { useLoad } from '../hooks'
@@ -26,7 +26,7 @@ export default function ResultsTab() {
     try {
       await call(`/quizzes/${quiz.id}/reset-results`, { method: 'POST' })
       setAskingReset(false)
-      notify('All play-test runs and scores have been cleared.')
+      notify(quiz.status === 'draft' ? 'Test runs and scores have been cleared.' : 'All results for this quiz have been cleared.')
       await Promise.all([refresh().catch(() => {}), refreshQuiz().catch(() => {})])
     } catch (reason) {
       setResetError(errorText(reason))
@@ -64,10 +64,13 @@ export default function ResultsTab() {
   }
 
   const people = data.participants
-  const answering = people.filter((person) => person.answered > 0)
-  const averageAccuracy = answering.length ? Math.round(answering.reduce((sum, person) => sum + person.accuracy, 0) / answering.length) : null
+  const answering = people.filter((person) => person.answered > 0 && person.accuracy !== null)
+  const averageAccuracy = answering.length
+    ? Math.round(answering.reduce((sum, person) => sum + (person.accuracy ?? 0), 0) / answering.length)
+    : null
   const games = people.reduce((sum, person) => sum + person.games, 0)
-  const hasAnyResults = people.length > 0 || detail.overview.games > 0 || (detail.overview.live_sessions ?? 0) > 0
+  const liveCount = detail.overview.live_sessions ?? 0
+  const hasAnyResults = people.length > 0 || detail.overview.games > 0 || liveCount > 0
 
   return (
     <div className="grid gap-5">
@@ -81,7 +84,14 @@ export default function ResultsTab() {
             {refreshing ? 'Refreshing…' : 'Refresh'}
           </button>
           {hasAnyResults && (
-            <button type="button" className="btn btn-ghost" onClick={() => { setResetError(null); setAskingReset(true) }}>
+            <button
+              type="button"
+              className="btn btn-danger"
+              onClick={() => {
+                setResetError(null)
+                setAskingReset(true)
+              }}
+            >
               {quiz.status === 'draft' ? 'Clear test results' : 'Reset results'}
             </button>
           )}
@@ -96,6 +106,7 @@ export default function ResultsTab() {
         title={quiz.status === 'draft' ? 'Clear test results?' : 'Reset all results for this quiz?'}
         confirmLabel={quiz.status === 'draft' ? 'Clear test results' : 'Reset all results'}
         busyLabel="Clearing…"
+        typeToConfirm={quiz.status !== 'draft' ? quiz.title : undefined}
         busy={resetBusy}
         error={resetError}
         onConfirm={() => void resetAll()}
@@ -108,18 +119,31 @@ export default function ResultsTab() {
       </ConfirmDialog>
 
       {people.length === 0 ? (
-        <EmptyState
-          title="Nobody has played yet"
-          action={
-            <Link className="btn btn-primary" to={paths.quiz(quiz.id)}>
-              Get the play link
-            </Link>
-          }
-        >
-          {quiz.status === 'open'
-            ? 'Share the play link and results appear here as people play.'
-            : 'The quiz is not open, so only admins can play it. Open it on the Overview tab, then share the link.'}
-        </EmptyState>
+        liveCount > 0 ? (
+          <EmptyState
+            title="Only live room games have been played"
+            action={
+              <Link className="btn btn-primary" to={paths.quiz(quiz.id, 'live')}>
+                View {plural(liveCount, 'live game')}
+              </Link>
+            }
+          >
+            Nobody has played the solo pre-read quiz yet, so individual readiness and CSV exports are empty. Live room standings are on the Live tab.
+          </EmptyState>
+        ) : (
+          <EmptyState
+            title="Nobody has played yet"
+            action={
+              <Link className="btn btn-primary" to={paths.quiz(quiz.id)}>
+                Get the play link
+              </Link>
+            }
+          >
+            {quiz.status === 'open'
+              ? 'Share the play link and results appear here as people play.'
+              : 'The quiz is not open, so only admins can play it. Open it on the Overview tab, then share the link.'}
+          </EmptyState>
+        )
       ) : (
         <>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -141,7 +165,13 @@ export default function ResultsTab() {
             />
           </div>
 
-          <ParticipantsPanel people={people} threshold={data.threshold} />
+          <ParticipantsPanel
+            people={people}
+            threshold={data.threshold}
+            teams={quiz.teams}
+            quizTitle={quiz.title}
+            playUrl={quiz.playUrl}
+          />
           <InsightsPanel insights={data.insights} quizId={quiz.id} />
           <LeaderboardsPanel boards={data.leaderboards} hiddenFromPlayers={!rules.leaderboard} />
           <FeedbackPanel feedback={data.feedback} />
@@ -186,16 +216,39 @@ function compare(a: Participant, b: Participant, key: SortKey): number {
 
 const PARTICIPANTS_PAGE = 50
 
-function ParticipantsPanel({ people, threshold }: { people: Participant[]; threshold: number }) {
+function ParticipantsPanel({
+  people,
+  threshold,
+  teams,
+  quizTitle,
+  playUrl,
+}: {
+  people: Participant[]
+  threshold: number
+  teams: string[]
+  quizTitle: string
+  playUrl: string
+}) {
   const [who, setWho] = useState<(typeof WHO)[number]['value']>('all')
+  const [teamFilter, setTeamFilter] = useState('')
   const [search, setSearch] = useState('')
   const [shown, setShown] = useState(PARTICIPANTS_PAGE)
   const [sort, setSort] = useState<Sort | null>(null) // null keeps the server's order: most sections cleared first
+
+  const teamBreakdown = useMemo(() => {
+    const names = teams.length ? teams : [...new Set(people.map((p) => p.team).filter((t): t is string => Boolean(t)))]
+    return names.map((team) => {
+      const members = people.filter((p) => p.team === team)
+      const ready = members.filter((p) => p.ready).length
+      return { team, total: members.length, ready }
+    })
+  }, [people, teams])
 
   const rows = useMemo(() => {
     const needle = search.trim().toLowerCase()
     const filtered = people.filter((person) => {
       if (who !== 'all' && (who === 'ready') !== person.ready) return false
+      if (teamFilter && (person.team ?? '') !== teamFilter) return false
       if (!needle) return true
       return (
         person.name.toLowerCase().includes(needle) ||
@@ -207,14 +260,26 @@ function ParticipantsPanel({ people, threshold }: { people: Participant[]; thres
     const sorted = [...filtered].sort((a, b) => compare(a, b, sort.key))
     // Missing values stay at the bottom whichever way the column is sorted.
     return sort.descending ? sorted.reverse().sort((a, b) => Number(a[sort.key] === null) - Number(b[sort.key] === null)) : sorted
-  }, [people, who, search, sort])
+  }, [people, who, teamFilter, search, sort])
 
   const visibleRows = rows.slice(0, shown)
 
   const toggleSort = (key: SortKey, numeric: boolean) =>
     setSort((current) => (current?.key === key ? { key, descending: !current.descending } : { key, descending: numeric || key === 'readiness' || key === 'lastPlayedAt' }))
 
-  const notReady = people.filter((person) => !person.ready).length
+  const notReadyPeople = useMemo(() => people.filter((person) => !person.ready), [people])
+  const notReady = notReadyPeople.length
+  const notReadyEmails = useMemo(() => notReadyPeople.map((p) => p.email).filter(Boolean).join(', '), [notReadyPeople])
+  const reminderMailto = useMemo(() => {
+    if (!notReadyEmails) return null
+    const subject = encodeURIComponent(`Quick reminder: ${quizTitle}`)
+    const body = encodeURIComponent(
+      `Hi everyone,\n\nFriendly reminder to finish the pre-read quiz for "${quizTitle}" before our meeting:\n${playUrl}\n\nThanks!`,
+    )
+    // Keep mailto URI compact so mail clients accept it cleanly.
+    const bcc = encodeURIComponent(notReadyEmails.slice(0, 1500))
+    return `mailto:?bcc=${bcc}&subject=${subject}&body=${body}`
+  }, [notReadyEmails, quizTitle, playUrl])
 
   return (
     <Panel
@@ -226,6 +291,16 @@ function ParticipantsPanel({ people, threshold }: { people: Participant[]; thres
       }
       actions={
         <div className="flex flex-wrap items-center gap-2">
+          {notReady > 0 && notReadyEmails && (
+            <>
+              <CopyButton text={notReadyEmails} label={`Copy not-ready emails (${notReady})`} className="btn btn-ghost btn-sm" />
+              {reminderMailto && (
+                <a className="btn btn-ghost btn-sm" href={reminderMailto}>
+                  Draft reminder email
+                </a>
+              )}
+            </>
+          )}
           <input
             type="search"
             className="field w-48 sm:w-56"
@@ -249,13 +324,44 @@ function ParticipantsPanel({ people, threshold }: { people: Participant[]; thres
         </div>
       }
     >
+      {teamBreakdown.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            className={`btn btn-sm ${teamFilter === '' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => {
+              setTeamFilter('')
+              setShown(PARTICIPANTS_PAGE)
+            }}
+          >
+            All teams
+          </button>
+          {teamBreakdown.map((t) => (
+            <button
+              key={t.team}
+              type="button"
+              className={`btn btn-sm ${teamFilter === t.team ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => {
+                setTeamFilter(teamFilter === t.team ? '' : t.team)
+                setShown(PARTICIPANTS_PAGE)
+              }}
+            >
+              {t.team}{' '}
+              <span className="font-normal opacity-80">
+                ({t.ready}/{t.total})
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {rows.length === 0 ? (
         <p className="py-6 text-center text-sm text-muted">
-          {search.trim() ? 'No participants match that search.' : who === 'ready' ? 'Nobody is ready yet.' : 'Everyone is ready.'}
+          {search.trim() || teamFilter ? 'No participants match that filter.' : who === 'ready' ? 'Nobody is ready yet.' : 'Everyone is ready.'}
         </p>
       ) : (
         <>
-          <div className="ad-table-wrap">
+          <div className="ad-table-wrap ad-table-sticky" tabIndex={0} role="region" aria-label="Participants">
             <table className="ad-table" style={{ minWidth: 980 }}>
               <thead>
                 <tr>
@@ -294,7 +400,7 @@ function ParticipantsPanel({ people, threshold }: { people: Participant[]; thres
                     <td className="num">
                       {person.sectionsCleared} of {person.sectionsTotal}
                     </td>
-                    <td className="num">{person.answered ? `${person.accuracy}%` : '—'}</td>
+                    <td className="num">{person.answered && person.accuracy !== null ? `${person.accuracy}%` : '—'}</td>
                     <td className="num">{person.games}</td>
                     <td className="num">{person.bestScore === null ? '—' : person.bestScore.toLocaleString()}</td>
                     <td className="num">{person.peeksUsed}</td>
@@ -346,7 +452,12 @@ function InsightsPanel({ insights, quizId }: { insights: Results['insights']; qu
                 <li key={section.id}>
                   <div className="flex flex-wrap items-baseline justify-between gap-x-3 text-sm">
                     <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">
-                      {section.heading}{' '}
+                      <Link
+                        className="hover:underline"
+                        to={`${paths.quiz(quizId, 'questions')}?section=${encodeURIComponent(section.id)}`}
+                      >
+                        {section.heading}
+                      </Link>{' '}
                       {weakest.has(section.id) && section.accuracy !== null && section.accuracy < 80 && <Badge tone="warn">Weakest</Badge>}
                     </span>
                     <span className="flex-none tabular-nums text-muted">
@@ -436,7 +547,7 @@ function LeaderboardsPanel({ boards, hiddenFromPlayers }: { boards: Results['lea
         <p className="py-4 text-sm text-muted">Nobody has finished a {board.modeName} game yet.</p>
       ) : (
         <>
-          <div className="ad-table-wrap">
+          <div className="ad-table-wrap" tabIndex={0} role="region" aria-label={`${board.modeName} leaderboard`}>
             <table className="ad-table" style={{ minWidth: 520 }}>
               <thead>
                 <tr>

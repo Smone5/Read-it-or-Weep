@@ -6,7 +6,7 @@
 // CRT tube overlay (rather than SVG <rect>s inside a filtered <g>) so iOS WebKit composites
 // transform animations smoothly on the GPU instead of freezing on static frames.
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { getHostVoiceLevel } from '../lib/hostVoice'
 
 export type HostCrtState = 'idle' | 'speaking' | 'listening' | 'happy' | 'wince' | 'thinking'
@@ -38,7 +38,8 @@ export function hostToneFor(register?: string | null): NonNullable<Props['tone']
   return 'accent'
 }
 
-const BAR_WEIGHTS = [0.55, 0.92, 0.78, 1.0, 0.84, 0.58]
+const BAR_WEIGHTS = [0.58, 0.92, 0.8, 1.0, 0.86, 0.62]
+const BAR_PHASES = [0.4, 1.7, 2.9, 0.9, 2.3, 3.6]
 
 export function HostCrt({ state = 'idle', mood = 'idle', tone = 'accent', size = 'md' }: Props) {
   const effectiveMood = state === 'happy' || state === 'wince' ? state : mood
@@ -53,12 +54,11 @@ export function HostCrt({ state = 'idle', mood = 'idle', tone = 'accent', size =
   const dim = size === 'sm' ? 'h-10 w-11' : 'h-11 w-12 sm:h-13 sm:w-14'
   const showHtmlFace = state === 'idle' || state === 'speaking' || state === 'thinking' || state === 'listening'
   const barsRef = useRef<HTMLDivElement | null>(null)
-  const [liveVu, setLiveVu] = useState(false)
+  const isSpeaking = state === 'speaking'
 
   useEffect(() => {
-    if (state !== 'speaking') {
-      setLiveVu(false)
-      const container = barsRef.current
+    const container = barsRef.current
+    if (!isSpeaking) {
       if (container) {
         Array.from(container.children).forEach((el) => {
           ;(el as HTMLElement).style.transform = ''
@@ -66,44 +66,62 @@ export function HostCrt({ state = 'idle', mood = 'idle', tone = 'accent', size =
       }
       return
     }
+
+    // Even when prefers-reduced-motion is on (common on iOS), a tiny audio level meter is a
+    // functional speech indicator rather than vestibular motion — step it calmly at ~10 Hz
+    // instead of freezing it dead.
     const reduced = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-    if (reduced) return
+    const smooth = [0.24, 0.32, 0.4, 0.4, 0.32, 0.24]
     let raf = 0
-    let activeAudio = false
+    let lastRealAudioAt = -Infinity
+    let lastDrawAt = 0
+
     const tick = (t: number) => {
-      const level = getHostVoiceLevel()
-      if (level > 0.015 && !activeAudio) {
-        activeAudio = true
-        setLiveVu(true)
-      }
-      const container = barsRef.current
-      if (activeAudio && container) {
-        for (let i = 0; i < container.children.length; i += 1) {
-          const bar = container.children[i] as HTMLElement
-          const ripple = 0.78 + 0.22 * Math.sin(t * 0.022 + i * 1.35)
-          const scale = Math.max(0.18, Math.min(1, 0.18 + level * BAR_WEIGHTS[i] * ripple * 1.15))
-          bar.style.transform = `scaleY(${scale.toFixed(3)})`
-        }
-      }
       raf = window.requestAnimationFrame(tick)
+      if (reduced && t - lastDrawAt < 95) return
+      lastDrawAt = t
+
+      const level = getHostVoiceLevel()
+      if (level > 0.01) lastRealAudioAt = t
+      // Track live voice amplitude whenever PCM/Analyser audio is active; fall back to a soft
+      // vocal cadence only for <audio> lobby previews or muted subtitle-only lines.
+      const usingRealAudio = t - lastRealAudioAt < 1200
+
+      const el = barsRef.current
+      if (!el) return
+      for (let i = 0; i < el.children.length; i += 1) {
+        let target: number
+        if (usingRealAudio) {
+          const ripple = reduced ? 0.92 : 0.76 + 0.24 * Math.sin(t * 0.019 + BAR_PHASES[i])
+          target = 0.16 + level * BAR_WEIGHTS[i] * ripple * 1.1
+        } else {
+          const syll = 0.5 + 0.5 * Math.sin(t * 0.0085 + BAR_PHASES[i]) * Math.cos(t * 0.0043 + i * 0.9)
+          target = 0.2 + syll * BAR_WEIGHTS[i] * (reduced ? 0.55 : 0.78)
+        }
+        const clamped = Math.max(0.16, Math.min(1, target))
+        smooth[i] = reduced ? clamped : smooth[i] + (clamped - smooth[i]) * 0.38
+        const bar = el.children[i] as HTMLElement
+        bar.style.transform = `translateZ(0) scaleY(${smooth[i].toFixed(3)})`
+      }
     }
+
     raf = window.requestAnimationFrame(tick)
     return () => {
       window.cancelAnimationFrame(raf)
-      const container = barsRef.current
-      if (container) {
-        Array.from(container.children).forEach((el) => {
-          ;(el as HTMLElement).style.transform = ''
+      const el = barsRef.current
+      if (el) {
+        Array.from(el.children).forEach((child) => {
+          ;(child as HTMLElement).style.transform = ''
         })
       }
     }
-  }, [state])
+  }, [isSpeaking])
 
   return (
     <div
       className={`host-crt relative flex-none ${dim}`}
       data-state={state}
-      data-vu={liveVu ? 'true' : undefined}
+      data-vu={isSpeaking ? 'true' : undefined}
       style={{ ['--crt-color' as string]: phosphor }}
       aria-hidden="true"
     >

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import re
+import zipfile
 
 from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
@@ -213,10 +214,40 @@ def rows_to_markdown(rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+MAX_ARCHIVE_ENTRIES = 2500
+MAX_UNCOMPRESSED_BYTES = 250 * 1024 * 1024
+MAX_COMPRESSION_RATIO = 120.0
+
+
+def check_ooxml_zip(data: bytes, label: str = "Office document") -> None:
+    """Validate that an OOXML (.docx/.pptx) zip archive is well-formed and not a zip bomb."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            infos = zf.infolist()
+            if len(infos) > MAX_ARCHIVE_ENTRIES:
+                raise UnreadableDocument(f"This {label} has too many archive entries to process safely.")
+            total_uncompressed = 0
+            for info in infos:
+                if info.file_size < 0:
+                    raise UnreadableDocument(f"This {label} archive is corrupted.")
+                total_uncompressed += info.file_size
+                if total_uncompressed > MAX_UNCOMPRESSED_BYTES:
+                    raise UnreadableDocument(f"This {label} expands larger than 250 MB and cannot be processed safely.")
+                if info.file_size > 1024 * 1024:
+                    compressed = max(1, info.compress_size)
+                    if (info.file_size / compressed) > MAX_COMPRESSION_RATIO:
+                        raise UnreadableDocument(f"This {label} has a suspicious compression ratio and was refused.")
+    except UnreadableDocument:
+        raise
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, ValueError, OSError) as exc:
+        raise UnreadableDocument(f"This file is not a valid {label} archive.") from exc
+
+
 def parse_docx(data: bytes, filename: str = "") -> ParsedDocument:
+    check_ooxml_zip(data, "Word (.docx) document")
     try:
         document = Document(io.BytesIO(data))
-    except (PackageNotFoundError, KeyError, ValueError, etree.XMLSyntaxError) as exc:
+    except (PackageNotFoundError, zipfile.BadZipFile, KeyError, ValueError, etree.XMLSyntaxError) as exc:
         raise UnreadableDocument(
             "This file could not be opened as a Word document. Save it as .docx (not the older .doc) and try again."
         ) from exc

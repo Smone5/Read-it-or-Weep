@@ -225,6 +225,8 @@ def _clean_branding(value: dict) -> dict:
     value["theme"] = value.get("theme") if value.get("theme") in ("dark", "light") else "dark"
     for field, limit in (("company_name", 80), ("game_title", 60), ("tagline", 140)):
         value[field] = (str(value.get(field) or defaults[field])).strip()[:limit]
+    raw_email = (str(value.get("support_email") or "")).strip()[:120]
+    value["support_email"] = raw_email or None
     return value
 
 
@@ -252,7 +254,7 @@ def _clean_host(value: dict) -> dict:
         voice = raw.get("voice") if raw.get("voice") in VOICES else DEFAULTS["host"]["hosts"][0]["voice"]
         manner = raw.get("manner") if raw.get("manner") in HOST_MANNERS else HOST_MANNERS[0]
         hosts.append({"id": host_id, "name": name, "voice": voice, "manner": manner,
-                      "style": str(raw.get("style") or "").strip()[:300]})
+                      "style": str(raw.get("style") or "").strip()[:800]})
     value["hosts"] = hosts or copy.deepcopy(DEFAULTS["host"]["hosts"][:1])
     value["name"], value["voice"] = value["hosts"][0]["name"], value["hosts"][0]["voice"]
     value["player_can_choose"] = bool(value.get("player_can_choose", True))

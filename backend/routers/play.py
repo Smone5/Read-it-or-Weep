@@ -79,6 +79,19 @@ def throttle_key(key: str, limit: int, window: int = 60) -> None:
     hits.append(now)
 
 
+def check_throttle_key(key: str, limit: int, window: int = 60, detail: str = "Too many requests. Give it a moment and try again.") -> None:
+    """Check a throttle bucket without recording a hit (paired with ``record_throttle_key`` for failure-only limits)."""
+    hits = _prune_throttle(key, window, time.monotonic())
+    if len(hits) >= limit:
+        raise HTTPException(429, detail)
+
+
+def record_throttle_key(key: str, window: int = 60) -> None:
+    now = time.monotonic()
+    hits = _prune_throttle(key, window, now)
+    hits.append(now)
+
+
 def check_failed_code_throttle(request: Request, bucket: str, limit: int = 20, window: int = 300) -> None:
     """Refuse further access-code tries from an IP that has already racked up too many *wrong* guesses."""
     key = f"{bucket}:{_client_ip(request)}"

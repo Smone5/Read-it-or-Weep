@@ -7,6 +7,7 @@ export type QuizTab = 'overview' | 'report' | 'questions' | 'play-styles' | 'res
 
 export const paths = {
   home: ADMIN_BASE,
+  defaults: `${ADMIN_BASE}/defaults`,
   branding: `${ADMIN_BASE}/branding`,
   host: `${ADMIN_BASE}/host`,
   music: `${ADMIN_BASE}/music`,

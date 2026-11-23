@@ -2,7 +2,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState, type
 import { ErrorNote } from '../components/ui'
 import { call, errorText, isAbort } from './api'
 import { Bar, ChoiceGroup, ErrorBlock, Field, LoadingBlock, Note, PageHeader, Panel, SaveBar, Segmented, Switch } from './components'
-import { useNotify, usePageTitle } from './context'
+import { useNotify, usePageTitle, useUnsavedGuard } from './context'
 import { useLoad, useMeta } from './hooks'
 import type {
   HostManner,
@@ -57,6 +57,7 @@ export default function HostPage() {
 
 const MAX_CHARACTERS = 4
 const NAME_MAX = 30
+const STYLE_MAX = 800
 const INSTRUCTIONS_MAX = 600
 
 /** A short name for each band of the scale. The fuller description comes from the server with each sample. */
@@ -165,12 +166,35 @@ function draftOf(value: HostSettings, fallbackVoice: string): Draft {
     talk_enabled: value.talk_enabled ?? true,
     custom_instructions: value.custom_instructions ?? '',
     player_can_choose: value.player_can_choose ?? true,
-    voice_quality: value.voice_quality ?? 'standard',
+    voice_quality: value.voice_quality ?? 'premium',
     pace: value.pace ?? 'snappy',
     voice_budget: value.voice_budget ?? 90,
     hosts: hosts
       .slice(0, MAX_CHARACTERS)
       .map((host) => ({ key: nextKey++, name: host.name, voice: host.voice, style: host.style ?? '', manner: host.manner ?? 'wiseguy' })),
+  }
+}
+
+/** Pure serialisation of saved HostSettings matching bodyOf(draft) without touching nextKey. */
+function savedBodyOf(value: HostSettings, fallbackVoice: string): HostSettingsWrite {
+  const hosts: { name: string; voice: string; style?: string; manner?: HostManner }[] = value.hosts?.length
+    ? value.hosts
+    : [{ name: value.name || 'Max', voice: value.voice || fallbackVoice }]
+  return {
+    sarcasm: value.sarcasm,
+    voice_enabled: value.voice_enabled,
+    talk_enabled: value.talk_enabled ?? true,
+    custom_instructions: (value.custom_instructions ?? '').trim(),
+    player_can_choose: value.player_can_choose ?? true,
+    voice_quality: value.voice_quality ?? 'premium',
+    pace: value.pace ?? 'snappy',
+    voice_budget: value.voice_budget ?? 90,
+    hosts: hosts.slice(0, MAX_CHARACTERS).map((host) => ({
+      name: host.name.trim(),
+      voice: host.voice,
+      style: (host.style ?? '').trim(),
+      manner: host.manner ?? 'wiseguy',
+    })),
   }
 }
 
@@ -251,35 +275,48 @@ function HostForm({
     return [...known, ...new Set(extra)]
   }, [voices, voiceInfo, draft.hosts])
 
-  const savedBody = useMemo(() => JSON.stringify(bodyOf(draftOf(saved, fallbackVoice))), [saved, fallbackVoice])
+  const savedBody = useMemo(() => JSON.stringify(savedBodyOf(saved, fallbackVoice)), [saved, fallbackVoice])
   const dirty = JSON.stringify(bodyOf(draft)) !== savedBody
+  useUnsavedGuard(dirty)
 
   const stopSound = useCallback(() => {
     const audio = player.current
     if (audio) {
       audio.onended = null
+      audio.onerror = null
       audio.pause()
+      audio.src = ''
     }
     player.current = null
     setPlaying(null)
   }, [])
 
-  /** Stop whatever is sounding and give up on a sample that is still on its way. */
+  /** Stop whatever is sounding and give up on any sample still in flight. */
   const cancelSample = useCallback(() => {
     request.current?.controller.abort()
     request.current = null
     stopSound()
+    setSamples((current) => {
+      if (!Object.values(current).some((sample) => sample.status === 'loading')) return current
+      const next: Record<number, Sample> = {}
+      for (const [k, sample] of Object.entries(current)) {
+        if (sample.status !== 'loading') next[Number(k)] = sample
+      }
+      return next
+    })
   }, [stopSound])
 
   useEffect(() => cancelSample, [cancelSample]) // leaving the page silences it
 
   const startSound = (audio: HTMLAudioElement, key: number, onBlocked: () => void) => {
     player.current = audio
-    audio.onended = () => {
+    const clear = () => {
       if (player.current !== audio) return
       player.current = null
       setPlaying(null)
     }
+    audio.onended = clear
+    audio.onerror = clear
     audio.play().then(
       () => {
         if (player.current === audio) setPlaying(key)
@@ -307,6 +344,7 @@ function HostForm({
     request.current = { id, controller }
 
     const audio = new Audio(SILENCE)
+    player.current = audio
     audio.play().catch(() => {}) // still inside the click: this is what lets the recording play later
 
     const body: HostSampleRequest = {
@@ -354,7 +392,12 @@ function HostForm({
       const sample = current[key]
       return sample?.status === 'ready' ? { ...current, [key]: { ...sample, blocked: false } } : current
     })
-    startSound(new Audio(source), key, () => {})
+    startSound(new Audio(source), key, () =>
+      setSamples((current) => {
+        const sample = current[key]
+        return sample?.status === 'ready' ? { ...current, [key]: { ...sample, blocked: true } } : current
+      }),
+    )
   }
 
   const change = (patch: Partial<Draft>) => {
@@ -496,16 +539,16 @@ function HostForm({
                 <div className="mt-3">
                   <Field
                     label="Anything particular about this character (optional)"
-                    hint="One extra line of direction, on top of the manner above. Use Hear a sample to judge any change by ear."
+                    hint={`${character.style.length} of ${STYLE_MAX} characters. Extra direction on top of the manner above — use Hear a sample to judge any change by ear.`}
                   >
                     {(props) => (
-                      <input
+                      <textarea
                         className="field"
                         {...props}
+                        rows={2}
                         value={character.style}
                         onChange={(event) => changeCharacter(character.key, { style: event.target.value })}
-                        maxLength={300}
-                        autoComplete="off"
+                        maxLength={STYLE_MAX}
                         placeholder="For example: a little exasperated, a laugh never far away"
                       />
                     )}
@@ -582,13 +625,14 @@ function HostForm({
           </span>
         </div>
         <p className="mt-3 text-xs text-muted">
-          Voices are listed from the lowest to the highest. The pitch and tone shown are measured from the audio; whether a voice suits your host is
-          best judged by ear.
+          ElevenLabs host voices are listed first, followed by OpenAI voices ordered from lowest to highest pitch. The pitch and tone shown are
+          measured from the audio; whether a voice suits your host is best judged by ear.
         </p>
 
         <div className="mt-3 border-t border-line pt-2">
           <Switch
             checked={draft.player_can_choose}
+            disabled={draft.hosts.length < 2}
             onChange={(checked) => change({ player_can_choose: checked })}
             label="Let players choose their host in the lobby"
             description={
@@ -670,19 +714,28 @@ function HostForm({
           <div>
             <span className="label">Quality</span>
             <ChoiceGroup label="Voice quality" options={QUALITIES} value={draft.voice_quality} onChange={(quality) => changeSound({ voice_quality: quality })} />
-            <div className="mt-4">
-              <span className="label">Save the ElevenLabs plan</span>
-              <Segmented label="Switch to the backup voice when this much of the month's plan is used" options={BUDGETS} value={String(draft.voice_budget)} onChange={(budget) => change({ voice_budget: Number(budget) })} />
-              <p className="mt-1 text-xs text-muted">
-                When this much of the month's ElevenLabs characters is used, new lines switch to the closest OpenAI voice until the count
-                starts again. Lines already recorded (round introductions, the final question) keep playing in the real voice.
-              </p>
-            </div>
           </div>
-          <div>
-            <span className="label">How fast the host talks</span>
-            <Segmented label="How fast the host talks" options={PACES} value={draft.pace} onChange={(pace) => changeSound({ pace })} />
-            <p className="mt-1 text-xs text-muted">Samples are spoken with the quality and pace chosen here.</p>
+          <div className="grid content-start gap-5">
+            <div>
+              <span className="label">How fast the host talks</span>
+              <Segmented label="How fast the host talks" options={PACES} value={draft.pace} onChange={(pace) => changeSound({ pace })} />
+              <p className="mt-1 text-xs text-muted">Samples are spoken with the quality and pace chosen here.</p>
+            </div>
+            {elevenConfigured && (
+              <div>
+                <span className="label">Save the ElevenLabs plan</span>
+                <Segmented
+                  label="Switch to the backup voice when this much of the month's plan is used"
+                  options={BUDGETS}
+                  value={String(draft.voice_budget)}
+                  onChange={(budget) => change({ voice_budget: Number(budget) })}
+                />
+                <p className="mt-1 text-xs text-muted">
+                  When this much of the month's ElevenLabs characters is used, new lines switch to the closest OpenAI voice until the count
+                  starts again. Lines already recorded (round introductions, the final question) keep playing in the real voice.
+                </p>
+              </div>
+            )}
           </div>
         </div>
       </Panel>
@@ -709,9 +762,20 @@ type VoiceUsageRead =
 
 /** How much of the ElevenLabs plan this month's games have used: the host's voice is paid for by the character. */
 function VoiceUsage() {
-  const { data, error } = useLoad<VoiceUsageRead>('/voice-usage')
+  const { data, error, refresh } = useLoad<VoiceUsageRead>('/voice-usage')
+  const [refreshing, setRefreshing] = useState(false)
   if (error) return null // the rest of the page still works
   if (!data) return null
+  const onRefresh = async () => {
+    setRefreshing(true)
+    try {
+      await refresh()
+    } catch {
+      /* keep previous data */
+    } finally {
+      setRefreshing(false)
+    }
+  }
   if (!data.configured) {
     return (
       <Panel title="Voice usage">
@@ -721,7 +785,14 @@ function VoiceUsage() {
   }
   if (data.error !== undefined) {
     return (
-      <Panel title="Voice usage">
+      <Panel
+        title="Voice usage"
+        actions={
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => void onRefresh()} disabled={refreshing}>
+            {refreshing ? 'Checking…' : 'Refresh'}
+          </button>
+        }
+      >
         <Note tone="warn">
           ElevenLabs did not say how much has been used: {data.error} If the key is not allowed to read the account, give it
           the "User: Read" permission in ElevenLabs.
@@ -732,7 +803,15 @@ function VoiceUsage() {
   const share = data.limit > 0 ? data.used / data.limit : 0
   const resets = data.resetsAt ? new Date(data.resetsAt).toLocaleDateString(undefined, { day: 'numeric', month: 'long' }) : null
   return (
-    <Panel title="Voice usage" description="The host's ElevenLabs voice is paid for by the character. This is this month's use of the plan.">
+    <Panel
+      title="Voice usage"
+      description="The host's ElevenLabs voice is paid for by the character. This is this month's use of the plan."
+      actions={
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => void onRefresh()} disabled={refreshing}>
+          {refreshing ? 'Refreshing…' : 'Refresh'}
+        </button>
+      }
+    >
       <p className="text-sm">
         <b>{data.used.toLocaleString()}</b> of {data.limit.toLocaleString()} characters used ({Math.round(share * 100)}%)
         {data.tier ? <span className="text-muted"> · {data.tier.charAt(0).toUpperCase() + data.tier.slice(1)} plan</span> : null}

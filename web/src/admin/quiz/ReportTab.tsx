@@ -19,7 +19,8 @@ export default function ReportTab() {
   const notify = useNotify()
   const { quiz, documents, sections } = detail
   const [pending, setPending] = useState<Pending | null>(null)
-  const [videoSection, setVideoSection] = useState<Section | null>(null)
+  const [videoSectionId, setVideoSectionId] = useState<string | null>(null)
+  const videoSection = videoSectionId ? sections.find((s) => s.id === videoSectionId) ?? null : null
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // "Process again" is accepted before the server marks the document as busy, so keep checking for a moment.
@@ -110,7 +111,7 @@ export default function ReportTab() {
                 sections={sections.filter((section) => section.document_id === doc.id)}
                 onReprocess={() => setPending({ action: 'reprocess', doc })}
                 onDelete={() => setPending({ action: 'delete', doc })}
-                onEditVideo={setVideoSection}
+                onEditVideo={(section) => setVideoSectionId(section.id)}
               />
             </li>
           ))}
@@ -119,9 +120,9 @@ export default function ReportTab() {
 
       <SectionVideoDialog
         section={videoSection}
-        onClose={() => setVideoSection(null)}
-        onSaved={(message) => {
-          setVideoSection(null)
+        onClose={() => setVideoSectionId(null)}
+        onSaved={(message, keepOpen) => {
+          if (!keepOpen) setVideoSectionId(null)
           notify(message)
           refresh().catch(() => {})
         }}
@@ -219,7 +220,7 @@ function Uploader() {
     }
     setBusy(true)
     setError(rejected.length > 0 ? rejected.join(' ') : null)
-    let uploaded = 0
+    const uploadedNames: string[] = []
     const failed: string[] = [...rejected]
     try {
       for (let i = 0; i < valid.length; i++) {
@@ -230,13 +231,13 @@ function Uploader() {
           body.append('file', file)
           const result = await call<{ documents: QuizDocument[] }>(`/quizzes/${quizId}/documents`, { method: 'POST', body })
           setDocuments(result.documents)
-          uploaded += 1
+          uploadedNames.push(file.name)
         } catch (reason) {
           failed.push(`${file.name}: ${errorText(reason)}`)
         }
       }
-      if (uploaded === 1) notify(`${valid[0].name} uploaded. Reading it now.`)
-      else if (uploaded > 1) notify(`${uploaded} documents uploaded. Reading them now.`)
+      if (uploadedNames.length === 1) notify(`${uploadedNames[0]} uploaded. Reading it now.`)
+      else if (uploadedNames.length > 1) notify(`${uploadedNames.length} documents uploaded. Reading them now.`)
       if (failed.length > 0) setError(failed.join(' '))
     } finally {
       setBusy(false)
@@ -451,8 +452,8 @@ function DocumentCard({
                           {section.heading}
                         </Link>
                         {vids > 0 && (
-                          <span className="ml-2 inline-flex items-center rounded bg-accent/15 px-1.5 py-0.5 text-xs font-semibold text-accent">
-                            {plural(vids, 'video clip')}
+                          <span className="ml-2 inline-flex">
+                            <Badge tone="warn">{plural(vids, 'video clip')}</Badge>
                           </span>
                         )}
                       </div>
@@ -522,7 +523,7 @@ function SectionVideoDialog({
 }: {
   section: Section | null
   onClose: () => void
-  onSaved: (message: string) => void
+  onSaved: (message: string, keepOpen?: boolean) => void
 }) {
   const [videoUrl, setVideoUrl] = useState('')
   const [videoTitle, setVideoTitle] = useState('')
@@ -530,18 +531,19 @@ function SectionVideoDialog({
   const [replaceExisting, setReplaceExisting] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const sectionId = section?.id ?? null
 
   const clips = section?.video_clips ?? (section?.video_url ? [{ url: section.video_url, title: section.video_title ?? null, count: section.videos ?? 1 }] : [])
 
   useEffect(() => {
-    if (!section) return
+    if (!sectionId) return
     setVideoUrl('')
     setVideoTitle('')
     setMaxQuestions(2)
     setReplaceExisting(false)
     setError(null)
     setSaving(false)
-  }, [section])
+  }, [sectionId])
 
   const removeClip = async (clipUrl: string, clipTitle: string | null) => {
     if (!section || saving) return
@@ -552,9 +554,10 @@ function SectionVideoDialog({
         method: 'POST',
         body: { mode: 'remove', removeUrl: clipUrl },
       })
-      onSaved(`Removed “${clipTitle || 'YouTube clip'}” from “${section.heading}”.`)
+      onSaved(`Removed “${clipTitle || 'YouTube clip'}” from “${section.heading}”.`, true)
     } catch (reason) {
       setError(errorText(reason))
+    } finally {
       setSaving(false)
     }
   }
@@ -597,7 +600,7 @@ function SectionVideoDialog({
                     <p className="truncate font-semibold">{clip.title || clip.url}</p>
                     <p className="text-xs text-muted">
                       On {plural(clip.count, 'question')} ·{' '}
-                      <a href={clip.url.replace(/#external$/i, '')} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+                      <a href={clip.url.replace(/#external$/i, '')} target="_blank" rel="noopener noreferrer" className="ad-link">
                         Open on YouTube
                       </a>
                     </p>

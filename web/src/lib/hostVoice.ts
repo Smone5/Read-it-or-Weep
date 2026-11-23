@@ -57,7 +57,9 @@ type Line = {
   /** Pieces that arrived while the phone had his audio asleep: played as soon as it wakes. */
   waiting?: ArrayBuffer[]
   /** Decoded buffers queued during a future hold so holdUntil(0) can release them immediately. */
-  heldBuffers?: AudioBuffer[]
+  heldBuffers?: { buffer: AudioBuffer; envelope: Float32Array }[]
+  /** Scheduled PCM amplitude envelopes belonging to this line (removed if the line is cut off). */
+  envelopes?: ScheduledEnvelope[]
   /** Progressive caption reveal timer for ElevenLabs full-line text chunks. */
   revealTimer?: number
 }
@@ -83,17 +85,60 @@ const voiceBuses = new WeakMap<AudioContext, AudioNode>()
 let activeAnalyser: AnalyserNode | null = null
 let analyserData: Uint8Array<ArrayBuffer> | null = null
 
-/** Live 0..1 amplitude of the host's voice bus for animating the CRT vocal meter. */
-export function getHostVoiceLevel(): number {
-  if (!activeAnalyser || !analyserData) return 0
-  activeAnalyser.getByteTimeDomainData(analyserData)
-  let sum = 0
-  for (let i = 0; i < analyserData.length; i += 1) {
-    const v = (analyserData[i] - 128) / 128
-    sum += v * v
+const ENVELOPE_BIN_SEC = 0.025 // 40 Hz RMS envelope computed directly from PCM samples (immune to iOS WebKit AnalyserNode quirks)
+type ScheduledEnvelope = { context: AudioContext; startAt: number; endAt: number; bins: Float32Array }
+const activeEnvelopes = new Set<ScheduledEnvelope>()
+
+function computeEnvelope(samples: Int16Array, sampleRate: number): Float32Array {
+  const step = Math.max(1, Math.round(sampleRate * ENVELOPE_BIN_SEC))
+  const count = Math.max(1, Math.ceil(samples.length / step))
+  const bins = new Float32Array(count)
+  for (let b = 0; b < count; b += 1) {
+    const start = b * step
+    const end = Math.min(samples.length, start + step)
+    let sum = 0
+    for (let i = start; i < end; i += 1) {
+      const v = samples[i] / 32768
+      sum += v * v
+    }
+    const rms = Math.sqrt(sum / Math.max(1, end - start))
+    bins[b] = rms < 0.006 ? 0 : Math.min(1, rms * 3.8)
   }
-  const rms = Math.sqrt(sum / analyserData.length)
-  return Math.min(1, rms * 4.2)
+  return bins
+}
+
+/** Live 0..1 amplitude of the host's voice for animating the CRT vocal meter. */
+export function getHostVoiceLevel(): number {
+  let pcmLevel = 0
+  for (const entry of activeEnvelopes) {
+    if (entry.context.state === 'closed') {
+      activeEnvelopes.delete(entry)
+      continue
+    }
+    const now = entry.context.currentTime
+    if (now > entry.endAt + 0.15) {
+      activeEnvelopes.delete(entry)
+      continue
+    }
+    if (entry.context.state === 'running' && now >= entry.startAt && now <= entry.endAt) {
+      const idx = Math.min(entry.bins.length - 1, Math.max(0, Math.floor((now - entry.startAt) / ENVELOPE_BIN_SEC)))
+      if (entry.bins[idx] > pcmLevel) pcmLevel = entry.bins[idx]
+    }
+  }
+
+  let analyserLevel = 0
+  if (activeAnalyser && analyserData) {
+    activeAnalyser.getByteTimeDomainData(analyserData)
+    let sum = 0
+    for (let i = 0; i < analyserData.length; i += 1) {
+      const v = (analyserData[i] - 128) / 128
+      sum += v * v
+    }
+    const rms = Math.sqrt(sum / analyserData.length)
+    analyserLevel = rms < 0.006 ? 0 : Math.min(1, rms * 4.2)
+  }
+
+  return Math.max(pcmLevel, analyserLevel)
 }
 
 function voiceBus(context: AudioContext): AudioNode {
@@ -112,16 +157,14 @@ function voiceBus(context: AudioContext): AudioNode {
   trim.gain.value = LEVELLER_TRIM
   lowCut.connect(leveller)
   leveller.connect(trim)
+  trim.connect(context.destination)
   if (typeof context.createAnalyser === 'function') {
     const analyser = context.createAnalyser()
     analyser.fftSize = 256
     analyser.smoothingTimeConstant = 0.65
-    trim.connect(analyser)
-    analyser.connect(context.destination)
+    trim.connect(analyser) // side-branch tap so AnalyserNode never sits in series with speaker output on iOS
     activeAnalyser = analyser
     analyserData = new Uint8Array(new ArrayBuffer(analyser.fftSize))
-  } else {
-    trim.connect(context.destination)
   }
   voiceBuses.set(context, lowCut)
   return lowCut
@@ -292,13 +335,15 @@ export class HostVoice {
           }
         })
         line.sources.clear()
+        line.envelopes?.forEach((env) => activeEnvelopes.delete(env))
+        line.envelopes = undefined
         const buffers = line.heldBuffers.splice(0)
         line.nextStart = 0
         line.heard = false
         line.seconds = 0
         const context = hostAudioContext(this.sampleRate)
         if (context.state === 'running') {
-          buffers.forEach((buf) => this.scheduleBuffer(line, buf, context))
+          buffers.forEach(({ buffer, envelope }) => this.scheduleBuffer(line, buffer, context, envelope))
         }
       }
     }
@@ -600,10 +645,11 @@ export class HostVoice {
     const buffer = context.createBuffer(1, samples.length, this.sampleRate)
     const channel = buffer.getChannelData(0)
     for (let i = 0; i < samples.length; i += 1) channel[i] = samples[i] / 32768
-    this.scheduleBuffer(line, buffer, context)
+    const envelope = computeEnvelope(samples, this.sampleRate)
+    this.scheduleBuffer(line, buffer, context, envelope)
   }
 
-  private scheduleBuffer(line: Line, buffer: AudioBuffer, context: AudioContext) {
+  private scheduleBuffer(line: Line, buffer: AudioBuffer, context: AudioContext, envelope: Float32Array) {
     if (!line.gain) {
       line.gain = context.createGain()
       line.gain.connect(voiceBus(context))
@@ -619,7 +665,10 @@ export class HostVoice {
     const hold = held ? Math.max(LEAD_IN_SEC, ((line.notBefore ?? 0) - Date.now()) / 1000) : 0
     const startAt = onTime ? line.nextStart : context.currentTime + Math.max(0.12, hold)
     if (!onTime && line.heard) line.gaps += 1
-    if (line.notBefore && !line.live) (line.heldBuffers ??= []).push(buffer)
+    if (line.notBefore && !line.live) (line.heldBuffers ??= []).push({ buffer, envelope })
+    const envEntry: ScheduledEnvelope = { context, startAt, endAt: startAt + buffer.duration, bins: envelope }
+    activeEnvelopes.add(envEntry)
+    ;(line.envelopes ??= []).push(envEntry)
     source.start(startAt)
     line.nextStart = startAt + buffer.duration
     line.seconds += buffer.duration
@@ -669,6 +718,8 @@ export class HostVoice {
     window.clearInterval(line.revealTimer)
     if (line.text) this.setLine(line.text)
     trace('host.done', { id: line.id, words: line.text.split(/\s+/).filter(Boolean).length, seconds: Math.round(line.seconds * 10) / 10, gaps: line.gaps, text: line.text })
+    line.envelopes?.forEach((env) => activeEnvelopes.delete(env))
+    line.envelopes = undefined
     if (this.sounding.size === 0) {
       this.listener.onSpeaking(false)
       duckEffects(false)
@@ -697,6 +748,8 @@ export class HostVoice {
   private drop(line: Line) {
     line.dropped = true
     line.heldBuffers = undefined
+    line.envelopes?.forEach((env) => activeEnvelopes.delete(env))
+    line.envelopes = undefined
     window.clearTimeout(line.readTimer)
     window.clearTimeout(line.speakTimer)
     window.clearTimeout(line.leadTimer)

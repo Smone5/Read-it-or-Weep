@@ -1,25 +1,24 @@
-import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { ErrorNote } from '../../components/ui'
 import { call, errorText } from '../api'
 import { ChoiceGroup, Dialog, DialogActions, Field, Note, Segmented, Switch } from '../components'
+import { plural } from '../format'
 import type { Difficulty, PictureMode, Question, QuestionKind, QuestionPatch, QuestionStatus, QuestionWrite, QuizImage, Suggestion } from '../types'
 import { useQuiz } from './context'
 import { LETTERS } from './questions'
 import { YouTubePicker } from './YouTubePicker'
 
-// Limits the server enforces (QuestionWrite and SuggestRequest in admin.py). Editing a question
-// with text outside these limits makes the server fail without a readable message, so they are
-// checked here first.
 const TEXT_MIN = 8
 const TEXT_MAX = 300
 const ANSWER_MAX = 110
 const TITLE_MAX = 60
 const EXPLANATION_MAX = 500
 
+type VisualMode = 'none' | 'question' | 'reveal'
+
 type Form = {
   kind: QuestionKind
   text: string
-  /** Always four entries. */
   options: string[]
   correctIndex: number
   isTrue: boolean | null
@@ -33,10 +32,12 @@ type Form = {
   explanation: string
   videoUrl: string
   videoTitle: string
+  clearFlags: boolean
 }
 
-function initialForm(question: Question | null): Form {
-  if (!question) {
+function initialForm(question: Question | null, duplicateOf?: Question | null): Form {
+  const source = question ?? duplicateOf ?? null
+  if (!source) {
     return {
       kind: 'mcq',
       text: '',
@@ -53,26 +54,28 @@ function initialForm(question: Question | null): Form {
       explanation: '',
       videoUrl: '',
       videoTitle: '',
+      clearFlags: false,
     }
   }
-  const options = [...(question.options ?? [])]
+  const options = [...(source.options ?? [])]
   while (options.length < 4) options.push('')
   return {
-    kind: question.kind,
-    text: question.text,
+    kind: source.kind,
+    text: source.text,
     options: options.slice(0, 4),
-    correctIndex: question.correctIndex ?? 0,
-    isTrue: question.isTrue,
-    sectionId: question.sectionId ?? '',
-    imageId: question.imageId ?? '',
-    revealImageId: question.revealImageId ?? '',
-    difficulty: question.difficulty,
-    pinned: question.pinned,
-    status: question.status,
-    title: question.title ?? '',
-    explanation: question.explanation ?? '',
-    videoUrl: question.videoUrl ?? '',
-    videoTitle: question.videoTitle ?? '',
+    correctIndex: source.correctIndex ?? 0,
+    isTrue: source.isTrue,
+    sectionId: source.sectionId ?? '',
+    imageId: source.imageId ?? '',
+    revealImageId: source.revealImageId ?? '',
+    difficulty: source.difficulty,
+    pinned: question ? source.pinned : false,
+    status: question ? source.status : 'approved',
+    title: source.title ?? '',
+    explanation: source.explanation ?? '',
+    videoUrl: source.videoUrl ?? '',
+    videoTitle: source.videoTitle ?? '',
+    clearFlags: Boolean(question && question.flags > 0),
   }
 }
 
@@ -91,10 +94,6 @@ function problemWith(form: Form): string | null {
   return null
 }
 
-/**
- * Only what changed. This matters: sending the wording or the answers at all marks an
- * AI question as "edited", so an untouched question must not send them.
- */
 function patchFrom(question: Question, form: Form): QuestionPatch {
   const patch: QuestionPatch = {}
   if (form.text.trim() !== question.text) patch.text = form.text.trim()
@@ -114,9 +113,15 @@ function patchFrom(question: Question, form: Form): QuestionPatch {
   if (form.status !== question.status) patch.status = form.status
   if ((form.sectionId || null) !== question.sectionId) patch.sectionId = form.sectionId || null
   if (question.kind === 'mcq') {
-    if ((form.imageId || null) !== question.imageId) patch.imageId = form.imageId || null
+    const lostPictureConvertedToText = question.sourceType === 'image' && !question.imageId && !form.imageId
+    if ((form.imageId || null) !== question.imageId || (lostPictureConvertedToText && form.status === 'approved')) {
+      patch.imageId = form.imageId || null
+    }
     const nextReveal = form.imageId ? null : form.revealImageId || null
     if (nextReveal !== (question.revealImageId ?? null)) patch.revealImageId = nextReveal
+  }
+  if (question.flags > 0 && form.clearFlags && patch.status !== 'approved') {
+    patch.clearFlags = true
   }
   return patch
 }
@@ -138,6 +143,12 @@ const KINDS = [
   { value: 'fact_fake', label: 'Fact or Fake' },
 ] as const
 
+const VISUAL_MODES: { value: VisualMode; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'question', label: 'Ask about this picture' },
+  { value: 'reveal', label: 'Show on answer reveal' },
+]
+
 const STATUS_EDIT: { value: QuestionStatus; label: string }[] = [
   { value: 'approved', label: 'Live' },
   { value: 'pending', label: 'Pending' },
@@ -154,33 +165,36 @@ const VERDICTS = [
   { value: 'fake', label: 'Fake', description: 'One detail has been changed, so it is false.' },
 ] as const
 
-/** Add a question by hand, or edit an existing one. Pass `question = null` to add. */
+/** Add a question by hand, edit an existing one, or duplicate one into a fresh manual question. */
 export default function QuestionEditor({
   question,
+  duplicateOf = null,
   images,
   onClose,
   onSaved,
 }: {
   question: Question | null
+  duplicateOf?: Question | null
   images: QuizImage[]
   onClose: () => void
   onSaved: (message: string) => void
 }) {
   const { detail, meta } = useQuiz()
   const quizId = detail.quiz.id
-  const [start] = useState(() => initialForm(question))
+  const [start] = useState(() => initialForm(question, duplicateOf))
   const [form, setForm] = useState<Form>(start)
+  const [visualMode, setVisualMode] = useState<VisualMode>(() =>
+    start.imageId ? 'question' : start.revealImageId ? 'reveal' : 'none',
+  )
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [suggesting, setSuggesting] = useState(false)
   const [suggested, setSuggested] = useState<Suggestion | null>(null)
-  /** The question and correct answer the last suggestion was made for. */
   const [suggestedFor, setSuggestedFor] = useState<string | null>(null)
   const [suggestError, setSuggestError] = useState<string | null>(null)
   const [confirmingClose, setConfirmingClose] = useState(false)
   const keepEditing = useRef<HTMLButtonElement>(null)
 
-  // The "close without saving?" question appears at the foot of a long form; bring it to the person.
   useEffect(() => {
     if (!confirmingClose) return
     keepEditing.current?.scrollIntoView({ block: 'nearest' })
@@ -191,13 +205,19 @@ export default function QuestionEditor({
   const adding = question === null
   const busy = saving || suggesting
   const dirty = JSON.stringify(form) !== JSON.stringify(start)
-  const picture = images.find((image) => image.id === form.imageId) ?? null
-  const revealPicture = images.find((image) => image.id === form.revealImageId) ?? null
+  const selectedVisualId = visualMode === 'question' ? form.imageId : visualMode === 'reveal' ? form.revealImageId : ''
+  const selectedVisual = images.find((image) => image.id === selectedVisualId) ?? null
   const correctAnswer = form.options[form.correctIndex]?.trim() ?? ''
   const canSuggest = form.text.trim().length >= TEXT_MIN && correctAnswer.length > 0
-  // The AI's verdict is about one particular question and answer; once either is reworded it no longer applies.
   const asked = `${form.text.trim()}\n${correctAnswer}`
   const verdict = suggested && suggestedFor === asked ? suggested : null
+
+  const { sectionImages, otherImages } = useMemo(() => {
+    if (!form.sectionId) return { sectionImages: [] as QuizImage[], otherImages: images }
+    const matching = images.filter((img) => img.sectionId === form.sectionId)
+    const rest = images.filter((img) => img.sectionId !== form.sectionId)
+    return { sectionImages: matching, otherImages: rest }
+  }, [images, form.sectionId])
 
   const set = (patch: Partial<Form>) => {
     setForm((current) => ({ ...current, ...patch }))
@@ -206,7 +226,23 @@ export default function QuestionEditor({
 
   const setOption = (index: number, value: string) => set({ options: form.options.map((option, at) => (at === index ? value : option)) })
 
-  // Closing by accident (a stray click outside, the Escape key) should not throw away typing.
+  const changeVisualMode = (nextMode: VisualMode) => {
+    setVisualMode(nextMode)
+    const activeId = form.imageId || form.revealImageId || sectionImages[0]?.id || ''
+    if (nextMode === 'none') {
+      set({ imageId: '', revealImageId: '' })
+    } else if (nextMode === 'question') {
+      set({ imageId: activeId, revealImageId: '' })
+    } else {
+      set({ imageId: '', revealImageId: activeId })
+    }
+  }
+
+  const pickVisual = (id: string) => {
+    if (visualMode === 'question') set({ imageId: id, revealImageId: '' })
+    else if (visualMode === 'reveal') set({ imageId: '', revealImageId: id })
+  }
+
   const requestClose = () => {
     if (busy) return
     if (dirty) setConfirmingClose(true)
@@ -232,8 +268,6 @@ export default function QuestionEditor({
         slots.forEach((slot, at) => {
           if (wrong[at]) options[slot] = wrong[at]
         })
-        // A title or explanation the person typed themselves is theirs to keep; one from an
-        // earlier suggestion is replaced by the new one.
         const mine = (value: string, earlier: string | undefined) => value.trim() !== '' && value !== earlier
         return {
           ...current,
@@ -266,7 +300,7 @@ export default function QuestionEditor({
         const patch = patchFrom(question, form)
         const changed = Object.keys(patch).length > 0
         if (changed) await call(`/questions/${question.id}`, { method: 'PATCH', body: patch })
-        onSaved(changed ? 'Question updated.' : 'Nothing was changed.')
+        onSaved(changed ? (patch.clearFlags ? 'Question updated and player flags cleared.' : 'Question updated.') : 'Nothing was changed.')
       } else {
         const mcq = form.kind === 'mcq'
         const body: QuestionWrite = {
@@ -281,7 +315,7 @@ export default function QuestionEditor({
           videoTitle: form.videoTitle.trim() || null,
           difficulty: form.difficulty,
           sectionId: form.sectionId || null,
-          imageId: mcq ? form.imageId || null : null, // the game never shows a picture with a Fact-or-Fake statement
+          imageId: mcq ? form.imageId || null : null,
           revealImageId: mcq && !form.imageId ? form.revealImageId || null : null,
           pinned: form.pinned,
           status: form.status,
@@ -296,8 +330,33 @@ export default function QuestionEditor({
   }
 
   return (
-    <Dialog open onClose={requestClose} title={adding ? 'Add a question' : 'Edit question'} wide>
+    <Dialog open onClose={requestClose} title={adding ? (duplicateOf ? 'Duplicate question' : 'Add a question') : 'Edit question'} wide>
       <form className="grid gap-5" onSubmit={submit}>
+        {question && question.flags > 0 && (
+          <Note tone="bad">
+            <strong className="block">{plural(question.flags, 'player')} flagged this question</strong>
+            {question.flagReasons.length > 0 ? (
+              <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                {question.flagReasons.map((reason, idx) => (
+                  <li key={idx} className="[overflow-wrap:anywhere]">
+                    {reason}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-1">No specific reason was written.</p>
+            )}
+            <div className="mt-2 border-t border-line/60 pt-2">
+              <Switch
+                checked={form.clearFlags}
+                onChange={(clearFlags) => set({ clearFlags })}
+                label={`Clear player flag${question.flags === 1 ? '' : 's'} on save`}
+                disabled={busy}
+              />
+            </div>
+          </Note>
+        )}
+
         {adding ? (
           <div>
             <span className="label">Kind of question</span>
@@ -341,7 +400,7 @@ export default function QuestionEditor({
                 const correct = form.correctIndex === index
                 return (
                   <div key={index} className="flex items-center gap-2">
-                    <label className="-ml-2 grid h-10 w-10 flex-none cursor-pointer place-items-center" title="Mark as the correct answer">
+                    <label className="-ml-2 grid h-11 w-11 flex-none cursor-pointer place-items-center" title="Mark as the correct answer">
                       <input
                         type="radio"
                         name={radioName}
@@ -441,65 +500,64 @@ export default function QuestionEditor({
         </div>
 
         {form.kind === 'mcq' && images.length > 0 && (
-          <fieldset>
-            <legend className="label">Question picture from the report (optional)</legend>
-            <p className="mb-2 text-xs text-muted">
-              Shown <strong>while players answer</strong> (turns this into a Picture question).
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <button type="button" className="ad-thumb h-[72px] w-24" aria-pressed={form.imageId === ''} onClick={() => set({ imageId: '' })}>
-                <span className="grid h-full place-items-center text-xs text-muted">No picture</span>
-              </button>
-              {images.map((image) => (
-                <button
-                  key={image.id}
-                  type="button"
-                  className="ad-thumb h-[72px] w-24"
-                  aria-pressed={form.imageId === image.id}
-                  aria-label={image.label}
-                  title={image.label}
-                  onClick={() => set({ imageId: image.id, revealImageId: '' })}
-                >
-                  <img src={image.url} alt="" loading="lazy" />
-                </button>
-              ))}
-            </div>
-            {picture && (
-              <p className="mt-2 text-xs text-muted">
-                <span className="font-semibold text-ink">{picture.label}</span> {PICTURE_NOTE[detail.rules.picture_mode]}
-              </p>
-            )}
-          </fieldset>
-        )}
-
-        {form.kind === 'mcq' && !form.imageId && images.length > 0 && (
-          <fieldset>
-            <legend className="label">Answer reveal exhibit (optional)</legend>
-            <p className="mb-2 text-xs text-muted">
-              Shown <strong>only after answering</strong> to prove or illustrate the answer (leave as None if no chart directly backs up this fact).
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <button type="button" className="ad-thumb h-[64px] w-24" aria-pressed={form.revealImageId === ''} onClick={() => set({ revealImageId: '' })}>
-                <span className="grid h-full place-items-center text-xs text-muted">None</span>
-              </button>
-              {images.map((image) => (
-                <button
-                  key={image.id}
-                  type="button"
-                  className="ad-thumb h-[64px] w-24"
-                  aria-pressed={form.revealImageId === image.id}
-                  aria-label={image.label}
-                  title={image.label}
-                  onClick={() => set({ revealImageId: image.id })}
-                >
-                  <img src={image.url} alt="" loading="lazy" />
-                </button>
-              ))}
-            </div>
-            {revealPicture && (
-              <p className="mt-2 text-xs text-muted">
-                <span className="font-semibold text-ink">{revealPicture.label}</span> — revealed alongside the explanation after players answer.
-              </p>
+          <fieldset className="rounded-lg border border-line bg-surface-2/40 p-3.5">
+            <legend className="label">Visual from the report (optional)</legend>
+            <Segmented label="Visual placement" options={VISUAL_MODES} value={visualMode} onChange={changeVisualMode} disabled={busy} />
+            {visualMode !== 'none' && (
+              <div className="mt-3 grid gap-3">
+                {sectionImages.length > 0 && (
+                  <div>
+                    <p className="mb-1.5 text-xs font-semibold text-muted">From this section ({sectionImages.length})</p>
+                    <div className="flex flex-wrap gap-2">
+                      {sectionImages.map((image) => (
+                        <button
+                          key={image.id}
+                          type="button"
+                          className="ad-thumb h-[68px] w-24"
+                          aria-pressed={selectedVisualId === image.id}
+                          aria-label={image.label}
+                          title={image.label}
+                          onClick={() => pickVisual(image.id)}
+                        >
+                          <img src={image.url} alt="" loading="lazy" />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {otherImages.length > 0 && (
+                  <div>
+                    {sectionImages.length > 0 && (
+                      <p className="mb-1.5 text-xs font-semibold text-muted">Other report images ({otherImages.length})</p>
+                    )}
+                    <div className="flex flex-wrap gap-2">
+                      {otherImages.map((image) => (
+                        <button
+                          key={image.id}
+                          type="button"
+                          className="ad-thumb h-[68px] w-24"
+                          aria-pressed={selectedVisualId === image.id}
+                          aria-label={image.label}
+                          title={image.label}
+                          onClick={() => pickVisual(image.id)}
+                        >
+                          <img src={image.url} alt="" loading="lazy" />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {selectedVisual ? (
+                  <p className="text-xs text-muted">
+                    <span className="font-semibold text-ink">{selectedVisual.label}</span> —{' '}
+                    {visualMode === 'question'
+                      ? PICTURE_NOTE[detail.rules.picture_mode]
+                      : 'Revealed alongside the explanation after players answer.'}
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted">Click a thumbnail above to attach it.</p>
+                )}
+              </div>
             )}
           </fieldset>
         )}

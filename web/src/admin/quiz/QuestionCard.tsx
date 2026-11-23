@@ -4,23 +4,30 @@ import type { Question } from '../types'
 import { LETTERS, originLabel, questionType, SKILL_LABEL, TYPE_LABEL } from './questions'
 
 export type QuestionActions = {
-  onSelect: (question: Question, selected: boolean) => void
+  onSelect: (question: Question, selected: boolean, shiftKey: boolean) => void
   onStatus: (question: Question, status: 'approved' | 'rejected') => void
+  onDismissFlags: (question: Question) => void
   onPin: (question: Question, pinned: boolean) => void
   onEdit: (question: Question) => void
+  onDuplicate: (question: Question) => void
   onDelete: (question: Question) => void
   onPreview: (question: Question) => void
+  onPlayerPreview: (question: Question) => void
 }
 
 /** One question in the bank: what players see, the right answer, how it is doing, and what you can do with it. */
 export default function QuestionCard({
   question,
   selected,
+  focused = false,
+  expandExplanation = false,
   busy,
   actions,
 }: {
   question: Question
   selected: boolean
+  focused?: boolean
+  expandExplanation?: boolean
   busy: boolean
   actions: QuestionActions
 }) {
@@ -28,60 +35,65 @@ export default function QuestionCard({
   const type = questionType(question)
   const struggling = question.accuracy !== null && question.served >= 3 && question.accuracy < 30
   const lostPicture = question.sourceType === 'image' && !question.imageId
+  const metaSummary = [TYPE_LABEL[type], DIFFICULTY_LABEL[question.difficulty], SKILL_LABEL[question.skill], originLabel(question)].join(' · ')
 
   return (
-    <article className="card ad-question p-3 sm:p-4" data-selected={selected} data-status={question.status}>
+    <article
+      className="card ad-question p-3 sm:p-4"
+      data-selected={selected}
+      data-status={question.status}
+      style={focused ? { boxShadow: '0 0 0 2px var(--brand)' } : undefined}
+    >
       <div className="flex items-start gap-2 sm:gap-3">
-        <label className="-ml-2 -mt-1.5 grid h-10 w-10 flex-none cursor-pointer place-items-center">
+        <label className="-ml-2 -mt-1.5 grid h-11 w-11 flex-none cursor-pointer place-items-center">
           <input
             type="checkbox"
             checked={selected}
-            onChange={(event) => actions.onSelect(question, event.target.checked)}
+            onClick={(event) => {
+              if (event.shiftKey) {
+                event.preventDefault()
+                actions.onSelect(question, !selected, true)
+              }
+            }}
+            onChange={(event) => actions.onSelect(question, event.target.checked, false)}
             aria-label={`Select the question: ${question.text}`}
           />
         </label>
 
         <div className="ad-question-body min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Badge tone={status.tone}>{status.label}</Badge>
-            <Badge tone={question.origin === 'manual' ? 'brand' : 'neutral'}>{originLabel(question)}</Badge>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            {question.status !== 'approved' && <Badge tone={status.tone}>{status.label}</Badge>}
             {question.pinned && (
               <Badge tone="brand" title="Pinned questions are asked before the others">
                 Pinned
               </Badge>
             )}
-            <Badge>{TYPE_LABEL[type]}</Badge>
-            <Badge>{DIFFICULTY_LABEL[question.difficulty]}</Badge>
-            <Badge title={question.skill === 'recall' ? 'Tests remembering a detail' : 'Tests understanding what it means'}>
-              {SKILL_LABEL[question.skill]}
-            </Badge>
+            {question.flags > 0 && <Badge tone="bad">Flagged ({question.flags})</Badge>}
             {question.videoUrl && (
               <Badge tone="info" title={question.videoTitle || question.videoUrl}>
-                Video{question.videoTitle ? `: ${question.videoTitle.slice(0, 28)}${question.videoTitle.length > 28 ? '…' : ''}` : ''}
+                Video{question.videoTitle ? `: ${question.videoTitle.slice(0, 26)}${question.videoTitle.length > 26 ? '…' : ''}` : ''}
               </Badge>
             )}
-            {!question.imageUrl && question.revealImageUrl && (
-              <Badge tone="neutral" title="Shows a supporting chart or diagram on answer reveal">
-                Reveal visual
-              </Badge>
-            )}
-            {question.flags > 0 && <Badge tone="bad">Flagged by {plural(question.flags, 'player')}</Badge>}
+            <span className="text-xs text-muted">{metaSummary}</span>
           </div>
 
           <div className="mt-2 flex items-start gap-3">
             <div className="min-w-0 flex-1">
               {question.title && <p className="text-xs font-bold uppercase tracking-wide text-muted">{question.title}</p>}
-              <p className="text-[15px] font-semibold leading-snug [overflow-wrap:anywhere]">{question.text}</p>
+              <h3 className="text-[15px] font-semibold leading-snug [overflow-wrap:anywhere]">{question.text}</h3>
             </div>
             {(question.imageUrl || question.revealImageUrl) && (
               <button
                 type="button"
-                className="ad-thumb h-16 w-24 flex-none"
+                className="ad-thumb relative h-16 w-24 flex-none"
                 onClick={() => actions.onPreview(question)}
                 aria-label={question.imageUrl ? 'Show the picture for this question larger' : 'Show the answer reveal visual larger'}
                 title={question.imageUrl ? 'Question picture' : 'Answer reveal visual'}
               >
                 <img src={question.imageUrl ?? question.revealImageUrl ?? ''} alt="" loading="lazy" />
+                <span className="pointer-events-none absolute bottom-1 right-1 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+                  {question.imageUrl ? 'Question' : 'Reveal'}
+                </span>
               </button>
             )}
           </div>
@@ -118,13 +130,12 @@ export default function QuestionCard({
           )}
 
           {(question.explanation || question.sourceQuote) && (
-            <details className="mt-2">
+            <details className="mt-2" open={expandExplanation || undefined}>
               <summary className="cursor-pointer py-1 text-sm text-muted">Why this is the answer</summary>
               <div className="mt-1 grid gap-2 rounded-lg bg-surface-2 p-3 text-sm">
                 {question.explanation && <p>{question.explanation}</p>}
                 {question.sourceQuote && (
                   <p className="text-muted">
-                    {/* For a question written about a picture, the "quote" says where in the picture to look. */}
                     <span className="font-semibold">{question.sourceType === 'image' ? 'Where to look: ' : 'From the report: '}</span>
                     {question.sourceType === 'image' ? question.sourceQuote : `“${question.sourceQuote}”`}
                   </p>
@@ -174,23 +185,25 @@ export default function QuestionCard({
           {lostPicture && (
             <Note tone="warn">
               <strong>This picture question has lost its picture</strong> (the report was processed again). Edit it to choose a picture again,
-              reword it so it makes sense on its own, or delete it.
+              switch it to text-only, or delete it before approving.
             </Note>
           )}
         </div>
       )}
 
-      <div className="mt-3 flex flex-wrap justify-end gap-2 border-t border-line pt-3">
-        {question.status !== 'approved' && (
-          <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => actions.onStatus(question, 'approved')}>
-            Approve
-          </button>
-        )}
-        {question.status !== 'rejected' && (
-          <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => actions.onStatus(question, 'rejected')}>
-            Reject
-          </button>
-        )}
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line pt-3">
+        <button type="button" className="btn btn-danger btn-sm mr-auto" disabled={busy} onClick={() => actions.onDelete(question)}>
+          Delete
+        </button>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => actions.onPlayerPreview(question)}>
+          Preview
+        </button>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => actions.onDuplicate(question)}>
+          Duplicate
+        </button>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => actions.onEdit(question)}>
+          Edit
+        </button>
         <button
           type="button"
           className="btn btn-ghost btn-sm"
@@ -200,12 +213,27 @@ export default function QuestionCard({
         >
           {question.pinned ? 'Unpin' : 'Pin'}
         </button>
-        <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => actions.onEdit(question)}>
-          Edit
-        </button>
-        <button type="button" className="btn btn-danger btn-sm" disabled={busy} onClick={() => actions.onDelete(question)}>
-          Delete
-        </button>
+        {question.status === 'approved' && question.flags > 0 && (
+          <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => actions.onDismissFlags(question)}>
+            Dismiss flag{question.flags === 1 ? '' : 's'}
+          </button>
+        )}
+        {question.status !== 'rejected' && (
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => actions.onStatus(question, 'rejected')}>
+            Reject
+          </button>
+        )}
+        {question.status !== 'approved' && (
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            disabled={busy || lostPicture}
+            title={lostPicture ? 'Choose a picture or convert to text-only in Edit before approving' : undefined}
+            onClick={() => actions.onStatus(question, 'approved')}
+          >
+            Approve
+          </button>
+        )}
       </div>
     </article>
   )
