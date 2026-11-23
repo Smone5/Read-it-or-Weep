@@ -79,11 +79,12 @@ DEFAULTS: dict[str, dict[str, Any]] = {
              "style": "Razor-sharp and bone-dry, mildly exasperated: the funniest person in the room, finally "
                       "handed a microphone. Understated British wit where a flat pause does the heavy lifting."},
             {"id": "june", "name": "June", "voice": "eleven:southern", "manner": "wiseguy",
-             "style": "Unmistakably Southern through and through — write EVERY line in warm, sassy Southern American "
-                      "speech, rhythm, and idioms: 'y'all', 'well now', 'bless your heart', 'sugar', 'darlin'', "
-                      "'hold your horses', 'fixin' to', 'Lord have mercy', 'reckon', 'hot dog', 'sweet tea', and "
-                      "homespun porch-swing zingers. Big-hearted, honeyed, and sharp as a tack — she teases like "
-                      "your funniest Southern aunt and cheers every right answer like a Friday-night touchdown."},
+             "style": "Authentic South Carolina Southern (Charleston Lowcountry / Midlands) — speak with a warm, "
+                      "melodic South Carolina drawl and unhurried, gracious-yet-sharp cadence. Use natural Carolinian "
+                      "speech and idioms ('y'all', 'well now', 'I tell you what', 'fixin' to', 'reckon', 'hold on now', "
+                      "'all right now', 'ain't that somethin'', 'Lord have mercy', and an occasional polite-sting 'bless "
+                      "your heart'). NEVER call people 'sugar', 'honey', 'sweetie', or 'darlin'' — use their name, "
+                      "'y'all', or 'folks', and avoid cartoon cowboy/Texan clichés."},
             {"id": "dex", "name": "Dex", "voice": "eleven:hype", "manner": "showman",
              "style": "Young, quick and hyped: every right answer is a buzzer-beater highlight reel, every wrong one "
                       "an instant-replay blooper."},

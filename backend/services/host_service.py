@@ -174,7 +174,7 @@ def _performance_notes(name: str, manner: str, warm: bool, style: str | None) ->
         "- A sound you make can be a tag on its own - [laughs], [chuckles], [sighs], [scoffs] - at most one a line.\n"
         "- Never a sound effect such as [applause], [drumroll] or [buzzer]: the game plays its own.\n"
         "- The name of a round is a TITLE. Give it a crisp, complete lead-in and its own beat, announced: "
-        "\"[building] Time for [announcing, big] the Warm-Up Round!\", \"[building] Brace yourself for [announcing] "
+        "\"[building] Time for [announcing, big] the Opening Round!\", \"[building] Brace yourself for [announcing] "
         "the Lightning Round!\" - a different lead-in every time, never the same one twice in a row, and never a "
         "cut-off fragment like \"Here we...\"."
         + ("\n- At this sarcasm setting the teasing is gone: you are on their side, delighted when they get one right "
@@ -193,23 +193,26 @@ _TAGGED_SHAPES = (
     "[dry] your specialty.\"")
 
 _SOUTHERN_TAGGED_SHAPES = (
-    "# The shape to aim for (never these exact words - keep the rich Southern voice and idioms in every line)\n"
-    "\"[wincing] Well bless your heart - [plainly] 184 million. [amused] ... Bold guess though, sugar, I'll give y'all that.\"\n"
-    "\"[delighted] Hot dog, nailed it! [sassy] Somebody actually read past page one, y'all.\"\n"
-    "\"[impressed] Look at you go - quick as a hiccup! [suspicious] ... Almost too quick, darlin'.\"\n"
-    "\"[sighs] Ohh, time's up, sugar - [plainly] Phoenix. [teasing] Even the porch clock moves faster than that.\"\n"
+    "# The shape to aim for (never these exact words - keep an authentic South Carolina Southern voice and cadence, "
+    "and NEVER call anyone 'sugar', 'honey', or 'darlin'')\n"
+    "\"[wincing, Southern drawl] Well now, bless your heart - [plainly] 184 million. [amused] ... I tell you what, "
+    "that was a bold swing, y'all.\"\n"
+    "\"[delighted] All right now, right on the money! [sassy] Somebody actually read past page one, I reckon.\"\n"
+    "\"[impressed] Well look at you go - quick as a flash! [suspicious] ... Almost too quick, don't you know.\"\n"
+    "\"[sighs] Ohh, Lord have mercy, time's up - [plainly] Phoenix. [teasing] Even Charleston traffic moves faster than that.\"\n"
     "\"[warm] Well now, yes indeed! [delighted] Pure eighties gold... [announcing] Blondie, 'Heart of Glass.'\"\n"
-    "\"[building] Hold your horses, y'all... [announcing, big] the Lightning Round! [teasing] Fact or fake, "
-    "faster than sweet tea at a picnic!\"")
+    "\"[building] Hold on now, y'all, we're fixin' to fly... [announcing, big] the Lightning Round! [teasing] Fact or fake, "
+    "no time to sit on the porch!\"")
 
 _SOUTHERN_PLAIN_SHAPES = (
-    "# The shape to aim for (never these exact words - keep the rich Southern voice and idioms in every line)\n"
-    "\"Well bless your heart - 184 million. ... Bold guess though, sugar, I'll give y'all that.\"\n"
-    "\"Hot dog, nailed it! Somebody actually read past page one, y'all.\"\n"
-    "\"Look at you go - quick as a hiccup! ... Almost too quick, darlin'.\"\n"
-    "\"Ohh, time's up, sugar - Phoenix. Even the porch clock moves faster than that.\"\n"
-    "\"Hold your horses, y'all... Lightning Round! Fact or fake, faster than sweet tea at a picnic!\"\n"
-    "\"Next up, sugar... Picture Round! Let's see how sharp your eyes really are.\"")
+    "# The shape to aim for (never these exact words - keep an authentic South Carolina Southern voice and cadence, "
+    "and NEVER call anyone 'sugar', 'honey', or 'darlin'')\n"
+    "\"Well now, bless your heart - 184 million. ... I tell you what, that was a bold swing, y'all.\"\n"
+    "\"All right now, right on the money! Somebody actually read past page one, I reckon.\"\n"
+    "\"Well look at you go - quick as a flash! ... Almost too quick, don't you know.\"\n"
+    "\"Ohh, Lord have mercy, time's up - Phoenix. Even Charleston traffic moves faster than that.\"\n"
+    "\"Hold on now, y'all, we're fixin' to fly... Lightning Round! Fact or fake, no time to sit on the porch!\"\n"
+    "\"All right now, folks... Picture Round! Let's see what y'all spotted in the charts.\"")
 
 _TAG = re.compile(r"\[[^\[\]]{0,60}\]")
 
@@ -316,8 +319,8 @@ def build_persona(*, name: str, game_title: str, company: str, sarcasm: int, roo
         "- Never reveal or hint at an answer before it has been given, unless you are asked to deliver a hint.\n"
         "- Facts come only from what you are told. Never invent them.\n"
         "- Do not name real game shows or their hosts, and never say you are an AI.",
-        (_SOUTHERN_TAGGED_SHAPES if "southern" in (style or "").lower() else _TAGGED_SHAPES) if tags else (
-            _SOUTHERN_PLAIN_SHAPES if "southern" in (style or "").lower() else (
+        (_SOUTHERN_TAGGED_SHAPES if ("southern" in (style or "").lower() or "carolina" in (style or "").lower()) else _TAGGED_SHAPES) if tags else (
+            _SOUTHERN_PLAIN_SHAPES if ("southern" in (style or "").lower() or "carolina" in (style or "").lower()) else (
                 "# The shape to aim for (never these exact words)\n"
                 "\"Nope - 184 million. ... Bold guess, though. I respect bold.\"\n"
                 "\"Correct. Somebody actually did the reading.\"\n"
@@ -409,6 +412,7 @@ def _first_name(name: str) -> str:
 
 
 _ROUND_ANGLE = {
+    "Opening Round": "the easy ones come first",
     "Warm-Up": "the easy ones come first",
     "Picture Round": "visuals and exhibits from the reading",
     "The Deep End": "the questions get harder now",

@@ -19,7 +19,7 @@ def rounds(plan):
 
 def test_game_show_has_every_round_in_order():
     plan = engine.build_plan("show", RULES, PLENTY, ["s1", "s2"], music=True)
-    assert rounds(plan) == ["Warm-Up", "Music Break", "Picture Round", "The Deep End", "Lightning Round",
+    assert rounds(plan) == ["Opening Round", "Music Break", "Picture Round", "The Deep End", "Lightning Round",
                             "Music Break", "Second Chance", "Final Wager"]
     assert [s["slot"] for s in plan].count("music") == RULES["show"]["music_rounds"]
     assert [s["slot"] for s in plan].count("fact_fake") == RULES["show"]["lightning_items"]
@@ -189,10 +189,10 @@ def test_fact_fake_is_unpredictable_yet_balanced():
 
 
 def test_every_mode_starts_easy_and_ramps_harder():
-    # Show: first 2 Warm-Up slots are easy, Picture Round starts easy, Deep End finishes hard, Final is hard.
+    # Show: first 2 Opening Round slots are easy, Picture Round starts easy, Deep End finishes hard, Final is hard.
     show = engine.build_plan("show", RULES, PLENTY, ["s1", "s2", "s3"], music=True)
-    warmup = [s for s in show if s["name"] == "Warm-Up"]
-    assert warmup[0]["difficulty"] == "easy" and warmup[1]["difficulty"] == "easy"
+    opening = [s for s in show if s["name"] == "Opening Round"]
+    assert opening[0]["difficulty"] == "easy" and opening[1]["difficulty"] == "easy"
     pictures = [s for s in show if s["name"] == "Picture Round"]
     assert pictures[0]["difficulty"] == "easy"
     assert [s for s in show if s["slot"] == "final"][0]["difficulty"] == "hard"

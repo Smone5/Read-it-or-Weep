@@ -46,7 +46,7 @@ OUT = Path(__file__).resolve().parents[2] / "samples" / "out"
 MOMENTS = [
     ("Opening the show",
      "Open the show. The contestant is Sam, and this is their first game. Welcome them in ten words or fewer, then announce "
-     "the first round by its name - \"Warm-Up!\" - and stop. Under 16 words in total. Do not explain the rules."),
+     "the first round by its name - \"Opening Round!\" - and stop. Under 16 words in total. Do not explain the rules."),
     ("A wrong answer",
      "Question: \"What was quarterly revenue?\" Correct answer: \"184 million dollars\". This is their first answer of the "
      "game. Sam answered \"148 million dollars\", which is WRONG. React: verdict, one quick joke about that specific wrong "

@@ -289,7 +289,7 @@ async def main() -> None:
 
             print("== Game Show ==")
             show = await play(client, slug, players["Dana Reyes"], "show", 0.75, lifelines=True, label="show/Dana")
-            for expected in ("Warm-Up", "Picture Round", "The Deep End", "Lightning Round", "Final Wager"):
+            for expected in ("Opening Round", "Picture Round", "The Deep End", "Lightning Round", "Final Wager"):
                 check(expected in show["rounds"], f"show has a '{expected}' round")
             check("music" in show["slots"], "show includes a music break")
             # (The final is held back by its wager rather than a seal, so it is not in this list.)

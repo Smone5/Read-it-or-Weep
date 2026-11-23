@@ -97,6 +97,7 @@ const CLIP_WAIT_MS = 2500 // a music clip that has not started by now: start the
 const STREAKS_WORTH_SHOUTING = [3, 5, 7, 10, 15, 20] // right answers in a row that get a fanfare
 
 const ROUND_BLURB: Record<string, string> = {
+  'Opening Round': 'Easy ones first',
   'Warm-Up': 'Easy ones first',
   'Music Break': 'Name that tune',
   'Picture Round': 'Charts and pictures',

@@ -95,9 +95,9 @@ def build_plan(mode: str, rules: dict, stock: dict[str, int], section_ids: list[
         breaks = int(cfg["music_rounds"]) if music else 0
         plan: list[dict] = []
         number = 1
-        # Start approachable: most Warm-Up slots are easy so new/younger players build momentum before difficulty ramps.
-        easy_warmup = max(1, first - 1) if first >= 3 else first
-        plan += [_slot("report", number, "Warm-Up", limit, difficulty="easy" if i < easy_warmup else "medium")
+        # Start approachable: most Opening Round slots are easy so players build momentum before difficulty ramps.
+        easy_opening = max(1, first - 1) if first >= 3 else first
+        plan += [_slot("report", number, "Opening Round", limit, difficulty="easy" if i < easy_opening else "medium")
                  for i in range(first)]
         if breaks >= 1:
             number += 1
